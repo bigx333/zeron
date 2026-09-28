@@ -75,6 +75,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import sh.zeron.android.design.Geist
+import sh.zeron.android.design.ZIcon
+import sh.zeron.android.design.ZIcons
+import androidx.compose.foundation.border
 import sh.zeron.android.design.TranscriptPalette
 import uniffi.zeron_core.ColorRole
 import uniffi.zeron_core.Widget
@@ -107,8 +110,8 @@ private fun Widget(state: TranscriptState, model: RowModel, w: Widget, palette: 
         }
         is WidgetKind.ToolStatus -> when {
             kind.running -> CircularProgressIndicator(Modifier.fillMaxSize().padding(1.dp), strokeWidth = 1.5.dp, color = Color(palette[ColorRole.TEXT_TERTIARY]))
-            else -> Icon(
-                if (kind.failed) Icons.Filled.Close else Icons.Filled.Check,
+            else -> ZIcon(
+                if (kind.failed) ZIcons.Close else ZIcons.Check,
                 null,
                 Modifier.fillMaxSize(),
                 tint = Color(palette[if (kind.failed) ColorRole.DANGER else ColorRole.TEXT_TERTIARY]),
@@ -119,8 +122,8 @@ private fun Widget(state: TranscriptState, model: RowModel, w: Widget, palette: 
         is WidgetKind.Working -> WorkingIndicator(kind.sinceMs, kind.streaming, palette)
         is WidgetKind.Detail -> Tap("${kind.title} details") { actions.showText(kind.title, w.payload ?: "", true) }
         is WidgetKind.Icon -> AssetIcon(kind.name, Color(palette[kind.color]))
-        is WidgetKind.Chevron -> Icon(
-            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+        is WidgetKind.Chevron -> ZIcon(
+            ZIcons.ChevronRight,
             null,
             Modifier.fillMaxSize().rotate(if (kind.expanded) 90f else 0f),
             tint = Color(palette[ColorRole.TEXT_TERTIARY]),
@@ -167,10 +170,10 @@ private fun CopyButton(payload: String, palette: TranscriptPalette) {
             },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            if (copied) Icons.Filled.Check else Icons.Outlined.ContentCopy,
+        ZIcon(
+            if (copied) ZIcons.Check else ZIcons.Copy,
             null,
-            Modifier.size(15.dp),
+            Modifier.size(16.dp),
             tint = if (copied) MaterialTheme.colorScheme.primary else Color(palette[ColorRole.TEXT_TERTIARY]),
         )
     }
@@ -213,9 +216,11 @@ fun elapsed(secs: Long): String = when {
 @Composable
 private fun AssetIcon(name: String, tint: Color) {
     val context = LocalContext.current
-    symbol(name)?.let {
-        Icon(it, null, Modifier.fillMaxSize(), tint = tint)
-        return
+    when (name) {
+        "square", "checkmark.square.fill" -> return TaskBox(name != "square", tint)
+        "arrow.triangle.branch" -> return ZIcon(ZIcons.Branch, null, Modifier.fillMaxSize(), tint = tint)
+        "exclamationmark.triangle" -> return ZIcon(ZIcons.Warning, null, Modifier.fillMaxSize(), tint = tint)
+        "questionmark.bubble" -> return ZIcon(ZIcons.Chat, null, Modifier.fillMaxSize(), tint = tint)
     }
     val image = remember(name) { IconAssets.load(context, name) } ?: return
     Image(
@@ -227,14 +232,19 @@ private fun AssetIcon(name: String, tint: Color) {
     )
 }
 
-/** The few SF Symbol names the layout engine uses, as Material symbols. */
-private fun symbol(name: String): androidx.compose.ui.graphics.vector.ImageVector? = when (name) {
-    "square" -> Icons.Outlined.CheckBoxOutlineBlank
-    "checkmark.square.fill" -> Icons.Filled.CheckBox
-    "arrow.triangle.branch" -> Icons.AutoMirrored.Outlined.CallSplit
-    "exclamationmark.triangle" -> Icons.Outlined.WarningAmber
-    "questionmark.bubble" -> Icons.AutoMirrored.Outlined.HelpOutline
-    else -> null
+/** A markdown task checkbox: a rounded square, filled with a check when done. */
+@Composable
+private fun TaskBox(checked: Boolean, tint: Color) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .padding(2.dp)
+            .clip(RoundedCornerShape(5.dp))
+            .then(if (checked) Modifier.background(tint) else Modifier.border(1.5.dp, tint, RoundedCornerShape(5.dp))),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (checked) ZIcon(ZIcons.Check, null, Modifier.fillMaxSize().padding(1.dp), tint = MaterialTheme.colorScheme.onPrimary)
+    }
 }
 
 object IconAssets {

@@ -28,6 +28,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.runtime.remember
+import sh.zeron.android.design.ZIcons
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -87,39 +98,36 @@ private fun MainNav(model: AppModel) {
 
 private enum class Tab { Sessions, Settings }
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun Home(model: AppModel, nav: NavHostController) {
     var tab by rememberSaveable { mutableStateOf(if (model.launch.route == "settings") Tab.Settings else Tab.Sessions) }
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        bottomBar = {
-            ShortNavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
-                ShortNavigationBarItem(
-                    selected = tab == Tab.Sessions,
-                    onClick = { tab = Tab.Sessions },
-                    icon = { Icon(if (tab == Tab.Sessions) Icons.Filled.ChatBubble else Icons.Outlined.ChatBubbleOutline, null) },
-                    label = { Text("Sessions") },
-                )
-                ShortNavigationBarItem(
-                    selected = tab == Tab.Settings,
-                    onClick = { tab = Tab.Settings },
-                    icon = { Icon(if (tab == Tab.Settings) Icons.Filled.Settings else Icons.Outlined.Settings, null) },
-                    label = { Text("Settings") },
-                )
-            }
-        },
-    ) { padding ->
-        Box(Modifier.padding(bottom = padding.calculateBottomPadding())) {
-            when (tab) {
-                Tab.Sessions -> SessionsScreen(
-                    model,
-                    onOpen = { nav.navigate(Routes.chat(it)) },
-                    onNew = { nav.navigate(Routes.NEW) },
-                    onSearch = { nav.navigate(Routes.SEARCH) },
-                )
-                Tab.Settings -> SettingsScreen(model)
-            }
+    val workspace by model.workspace.collectAsState()
+    val summary = remember(workspace) { workspace?.let { liveSummary(it) } }
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        when (tab) {
+            Tab.Sessions -> SessionsScreen(model, onOpen = { nav.navigate(Routes.chat(it)) })
+            Tab.Settings -> SettingsScreen(model)
+        }
+        // Floating chrome over a soft scrim: new session, then the nav capsule.
+        Column(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(Brush.verticalGradient(0f to Color.Transparent, 0.25f to MaterialTheme.colorScheme.background.copy(alpha = 0.94f), 0.6f to MaterialTheme.colorScheme.background))
+                .navigationBarsPadding()
+                .padding(top = 28.dp, bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            if (tab == Tab.Sessions) NewSessionBar(summary, onClick = { nav.navigate(Routes.NEW) })
+            FloatingNavBar(
+                listOf(
+                    NavItem("Sessions", ZIcons.TabSessions, tab == Tab.Sessions) { tab = Tab.Sessions },
+                    NavItem("Settings", ZIcons.TabSettings, tab == Tab.Settings) { tab = Tab.Settings },
+                ),
+                trailing = {
+                    TonalCircleButton(ZIcons.Search, "Search", onClick = { nav.navigate(Routes.SEARCH) }, size = 72.dp)
+                },
+            )
         }
     }
 }

@@ -10,6 +10,12 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
+import sh.zeron.android.design.ZIcons
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -133,86 +139,62 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
     var overflow by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
 
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(composer.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            subtitle,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-                },
-                actions = {
-                    IconButton(onClick = { overflow = true }) { Icon(Icons.Outlined.MoreVert, "More") }
-                    DropdownMenu(expanded = overflow, onDismissRequest = { overflow = false }) {
-                        DropdownMenuItem(
-                            text = { Text("Copy transcript") },
-                            leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
-                            onClick = {
-                                transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) }
-                                overflow = false
-                            },
-                        )
-                        row?.let { r ->
-                            DropdownMenuItem(
-                                text = { Text(if (r.pinned) "Unpin" else "Pin") },
-                                leadingIcon = { Icon(Icons.Outlined.PushPin, null) },
-                                onClick = { model.setPinned(chatId, !r.pinned); overflow = false },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Archive") },
-                                leadingIcon = { Icon(Icons.Outlined.Archive, null) },
-                                onClick = { model.archive(chatId); overflow = false; onBack() },
-                            )
-                        }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
-            )
-        },
-    ) { padding ->
-        Box(Modifier.padding(top = padding.calculateTopPadding()).fillMaxSize()) {
-            Transcript(transcript, actions, Modifier.fillMaxSize())
-            val density = LocalDensity.current
-            Column(
-                Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    // The transcript fades out behind the composer.
-                    .background(Brush.verticalGradient(0f to Color.Transparent, 0.35f to MaterialTheme.colorScheme.background))
-                    .imePadding()
-                    .navigationBarsPadding()
-                    .onSizeChanged { transcript.bottomInset = with(density) { it.height.toDp().value } + 8f },
-            ) {
-                val showJump by remember { derivedStateOf { !transcript.following && transcript.distanceFromBottom > 400f } }
-                Box(Modifier.fillMaxWidth()) {
-                    androidx.compose.animation.AnimatedVisibility(
-                        showJump,
-                        enter = fadeIn() + scaleIn(),
-                        exit = fadeOut() + scaleOut(),
-                        modifier = Modifier.align(Alignment.Center).padding(bottom = 8.dp),
-                    ) {
-                        SmallFloatingActionButton(
-                            onClick = { transcript.scrollToBottom() },
-                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        ) { Icon(Icons.Filled.KeyboardArrowDown, "Jump to latest") }
-                    }
-                }
-                Banner(composer, connectivity?.state, onRetry = { runCatching { handle.retryDelivery() } })
-                composer.openInput?.let { QuestionPanel(it) { answers -> runCatching { handle.respondInput(it.requestId, answers) } } }
-                if (composer.queue.isNotEmpty()) QueuePanel(composer.queue, handle)
-                Composer(model, core, handle, composer, row, onSend = { transcript.scrollToBottom() })
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        val density = LocalDensity.current
+        val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 64.dp
+        Transcript(transcript, actions, Modifier.fillMaxSize().padding(top = top))
+        // Round tonal controls over a scrim, the title centered between them.
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(Brush.verticalGradient(0.7f to MaterialTheme.colorScheme.background, 1f to Color.Transparent))
+                .statusBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TonalCircleButton(ZIcons.Back, "Back", onClick = onBack)
+            Column(Modifier.weight(1f).padding(horizontal = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(composer.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMediumEmphasized)
+                Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            Box {
+                TonalCircleButton(ZIcons.More, "More", onClick = { overflow = true })
+                ActionMenu(
+                    overflow,
+                    { overflow = false },
+                    listOfNotNull(
+                        MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
+                        row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
+                        row?.let { MenuAction("Archive", ZIcons.Archive) { model.archive(chatId); onBack() } },
+                    ),
+                )
+            }
+        }
+        Column(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                // The transcript fades out behind the composer.
+                .background(Brush.verticalGradient(0f to Color.Transparent, 0.35f to MaterialTheme.colorScheme.background))
+                .imePadding()
+                .navigationBarsPadding()
+                .onSizeChanged { transcript.bottomInset = with(density) { it.height.toDp().value } + 8f },
+        ) {
+            val showJump by remember { derivedStateOf { !transcript.following && transcript.distanceFromBottom > 400f } }
+            Box(Modifier.fillMaxWidth()) {
+                androidx.compose.animation.AnimatedVisibility(
+                    showJump,
+                    enter = fadeIn() + scaleIn(),
+                    exit = fadeOut() + scaleOut(),
+                    modifier = Modifier.align(Alignment.Center).padding(bottom = 8.dp),
+                ) {
+                    TonalCircleButton(ZIcons.ArrowDown, "Jump to latest", onClick = { transcript.scrollToBottom() }, size = 44.dp)
+                }
+            }
+            Banner(composer, connectivity?.state, onRetry = { runCatching { handle.retryDelivery() } })
+            composer.openInput?.let { QuestionPanel(it) { answers -> runCatching { handle.respondInput(it.requestId, answers) } } }
+            if (composer.queue.isNotEmpty()) QueuePanel(composer.queue, handle)
+            Composer(model, core, handle, composer, row, onSend = { transcript.scrollToBottom() })
         }
     }
 
