@@ -122,7 +122,16 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
         }
     }
 
+    val list = androidx.compose.foundation.lazy.rememberLazyListState()
+    val density = androidx.compose.ui.platform.LocalDensity.current
     Box(Modifier.fillMaxSize()) {
+        sh.zeron.android.design.WallpaperHero(
+            model.wallpaper,
+            scrollFade = {
+                if (list.firstVisibleItemIndex > 0) 0f
+                else 1f - list.firstVisibleItemScrollOffset / (with(density) { 400.dp.toPx() })
+            },
+        )
         PullToRefreshBox(
             isRefreshing = refreshing,
             onRefresh = {
@@ -143,6 +152,7 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
             },
         ) {
             LazyColumn(
+                state = list,
                 contentPadding = PaddingValues(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 8.dp, bottom = 200.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {

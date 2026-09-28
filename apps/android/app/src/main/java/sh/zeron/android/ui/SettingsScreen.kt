@@ -35,6 +35,7 @@ import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -48,6 +49,7 @@ import sh.zeron.android.design.ThemeMode
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import uniffi.zeron_core.coreVersion
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -124,6 +126,8 @@ fun SettingsScreen(model: AppModel) {
                 ) { Text("Wallpaper colors") }
             }
         }
+        section("Wallpaper")
+        item { WallpaperSettings(model) }
         if (devices.isNotEmpty()) {
             section("Devices")
             item {
@@ -204,5 +208,49 @@ fun IconTile(
 ) {
     Box(Modifier.size(40.dp).clip(RoundedCornerShape(14.dp)).background(container), contentAlignment = Alignment.Center) {
         ZIcon(icon, null, Modifier.size(22.dp), tint = content)
+    }
+}
+
+/** Wallpaper: shown behind new sessions and the sessions list (iOS parity). */
+@Composable
+private fun WallpaperSettings(model: AppModel) {
+    val store = model.wallpaper
+    val state by store.state.collectAsState()
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val picker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),
+    ) { uri -> if (uri != null) scope.launch { store.set(uri, "Photo") } }
+    var effects by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    val rows = if (state.set) 3 else 1
+    Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+        SegmentedListItem(
+            onClick = {
+                picker.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
+            },
+            shapes = segmentedShapes(0, rows),
+            colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+            leadingContent = { IconTile(ZIcons.Image) },
+            supportingContent = { Text(if (state.set) state.name ?: "Photo" else "Shown behind new sessions and the sessions list") },
+        ) { Text(if (state.set) "Change wallpaper" else "Choose wallpaper") }
+        if (state.set) {
+            Box {
+                SegmentedListItem(
+                    onClick = { effects = true },
+                    shapes = segmentedShapes(1, rows),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    leadingContent = { IconTile(ZIcons.Magic) },
+                    supportingContent = { Text("${sh.zeron.android.core.WallpaperStore.label(state.effect)} — ${sh.zeron.android.core.WallpaperStore.detail(state.effect)}") },
+                ) { Text("Effect") }
+                ChoiceMenu(effects, { effects = false }, listOf(MenuSection("Effect", sh.zeron.android.core.WallpaperStore.effects.map { e ->
+                    MenuChoice(sh.zeron.android.core.WallpaperStore.label(e), e == state.effect) { store.setEffect(e) }
+                })))
+            }
+            SegmentedListItem(
+                onClick = { store.remove() },
+                shapes = segmentedShapes(2, rows),
+                colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                leadingContent = { IconTile(ZIcons.Delete, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) },
+            ) { Text("Remove wallpaper", color = MaterialTheme.colorScheme.error) }
+        }
     }
 }
