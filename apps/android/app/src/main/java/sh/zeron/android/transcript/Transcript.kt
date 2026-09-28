@@ -1,0 +1,312 @@
+package sh.zeron.android.transcript
+
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberScrollableState
+import androidx.compose.foundation.gestures.scrollable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.overscroll
+import androidx.compose.foundation.rememberOverscrollEffect
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.FileCopy
+import androidx.compose.material.icons.outlined.TextFields
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import sh.zeron.android.design.LocalDarkTheme
+import sh.zeron.android.design.TranscriptPalette
+import uniffi.zeron_core.LayoutFrame
+import uniffi.zeron_core.RowPlacement
+import kotlin.math.abs
+import kotlin.math.exp
+import kotlin.math.floor
+import kotlin.math.min
+import kotlin.math.roundToInt
+
+/** What the transcript asks of its host (links, images, text sheets). */
+class TranscriptActions(
+    val openUrl: (String) -> Unit,
+    val loadImage: suspend (String) -> androidx.compose.ui.graphics.ImageBitmap?,
+    val showText: (title: String, text: String, mono: Boolean) -> Unit,
+)
+
+private const val OVERSCAN = 700f
+private const val BAND = 256f
+
+/**
+ * Virtualized transcript. Only rows intersecting the viewport (plus overscan)
+ * are composed; each paints its Rust display list on a canvas at the exact
+ * Rust coordinates, so measurement and rendering can't disagree.
+ */
+@Composable
+fun Transcript(state: TranscriptState, actions: TranscriptActions, modifier: Modifier = Modifier) {
+    val density = LocalDensity.current
+    val d = density.density
+    val scheme = MaterialTheme.colorScheme
+    val dark = LocalDarkTheme.current
+    val palette = remember(scheme, dark) { TranscriptPalette(dark, scheme) }
+    val interactions = remember { MutableInteractionSource() }
+    val scrollable = rememberScrollableState { px -> -state.scrollBy(-px / d) * d }
+    val overscroll = rememberOverscrollEffect()
+
+    LaunchedEffect(interactions) {
+        interactions.interactions.collect { i ->
+            when (i) {
+                is DragInteraction.Start -> {
+                    state.dragging = true
+                    state.following = false
+                }
+                is DragInteraction.Stop, is DragInteraction.Cancel -> {
+                    state.dragging = false
+                    if (state.distanceFromBottom < 70f) state.following = true
+                }
+            }
+        }
+    }
+
+    // Follow spring: a critically damped approach to the tail, run only
+    // while there's distance to cover (idle transcripts don't tick).
+    LaunchedEffect(state) {
+        snapshotFlow { state.following && !state.dragging && abs(state.maxOffset - state.offset) > 0.5f }
+            .distinctUntilChanged()
+            .collectLatest { chasing ->
+                if (!chasing) return@collectLatest
+                var last = withFrameNanos { it }
+                while (true) {
+                    val now = withFrameNanos { it }
+                    val dt = min(1f / 30f, (now - last) / 1e9f)
+                    last = now
+                    val target = state.maxOffset
+                    val delta = target - state.offset
+                    if (abs(delta) < 0.5f) {
+                        state.offset = target
+                        break
+                    }
+                    state.offset += delta * (1f - exp(-dt * 16f))
+                }
+            }
+    }
+
+    BoxWithConstraints(
+        modifier
+            .clipToBounds()
+            .overscroll(overscroll)
+            .scrollable(
+                scrollable,
+                Orientation.Vertical,
+                overscrollEffect = overscroll,
+                interactionSource = interactions,
+            ),
+    ) {
+        val widthDp = maxWidth.value
+        val heightDp = maxHeight.value
+        state.setViewport(widthDp, heightDp, density.fontScale)
+        val frame = state.frame ?: return@BoxWithConstraints
+        if (frame.styleCount().toInt() != state.fonts.count) state.fonts.update(frame.styles(), d)
+
+        // The realized band moves in coarse steps: scrolling within a band
+        // only re-places rows, it never recomposes.
+        val band by remember(state) {
+            derivedStateOf { floor((state.offset - OVERSCAN) / BAND) * BAND }
+        }
+        val placements = remember(frame, band, heightDp) {
+            frame.rowsIn(band, band + heightDp + OVERSCAN * 2 + BAND)
+        }
+        Layout(
+            content = {
+                for (p in placements) {
+                    key(p.key) { RowHost(state, frame, p, palette, actions) }
+                }
+            },
+        ) { measurables, constraints ->
+            val w = constraints.maxWidth
+            val placeables = measurables.mapIndexed { i, m ->
+                val h = (placements[i].height * d).roundToInt()
+                m.measure(Constraints.fixed(w, h))
+            }
+            layout(w, constraints.maxHeight) {
+                val off = state.offset
+                placeables.forEachIndexed { i, pl ->
+                    pl.placeRelative(0, ((placements[i].y - off) * d).roundToInt())
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RowHost(
+    state: TranscriptState,
+    frame: LayoutFrame,
+    p: RowPlacement,
+    palette: TranscriptPalette,
+    actions: TranscriptActions,
+) {
+    val model = remember(p.key, p.version, frame.width()) { state.model(frame, p.index, p.key, p.version) } ?: return
+    val d = LocalDensity.current.density
+    val fonts = state.fonts
+
+    // Streaming veil: freshly appended text fades in over the settled row.
+    val veil = remember(p.key) { Animatable(1f) }
+    var veilFrom by remember(p.key) { mutableStateOf(0) }
+    var previous by remember(p.key) { mutableStateOf<RowModel?>(null) }
+    LaunchedEffect(model) {
+        val prev = previous
+        previous = model
+        if (prev != null && prev !== model && model.display.text.length > prev.display.text.length &&
+            model.display.text.startsWith(prev.display.text)
+        ) {
+            veilFrom = prev.display.text.length
+            veil.snapTo(0f)
+            veil.animateTo(1f, tween(220))
+        }
+    }
+
+    // Rows that arrive after the first frame fade in.
+    val appear = remember(p.key) { Animatable(if (state.knownKeys.add(p.key) && state.settled) 0f else 1f) }
+    LaunchedEffect(p.key) { if (appear.value < 1f) appear.animateTo(1f, tween(280)) }
+
+    var menuAt by remember { mutableStateOf<Offset?>(null) }
+    val haptics = LocalHapticFeedback.current
+
+    Box(
+        Modifier
+            .graphicsLayer { alpha = appear.value }
+            .drawBehind {
+                drawIntoCanvas { c ->
+                    val canvas = c.nativeCanvas
+                    val v = veil.value
+                    if (v >= 1f) {
+                        model.draw(canvas, 0, d, fonts, palette)
+                    } else {
+                        model.draw(canvas, 0, d, fonts, palette, RowModel.Pass.Settled(veilFrom))
+                        val save = canvas.saveLayerAlpha(null, (v * 255).toInt())
+                        model.draw(canvas, 0, d, fonts, palette, RowModel.Pass.Fresh(veilFrom))
+                        canvas.restoreToCount(save)
+                    }
+                }
+            }
+            .pointerTaps(model, d, actions, onLongPress = {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                menuAt = it
+            }),
+    ) {
+        model.display.scrollers.forEachIndexed { i, s ->
+            val scroll = rememberScrollState()
+            Box(
+                Modifier
+                    .offset(s.x.dp, s.y.dp)
+                    .size(s.w.dp, s.h.dp)
+                    .horizontalScroll(scroll),
+            ) {
+                Box(
+                    Modifier
+                        .size(s.contentWidth.dp, s.h.dp)
+                        .drawBehind { drawIntoCanvas { model.draw(it.nativeCanvas, i + 1, d, fonts, palette) } },
+                ) {
+                    RowWidgets(state, model, scroller = i.toUInt(), palette, actions)
+                }
+            }
+        }
+        RowWidgets(state, model, scroller = null, palette, actions)
+        menuAt?.let { at -> RowMenu(state, frame, p, model, at, actions) { menuAt = null } }
+    }
+}
+
+/** Link taps (row coordinates) and the long-press menu. */
+private fun Modifier.pointerTaps(model: RowModel, d: Float, actions: TranscriptActions, onLongPress: (Offset) -> Unit) =
+    pointerInput(model) {
+        detectTapGestures(
+            onTap = { pos ->
+                val x = pos.x / d
+                val y = pos.y / d
+                model.display.links.firstOrNull { l ->
+                    l.scroller == null && x >= l.x - 4 && x <= l.x + l.w + 4 && y >= l.y - 2 && y <= l.y + l.h + 2
+                }?.let { actions.openUrl(it.url) }
+            },
+            onLongPress = onLongPress,
+        )
+    }
+
+@Composable
+private fun RowMenu(
+    state: TranscriptState,
+    frame: LayoutFrame,
+    p: RowPlacement,
+    model: RowModel,
+    at: Offset,
+    actions: TranscriptActions,
+    dismiss: () -> Unit,
+) {
+    val clipboard = LocalClipboardManager.current
+    val density = LocalDensity.current
+    val block = model.display.copyText
+    val message = remember(frame, p.index) { frame.messageText(p.index) }
+    Box(Modifier.offset(with(density) { at.x.toDp() }, with(density) { at.y.toDp() })) {
+        DropdownMenu(expanded = true, onDismissRequest = dismiss) {
+            if (block.isNotEmpty()) {
+                DropdownMenuItem(
+                    text = { Text("Copy") },
+                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
+                    onClick = { clipboard.setText(AnnotatedString(block)); dismiss() },
+                )
+            }
+            if (!message.isNullOrEmpty() && message != block) {
+                DropdownMenuItem(
+                    text = { Text("Copy message") },
+                    leadingIcon = { Icon(Icons.Outlined.FileCopy, null) },
+                    onClick = { clipboard.setText(AnnotatedString(message)); dismiss() },
+                )
+            }
+            val selectable = message ?: block
+            if (selectable.isNotEmpty()) {
+                DropdownMenuItem(
+                    text = { Text("Select text") },
+                    leadingIcon = { Icon(Icons.Outlined.TextFields, null) },
+                    onClick = { actions.showText("Select text", selectable, false); dismiss() },
+                )
+            }
+        }
+    }
+}
