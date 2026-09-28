@@ -60,6 +60,8 @@ data class LaunchOptions(
     val noProjects: Boolean = false,
     val signedOut: Boolean = false,
     val route: String? = null,
+    val wallpaper: String? = null,
+    val wallpaperEffect: String? = null,
 )
 
 /**
@@ -71,6 +73,7 @@ class AppModel(private val app: Application) {
     private val scope = MainScope()
     private val main = Handler(Looper.getMainLooper())
     val credentials = CredentialStore(app)
+    val wallpaper = WallpaperStore(app)
 
     private val _client = MutableStateFlow<CoreClient?>(null)
     val client: StateFlow<CoreClient?> = _client.asStateFlow()
@@ -141,6 +144,14 @@ class AppModel(private val app: Application) {
         if (_client.value != null) return
         if (options.signedOut) credentials.clear()
         watchNetwork()
+        // `wallpaper <path>` / `wallpaper none` and `wallpaper-effect <name>`:
+        // set the wallpaper at launch (screenshots, tests).
+        options.wallpaper?.let { path ->
+            if (path == "none") wallpaper.remove() else scope.launch { wallpaper.set(File(path)) }
+        }
+        options.wallpaperEffect?.let { name ->
+            WallpaperStore.effects.firstOrNull { it.name.equals(name, ignoreCase = true) }?.let(wallpaper::setEffect)
+        }
         val stored = credentials.stored()
         when {
             options.demo -> start(Credentials.Demo(demoOptions()))

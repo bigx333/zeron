@@ -39,6 +39,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.background
 import androidx.compose.ui.focus.FocusRequester
@@ -120,14 +122,17 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
         if (id != null) onCreated(id) else scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }
     }
 
+    var composerBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    sh.zeron.android.design.WallpaperHero(model.wallpaper, cutout = { composerBounds })
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = { Text("New session", style = MaterialTheme.typography.titleLargeEmphasized, modifier = Modifier.padding(start = 12.dp)) },
                 navigationIcon = { TonalCircleButton(ZIcons.Close, "Close", onClick = onClose, modifier = Modifier.padding(start = 8.dp), size = 44.dp) },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
             )
         },
     ) { padding ->
@@ -166,7 +171,11 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
                 onAction = ::create,
                 alwaysCard = true,
                 focusRequester = focus,
-                modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp).widthIn(max = 768.dp),
+                modifier = Modifier
+                    .padding(horizontal = 12.dp)
+                    .padding(bottom = 8.dp)
+                    .widthIn(max = 768.dp)
+                    .onGloballyPositioned { composerBounds = it.boundsInRoot() },
             ) {
                 ProjectChip(draft, projects, onPick = { draft = it })
                 if (project != null) {
@@ -183,6 +192,7 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
             }
         }
     }
+}
 }
 
 @Composable
