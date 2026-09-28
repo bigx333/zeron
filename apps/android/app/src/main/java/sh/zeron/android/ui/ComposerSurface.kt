@@ -73,110 +73,10 @@ import androidx.compose.ui.unit.dp
 /** What the composer's trailing button does right now. */
 enum class ComposerAction { Send, Queue, Stop }
 
-/**
- * The composer, shared by sessions and the new-session page. One tonal
- * surface with two states: a resting one-line capsule — [+] Message… [↑] —
- * and, while focused or holding a draft, a card with the full-width prompt
- * above a toolbar of context chips.
- */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
-@Composable
-fun ComposerSurface(
-    text: String,
-    onText: (String) -> Unit,
-    placeholder: String,
-    action: ComposerAction,
-    onAction: () -> Unit,
-    modifier: Modifier = Modifier,
-    alwaysCard: Boolean = false,
-    focusRequester: FocusRequester = remember { FocusRequester() },
-    chips: @Composable RowScope.() -> Unit = {},
-) {
-    var focused by remember { mutableStateOf(false) }
-    val card = alwaysCard || focused || text.isNotEmpty()
-    Surface(
-        shape = RoundedCornerShape(28.dp),
-        color = composerContainer(),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.animateContentSize(MaterialTheme.motionScheme.defaultSpatialSpec())) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.heightIn(min = 56.dp)) {
-                if (!card) {
-                    Spacer(Modifier.width(4.dp))
-                    AttachButton()
-                } else {
-                    Spacer(Modifier.width(20.dp))
-                }
-                Box(Modifier.weight(1f).padding(vertical = if (card) 16.dp else 8.dp)) {
-                    if (text.isEmpty()) {
-                        Text(placeholder, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-                    }
-                    BasicTextField(
-                        text,
-                        onText,
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
-                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                        maxLines = if (card) 8 else 2,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(focusRequester)
-                            .onFocusChanged { focused = it.isFocused },
-                    )
-                }
-                if (!card) {
-                    Spacer(Modifier.width(8.dp))
-                    ActionButton(action, text.isNotBlank(), onAction)
-                    Spacer(Modifier.width(8.dp))
-                } else {
-                    Spacer(Modifier.width(16.dp))
-                }
-            }
-            AnimatedVisibility(card, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(start = 4.dp, end = 8.dp, bottom = 8.dp),
-                ) {
-                    AttachButton()
-                    Row(
-                        Modifier
-                            .weight(1f)
-                            .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                            .drawWithContent {
-                                drawContent()
-                                // Chips scrolling under the send button fade out.
-                                val fade = 24.dp.toPx()
-                                drawRect(
-                                    Brush.horizontalGradient(listOf(Color.Black, Color.Transparent), startX = size.width - fade, endX = size.width),
-                                    topLeft = androidx.compose.ui.geometry.Offset(size.width - fade, 0f),
-                                    blendMode = BlendMode.DstIn,
-                                )
-                            }
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        content = chips,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    ActionButton(action, text.isNotBlank(), onAction)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AttachButton() {
-    // Attachments land with the picker; the affordance stays where it will live.
-    IconButton(onClick = {}, enabled = false) {
-        sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Plus, "Attach", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
-    }
-}
-
 /** Send / queue / stop: one control whose shape morphs on press. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun ActionButton(action: ComposerAction, hasText: Boolean, onClick: () -> Unit) {
+internal fun ActionButton(action: ComposerAction, hasText: Boolean, onClick: () -> Unit) {
     val haptics = LocalHapticFeedback.current
     AnimatedContent(
         action == ComposerAction.Stop && !hasText,
@@ -252,42 +152,6 @@ class MenuChoice(
 )
 
 class MenuSection(val title: String?, val choices: List<MenuChoice>)
-
-/** An expressive menu: labelled, segmented groups of selectable items. */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
-@Composable
-fun ChoiceMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<MenuSection>) {
-    DropdownMenuPopup(expanded = expanded, onDismissRequest = onDismiss) {
-        val groups = sections.filter { it.choices.isNotEmpty() }
-        groups.forEachIndexed { g, section ->
-            DropdownMenuGroup(shapes = MenuDefaults.groupShape(g, groups.size)) {
-                section.title?.let { title ->
-                    MenuDefaults.Label { Text(title, style = MaterialTheme.typography.labelMedium) }
-                }
-                section.choices.forEachIndexed { i, choice ->
-                    DropdownMenuItem(
-                        selected = choice.selected,
-                        onClick = {
-                            choice.onClick()
-                            onDismiss()
-                        },
-                        text = { Text(choice.label) },
-                        supportingText = choice.supporting?.let { { Text(it) } },
-                        shapes = MenuDefaults.itemShape(i, section.choices.size),
-                        leadingIcon = choice.leading,
-                        selectedLeadingIcon = { sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Check, null, Modifier.size(20.dp)) },
-                        colors = MenuDefaults.selectableItemColors(
-                            selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
-                            selectedTextColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                            selectedLeadingIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                        ),
-                    )
-                }
-            }
-            if (g < groups.size - 1) Spacer(Modifier.size(MenuDefaults.GroupSpacing))
-        }
-    }
-}
 
 class MenuAction(val label: String, @androidx.annotation.DrawableRes val icon: Int, val destructive: Boolean = false, val onClick: () -> Unit)
 

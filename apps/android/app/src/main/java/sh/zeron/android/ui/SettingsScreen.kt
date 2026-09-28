@@ -85,7 +85,7 @@ fun SettingsScreen(model: AppModel) {
         section("Appearance")
         item {
             Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
-                Surface(shape = ListItemDefaults.segmentedShapes(0, 2).shape, color = cardColor()) {
+                Surface(shape = segmentedShapes(0, 2).shape, color = cardColor()) {
                     Column(Modifier.padding(16.dp)) {
                         Text("Theme", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(12.dp))
@@ -116,7 +116,7 @@ fun SettingsScreen(model: AppModel) {
                 }
                 SegmentedListItem(
                     onClick = { model.setAppearance(appearance.copy(dynamicColor = !appearance.dynamicColor)) },
-                    shapes = ListItemDefaults.segmentedShapes(1, 2),
+                    shapes = segmentedShapes(1, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Magic) },
                     supportingContent = { Text("Tint Zeron with your wallpaper's palette") },
@@ -131,7 +131,7 @@ fun SettingsScreen(model: AppModel) {
                     devices.forEachIndexed { i, device ->
                         SegmentedListItem(
                             onClick = {},
-                            shapes = ListItemDefaults.segmentedShapes(i, devices.size),
+                            shapes = segmentedShapes(i, devices.size),
                             colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                             leadingContent = {
                                 IconTile(
@@ -168,14 +168,14 @@ fun SettingsScreen(model: AppModel) {
             Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                 SegmentedListItem(
                     onClick = {},
-                    shapes = ListItemDefaults.segmentedShapes(0, 2),
+                    shapes = segmentedShapes(0, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Info) },
                     supportingContent = { Text("Zeron for Android · core ${coreVersion()}") },
                 ) { Text("Version") }
                 SegmentedListItem(
                     onClick = { model.signOut() },
-                    shapes = ListItemDefaults.segmentedShapes(1, 2),
+                    shapes = segmentedShapes(1, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Logout, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) },
                 ) { Text(if (model.isDemo) "Leave demo" else "Sign out", color = MaterialTheme.colorScheme.error) }

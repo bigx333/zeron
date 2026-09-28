@@ -39,6 +39,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -74,7 +76,7 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
     val workspace by model.workspace.collectAsState()
     val client by model.client.collectAsState()
     var draft by remember { mutableStateOf(model.lastDraft) }
-    var text by rememberSaveable { mutableStateOf("") }
+    val composer = remember { ComposerModel() }
     val focus = remember { FocusRequester() }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -114,7 +116,7 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
 
     fun create() {
         model.lastDraft = draft
-        val id = model.createSession(draft.copy(model = draft.model ?: choice?.model?.id), text.trim())
+        val id = model.createSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.images.map { it.outgoing })
         if (id != null) onCreated(id) else scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }
     }
 
@@ -149,9 +151,16 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
                     )
                 }
             }
+            MentionSuggestions(
+                composer,
+                search = { q ->
+                    val c = client
+                    if (c == null || project == null) emptyList() else c.searchFiles(project.deviceId, null, project.id, q)
+                },
+                modifier = Modifier.padding(horizontal = 12.dp).widthIn(max = 768.dp),
+            )
             ComposerSurface(
-                text = text,
-                onText = { text = it },
+                model = composer,
                 placeholder = "Describe the task",
                 action = ComposerAction.Send,
                 onAction = ::create,
@@ -191,24 +200,127 @@ private fun ProjectChip(
             else ZIcon(ZIcons.Home, null, Modifier.size(16.dp))
         },
         onClick = { open = true },
-    ) {
-        val sections = projects.groupBy { it.deviceId }.values.map { list ->
-            val first = list.first()
-            MenuSection(
-                (first.deviceName ?: "Host") + if (!first.deviceOnline) " · offline" else "",
-                list.map { p ->
-                    MenuChoice(p.name, p.id == draft.projectId, leading = { ProjectTile(p.name, p.colorIndex.toInt(), 24.dp) }) {
-                        onPick(draft.copy(projectId = p.id, hostId = null, branch = null))
-                    }
-                },
-            )
-        } + MenuSection(null, listOf(
-            MenuChoice("No project", draft.projectId == null, "Run in a host's home folder", leading = { ZIcon(ZIcons.Home, null, Modifier.size(22.dp)) }) {
-                onPick(draft.copy(projectId = null, hostId = draft.hostId ?: projects.firstOrNull()?.deviceId, worktree = false))
-            },
-        ))
-        ChoiceMenu(open, { open = false }, sections)
+    )
+    if (open) ProjectSheet(draft, projects, onDismiss = { open = false }) {
+        onPick(it)
+        open = false
     }
+}
+
+/** Projects grouped by the machine they live on; the choice keeps its tile and gains a check. */
+@Composable
+private fun ProjectSheet(
+    draft: sh.zeron.android.core.NewSessionDraft,
+    projects: List<uniffi.zeron_core.ProjectView>,
+    onDismiss: () -> Unit,
+    onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
+) {
+    val sheet = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheet,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        androidx.compose.foundation.lazy.LazyColumn(contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)) {
+            item {
+                Text(
+                    "Project",
+                    style = MaterialTheme.typography.headlineSmallEmphasized,
+                    modifier = Modifier.padding(start = 24.dp, bottom = 8.dp),
+                )
+            }
+            val byDevice = projects.groupBy { it.deviceId }.values.sortedByDescending { it.first().deviceOnline }
+            for (group in byDevice) {
+                val host = group.first()
+                item("h-${host.deviceId}") {
+                    androidx.compose.foundation.layout.Row(
+                        Modifier.padding(start = 24.dp, end = 24.dp, top = 16.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ZIcon(ZIcons.Laptop, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.size(8.dp))
+                        Text(host.deviceName ?: "Host", style = MaterialTheme.typography.titleSmallEmphasized, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.size(8.dp))
+                        Box(
+                            Modifier.size(8.dp).clip(androidx.compose.foundation.shape.CircleShape).background(
+                                if (host.deviceOnline) successColor() else MaterialTheme.colorScheme.outlineVariant,
+                            ),
+                        )
+                        if (!host.deviceOnline) {
+                            Spacer(Modifier.size(6.dp))
+                            Text("Offline", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
+                        }
+                    }
+                }
+                group.forEachIndexed { i, p ->
+                    item(p.id) {
+                        ProjectRow(
+                            selected = p.id == draft.projectId,
+                            index = i,
+                            count = group.size,
+                            leading = { ProjectTile(p.name, p.colorIndex.toInt(), 40.dp) },
+                            title = p.name,
+                            supporting = p.path.replace(Regex("^/(Users|home)/[^/]+"), "~"),
+                            mono = true,
+                        ) { onPick(draft.copy(projectId = p.id, hostId = null, branch = null)) }
+                    }
+                }
+            }
+            item("none") {
+                Spacer(Modifier.size(16.dp))
+                ProjectRow(
+                    selected = draft.projectId == null,
+                    index = 0,
+                    count = 1,
+                    leading = { IconTile(ZIcons.Home) },
+                    title = "No project",
+                    supporting = "Run in a host's home folder",
+                    mono = false,
+                ) { onPick(draft.copy(projectId = null, hostId = draft.hostId ?: projects.firstOrNull()?.deviceId, worktree = false)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProjectRow(
+    selected: Boolean,
+    index: Int,
+    count: Int,
+    leading: @Composable () -> Unit,
+    title: String,
+    supporting: String,
+    mono: Boolean,
+    onClick: () -> Unit,
+) {
+    androidx.compose.material3.SegmentedListItem(
+        onClick = onClick,
+        shapes = segmentedShapes(index, count),
+        colors = androidx.compose.material3.ListItemDefaults.segmentedColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else cardColor(),
+        ),
+        leadingContent = leading,
+        supportingContent = {
+            Text(
+                supporting,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = if (mono) sh.zeron.android.design.GeistMono else null,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+        },
+        trailingContent = if (selected) {
+            {
+                Box(
+                    Modifier.size(28.dp).clip(androidx.compose.foundation.shape.CircleShape).background(MaterialTheme.colorScheme.primary),
+                    contentAlignment = Alignment.Center,
+                ) { ZIcon(ZIcons.Check, "Selected", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onPrimary) }
+            }
+        } else {
+            null
+        },
+        modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = androidx.compose.material3.ListItemDefaults.SegmentedGap),
+    ) { Text(title, style = MaterialTheme.typography.titleMedium) }
 }
 
 @Composable

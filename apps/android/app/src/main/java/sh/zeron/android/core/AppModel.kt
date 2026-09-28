@@ -375,7 +375,7 @@ class AppModel(private val app: Application) {
     fun row(id: String): SessionRow? = _client.value?.sessionRow(id)
 
     /** Create the chat and send its first message. */
-    fun createSession(draft: NewSessionDraft, text: String): String? {
+    fun createSession(draft: NewSessionDraft, text: String, attachments: List<uniffi.zeron_core.OutgoingAttachment> = emptyList()): String? {
         val client = _client.value ?: return null
         val target = when {
             draft.projectId != null -> SessionTarget.Project(draft.projectId)
@@ -388,7 +388,7 @@ class AppModel(private val app: Application) {
             val handle = client.openSession(chatId)
             val project = _workspace.value?.projects?.firstOrNull { it.id == draft.projectId }
             val worktree = if (draft.worktree && project != null) WorktreeSpec(project.path, draft.branch ?: "HEAD", project.id) else null
-            handle.send(SendRequest(text, emptyList(), worktree, BusyPolicy.QUEUE))
+            handle.send(SendRequest(text, attachments, worktree, BusyPolicy.QUEUE))
             refreshWorkspace()
             chatId
         } catch (e: Exception) {

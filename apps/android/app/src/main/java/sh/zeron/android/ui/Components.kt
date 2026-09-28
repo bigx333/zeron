@@ -161,3 +161,12 @@ fun composerContainer(): Color =
 @Composable
 fun chipContainer(): Color =
     if (LocalDarkTheme.current) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainer
+
+/** Segmented list shapes, with a lone item rounded like a whole group. */
+@Composable
+fun segmentedShapes(index: Int, count: Int): androidx.compose.material3.ListItemShapes =
+    if (count == 1) {
+        androidx.compose.material3.ListItemDefaults.shapes(shape = RoundedCornerShape(24.dp))
+    } else {
+        androidx.compose.material3.ListItemDefaults.segmentedShapes(index, count)
+    }

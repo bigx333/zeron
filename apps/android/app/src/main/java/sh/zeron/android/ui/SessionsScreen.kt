@@ -253,7 +253,7 @@ private fun SwipeableSessionRow(
     archive: (SessionRow) -> Unit,
 ) {
     val state = rememberSwipeToDismissBoxState()
-    val shape = ListItemDefaults.segmentedShapes(index, count).shape
+    val shape = segmentedShapes(index, count).shape
     SwipeToDismissBox(
         state = state,
         enableDismissFromStartToEnd = false,
@@ -294,7 +294,7 @@ fun SessionItem(
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 menu = true
             },
-            shapes = ListItemDefaults.segmentedShapes(index, count),
+            shapes = segmentedShapes(index, count),
             colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
             leadingContent = { HarnessTile(row) },
             supportingContent = { Subline(row) },
