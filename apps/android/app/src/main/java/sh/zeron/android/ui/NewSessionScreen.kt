@@ -45,6 +45,8 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.design.HarnessMark
+import sh.zeron.android.design.ZIcon
+import sh.zeron.android.design.ZIcons
 import uniffi.zeron_core.ModelInfo
 import uniffi.zeron_core.fallbackHarnesses
 import uniffi.zeron_core.fallbackModels
@@ -121,8 +123,8 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
-                title = { Text("New session") },
-                navigationIcon = { IconButton(onClick = onClose) { Icon(Icons.Filled.Close, "Close") } },
+                title = { Text("New session", style = MaterialTheme.typography.titleLargeEmphasized, modifier = Modifier.padding(start = 12.dp)) },
+                navigationIcon = { TonalCircleButton(ZIcons.Close, "Close", onClick = onClose, modifier = Modifier.padding(start = 8.dp), size = 44.dp) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
             )
         },
@@ -186,7 +188,7 @@ private fun ProjectChip(
         project?.name ?: "No project",
         leading = {
             if (project != null) ProjectTile(project.name, project.colorIndex.toInt(), 18.dp)
-            else Icon(Icons.Outlined.Inbox, null, Modifier.size(16.dp))
+            else ZIcon(ZIcons.Home, null, Modifier.size(16.dp))
         },
         onClick = { open = true },
     ) {
@@ -201,7 +203,7 @@ private fun ProjectChip(
                 },
             )
         } + MenuSection(null, listOf(
-            MenuChoice("No project", draft.projectId == null, "Run in a host's home folder", leading = { Icon(Icons.Outlined.Inbox, null) }) {
+            MenuChoice("No project", draft.projectId == null, "Run in a host's home folder", leading = { ZIcon(ZIcons.Home, null, Modifier.size(22.dp)) }) {
                 onPick(draft.copy(projectId = null, hostId = draft.hostId ?: projects.firstOrNull()?.deviceId, worktree = false))
             },
         ))
@@ -218,7 +220,7 @@ private fun HostChip(
     var open by remember { mutableStateOf(false) }
     ContextChip(
         hosts.firstOrNull { it.id == draft.hostId }?.name ?: "Choose host",
-        leading = { Icon(Icons.Outlined.Computer, null, Modifier.size(16.dp)) },
+        leading = { ZIcon(ZIcons.Laptop, null, Modifier.size(16.dp)) },
         onClick = { open = true },
     ) {
         ChoiceMenu(open, { open = false }, listOf(MenuSection("Run on", hosts.map { h ->
@@ -246,7 +248,7 @@ private fun BranchChip(
     }
     ContextChip(
         if (draft.worktree) "New worktree" else draft.branch ?: "Current branch",
-        leading = { Icon(Icons.AutoMirrored.Outlined.CallSplit, null, Modifier.size(16.dp)) },
+        leading = { ZIcon(ZIcons.Branch, null, Modifier.size(16.dp)) },
         onClick = { open = true },
     ) {
         val branches = refs.orEmpty()
@@ -286,7 +288,7 @@ private fun ModelChip(
 @Composable
 private fun EffortChip(effort: String, efforts: List<String>, onPick: (String) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    ContextChip(reasoningLabel(effort), leading = { Icon(Icons.Outlined.Speed, null, Modifier.size(16.dp)) }, onClick = { open = true }) {
+    ContextChip(reasoningLabel(effort), leading = { ZIcon(ZIcons.Effort, null, Modifier.size(16.dp)) }, onClick = { open = true }) {
         ChoiceMenu(open, { open = false }, listOf(MenuSection("Reasoning effort", efforts.map { e ->
             MenuChoice(reasoningLabel(e), e == effort) { onPick(e) }
         })))

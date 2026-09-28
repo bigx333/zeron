@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import sh.zeron.android.design.LocalDarkTheme
+import sh.zeron.android.design.ZIcons
 import sh.zeron.android.design.TranscriptPalette
 import uniffi.zeron_core.LayoutFrame
 import uniffi.zeron_core.RowPlacement
@@ -284,29 +285,15 @@ private fun RowMenu(
     val block = model.display.copyText
     val message = remember(frame, p.index) { frame.messageText(p.index) }
     Box(Modifier.offset(with(density) { at.x.toDp() }, with(density) { at.y.toDp() })) {
-        DropdownMenu(expanded = true, onDismissRequest = dismiss) {
-            if (block.isNotEmpty()) {
-                DropdownMenuItem(
-                    text = { Text("Copy") },
-                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
-                    onClick = { clipboard.setText(AnnotatedString(block)); dismiss() },
-                )
-            }
-            if (!message.isNullOrEmpty() && message != block) {
-                DropdownMenuItem(
-                    text = { Text("Copy message") },
-                    leadingIcon = { Icon(Icons.Outlined.FileCopy, null) },
-                    onClick = { clipboard.setText(AnnotatedString(message)); dismiss() },
-                )
-            }
-            val selectable = message ?: block
-            if (selectable.isNotEmpty()) {
-                DropdownMenuItem(
-                    text = { Text("Select text") },
-                    leadingIcon = { Icon(Icons.Outlined.TextFields, null) },
-                    onClick = { actions.showText("Select text", selectable, false); dismiss() },
-                )
-            }
-        }
+        val selectable = message ?: block
+        sh.zeron.android.ui.ActionMenu(
+            true,
+            dismiss,
+            listOfNotNull(
+                if (block.isNotEmpty()) sh.zeron.android.ui.MenuAction("Copy", ZIcons.Copy) { clipboard.setText(AnnotatedString(block)) } else null,
+                if (!message.isNullOrEmpty() && message != block) sh.zeron.android.ui.MenuAction("Copy message", ZIcons.Chat) { clipboard.setText(AnnotatedString(message)) } else null,
+                if (selectable.isNotEmpty()) sh.zeron.android.ui.MenuAction("Select text", ZIcons.Text) { actions.showText("Select text", selectable, false) } else null,
+            ),
+        )
     }
 }

@@ -29,8 +29,10 @@ val genIcons by tasks.registering(Exec::class) {
     description = "Rasterizes the shared transcript icons."
     val out = iconsOut.get().asFile
     inputs.dir(repoRoot.resolve("apps/ios/Zeron/Assets.xcassets"))
+    inputs.dir(repoRoot.resolve("crates/ui/assets/icons"))
+    inputs.file(repoRoot.resolve("scripts/android/svg2vd.py"))
     outputs.dir(out)
-    commandLine("bash", repoRoot.resolve("scripts/android/gen-icons.sh").path, out.resolve("icons").path)
+    commandLine("bash", repoRoot.resolve("scripts/android/gen-icons.sh").path, out.resolve("assets/icons").path, out.resolve("res").path)
 }
 
 android {
@@ -66,7 +68,8 @@ android {
         jniLibs.directories.add(coreOut.resolve("jniLibs").path)
         // The exact font bytes the Rust layout engine measures.
         assets.directories.add(repoRoot.resolve("apps/ios/Zeron/Fonts").path)
-        assets.directories.add(iconsOut.get().asFile.path)
+        assets.directories.add(iconsOut.get().asFile.resolve("assets").path)
+        res.directories.add(iconsOut.get().asFile.resolve("res").path)
     }
 
     packaging { jniLibs { useLegacyPackaging = false } }
@@ -93,4 +96,13 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation("${libs.jna.get()}@aar")
     debugImplementation(libs.compose.ui.tooling)
+}
+
+kotlin {
+    compilerOptions {
+        optIn.addAll(
+            "androidx.compose.material3.ExperimentalMaterial3Api",
+            "androidx.compose.material3.ExperimentalMaterial3ExpressiveApi",
+        )
+    }
 }
