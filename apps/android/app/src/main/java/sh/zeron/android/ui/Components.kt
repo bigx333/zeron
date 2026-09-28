@@ -9,10 +9,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
@@ -27,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -84,17 +87,29 @@ fun SegmentedGroup(
 fun ProjectTile(name: String?, colorIndex: Int, size: Dp = 40.dp, modifier: Modifier = Modifier) {
     val tone = ProjectColors.color(colorIndex, LocalDarkTheme.current)
     // Expressive shapes: projects are "cookies", projectless sessions a circle.
-    val shape = if (name != null) MaterialShapes.Cookie9Sided.toShape() else CircleShape
+    val shape = when {
+        name == null -> CircleShape
+        size < 28.dp -> RoundedCornerShape(size * 0.28f)
+        else -> MaterialShapes.Cookie9Sided.toShape()
+    }
     Box(
         modifier.size(size).clip(shape).background(tone.copy(alpha = 0.16f)),
         contentAlignment = Alignment.Center,
     ) {
         if (name != null) {
+            val fontSize = (size.value * if (size < 28.dp) 0.62f else 0.42f).sp
             Text(
                 name.trim().take(1).uppercase(),
                 color = tone,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = (size.value * 0.42f).sp,
+                fontSize = fontSize,
+                style = androidx.compose.ui.text.TextStyle(
+                    lineHeight = fontSize,
+                    lineHeightStyle = androidx.compose.ui.text.style.LineHeightStyle(
+                        androidx.compose.ui.text.style.LineHeightStyle.Alignment.Center,
+                        androidx.compose.ui.text.style.LineHeightStyle.Trim.Both,
+                    ),
+                ),
             )
         } else {
             Icon(Icons.Outlined.Home, null, Modifier.size(size * 0.5f), tint = tone)
@@ -104,24 +119,45 @@ fun ProjectTile(name: String?, colorIndex: Int, size: Dp = 40.dp, modifier: Modi
 
 fun SessionRow.colorIndex(): Int = (project?.colorIndex ?: projectColorIndex("home")).toInt()
 
-/** Live status at the trailing edge of a session row. */
+@Composable
+fun successColor(): Color = if (LocalDarkTheme.current) Color(0xFF34D399) else Color(0xFF15803D)
+
+/** Live status at the trailing edge of a session row (desktop wording). */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun StatusIndicator(indicator: ChatIndicator, unseen: Boolean) {
-    when (indicator) {
-        ChatIndicator.WORKING -> LoadingIndicator(Modifier.size(28.dp))
-        ChatIndicator.AWAITING_INPUT -> Surface(
-            shape = RoundedCornerShape(50),
-            color = MaterialTheme.colorScheme.tertiaryContainer,
-            contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-        ) {
-            Text(
-                "Needs you",
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(PaddingValues(horizontal = 8.dp, vertical = 3.dp)),
-            )
+fun StatusLabel(row: SessionRow) {
+    @Composable
+    fun label(text: String, color: Color, dot: Boolean) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (dot) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(color))
+            } else {
+                Icon(Icons.Filled.Check, null, Modifier.size(15.dp), tint = color)
+            }
+            Spacer(Modifier.width(5.dp))
+            Text(text, style = MaterialTheme.typography.labelLarge, color = color)
         }
-        ChatIndicator.ERRORED -> Icon(Icons.Filled.ErrorOutline, "Failed", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.error)
-        else -> if (unseen) Box(Modifier.size(10.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
+    }
+    when (row.indicator) {
+        ChatIndicator.WORKING -> LoadingIndicator(Modifier.size(26.dp))
+        ChatIndicator.AWAITING_INPUT -> label("Input", MaterialTheme.colorScheme.primary, dot = true)
+        ChatIndicator.ERRORED -> label("Failed", MaterialTheme.colorScheme.error, dot = true)
+        ChatIndicator.COMPLETED -> label("Done", successColor(), dot = false)
+        ChatIndicator.IDLE -> Row(verticalAlignment = Alignment.CenterVertically) {
+            if (row.unseen) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
+                Spacer(Modifier.width(5.dp))
+            }
+            Text(row.timeLabel, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.outline)
+        }
     }
 }
+
+/** The composer's surface: bright in light (like a sheet of paper), raised in dark. */
+@Composable
+fun composerContainer(): Color =
+    if (LocalDarkTheme.current) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.surfaceContainerLowest
+
+@Composable
+fun chipContainer(): Color =
+    if (LocalDarkTheme.current) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainer

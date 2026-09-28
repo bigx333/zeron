@@ -40,6 +40,8 @@ import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Send
 import androidx.compose.material.icons.outlined.Speed
+import androidx.compose.material.icons.outlined.Schedule
+import sh.zeron.android.design.HarnessMark
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
@@ -89,14 +91,9 @@ import uniffi.zeron_core.UserInputAnswer
 import uniffi.zeron_core.fallbackModels
 import uniffi.zeron_core.reasoningLabel
 
-private enum class Delivery { Queue, Steer, Interrupt }
+private enum class Delivery(val label: String) { Queue("Queue"), Steer("Steer"), Interrupt("Stop & send") }
 
-/**
- * The session composer: a large rounded container with the prompt, context
- * chips (model, effort, branch/PR, context use) and a shape-morphing send /
- * stop button.
- */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalFoundationApi::class)
+/** The session composer: the shared surface plus this chat's context chips. */
 @Composable
 fun Composer(
     model: AppModel,
@@ -108,131 +105,83 @@ fun Composer(
 ) {
     var text by rememberSaveable(c.chatId) { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
-    var deliveryMenu by remember { mutableStateOf(false) }
-    val haptics = LocalHapticFeedback.current
+    var delivery by remember { mutableStateOf(Delivery.Queue) }
     val running = c.live.turnRunning
     val canSteer = c.host.capabilities.midTurnSteering == true
 
-    fun send(mode: Delivery) {
+    fun send() {
         val body = text.trim()
         if (body.isEmpty()) return
         try {
-            if (mode == Delivery.Interrupt && running) handle.interrupt()
-            handle.send(SendRequest(body, emptyList(), null, if (mode == Delivery.Steer) BusyPolicy.STEER else BusyPolicy.QUEUE))
+            if (delivery == Delivery.Interrupt && running) handle.interrupt()
+            handle.send(SendRequest(body, emptyList(), null, if (running && delivery == Delivery.Steer) BusyPolicy.STEER else BusyPolicy.QUEUE))
             text = ""
             error = null
-            haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+            delivery = Delivery.Queue
             onSend()
         } catch (e: Exception) {
             error = "Couldn't send: ${e.message}"
         }
     }
 
-    Surface(
-        shape = RoundedCornerShape(28.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        shadowElevation = 6.dp,
-        modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, bottom = 10.dp),
-    ) {
-        Column(Modifier.padding(start = 20.dp, end = 8.dp, top = 14.dp, bottom = 8.dp).animateContentSize()) {
-            error?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 6.dp, end = 12.dp))
-            }
-            Box(Modifier.fillMaxWidth().padding(end = 12.dp).heightIn(min = 24.dp)) {
-                if (text.isEmpty()) {
-                    Text(
-                        "Message ${row?.harnessLabel ?: "the agent"}",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                BasicTextField(
-                    text,
-                    { text = it },
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    maxLines = 8,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            Spacer(Modifier.size(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Row(
-                    Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    ComposerChips(client, c, row)
-                }
-                Spacer(Modifier.width(8.dp))
-                val showStop = running && text.isBlank()
-                Box {
-                    AnimatedContent(
-                        showStop,
-                        transitionSpec = { (scaleIn() + fadeIn()) togetherWith (scaleOut() + fadeOut()) },
-                        label = "send",
-                    ) { stop ->
-                        if (stop) {
-                            Surface(
-                                onClick = {
-                                    haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-                                    runCatching { handle.interrupt() }
-                                },
-                                shape = RoundedCornerShape(14.dp),
-                                color = MaterialTheme.colorScheme.errorContainer,
-                                contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                                modifier = Modifier.size(44.dp),
-                            ) {
-                                Box(contentAlignment = Alignment.Center) { Icon(Icons.Filled.Stop, "Stop") }
-                            }
-                        } else {
-                            val enabled = text.isNotBlank()
-                            Surface(
-                                shape = if (enabled) RoundedCornerShape(14.dp) else CircleShape,
-                                color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest,
-                                contentColor = if (enabled) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .clip(if (enabled) RoundedCornerShape(14.dp) else CircleShape)
-                                    .combinedClickable(
-                                        enabled = enabled,
-                                        onClick = { send(Delivery.Queue) },
-                                        onLongClick = {
-                                            if (running) {
-                                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                deliveryMenu = true
-                                            }
-                                        },
-                                    ),
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Filled.ArrowUpward, if (running) "Queue" else "Send")
-                                }
-                            }
-                        }
-                    }
-                    DropdownMenu(expanded = deliveryMenu, onDismissRequest = { deliveryMenu = false }) {
-                        DropdownMenuItem(text = { Text("Queue for next turn") }, onClick = { deliveryMenu = false; send(Delivery.Queue) })
-                        if (canSteer) DropdownMenuItem(text = { Text("Steer now") }, onClick = { deliveryMenu = false; send(Delivery.Steer) })
-                        DropdownMenuItem(text = { Text("Stop and send") }, onClick = { deliveryMenu = false; send(Delivery.Interrupt) })
-                    }
-                }
-            }
+    Column(Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp)) {
+        error?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 16.dp, bottom = 6.dp))
+        }
+        ComposerSurface(
+            text = text,
+            onText = { text = it },
+            placeholder = "Message ${row?.harnessLabel ?: "the agent"}",
+            action = when {
+                running && text.isBlank() -> ComposerAction.Stop
+                running -> ComposerAction.Queue
+                else -> ComposerAction.Send
+            },
+            onAction = { if (running && text.isBlank()) runCatching { handle.interrupt() } else send() },
+        ) {
+            if (running) DeliveryChip(delivery, canSteer) { delivery = it }
+            SessionChips(client, c, row)
         }
     }
 }
 
 @Composable
-private fun ComposerChips(client: CoreClient, c: ComposerState, row: SessionRow?) {
+private fun DeliveryChip(current: Delivery, canSteer: Boolean, onChange: (Delivery) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    ContextChip(
+        current.label,
+        leading = { Icon(Icons.Outlined.Schedule, null, Modifier.size(16.dp)) },
+        onClick = { open = true },
+        tint = MaterialTheme.colorScheme.primary,
+    ) {
+        ChoiceMenu(
+            open,
+            { open = false },
+            listOf(
+                MenuSection(
+                    "While the agent works",
+                    listOfNotNull(
+                        MenuChoice("Queue", current == Delivery.Queue, "Send when this turn ends") { onChange(Delivery.Queue) },
+                        if (canSteer) MenuChoice("Steer", current == Delivery.Steer, "Add to the running turn") { onChange(Delivery.Steer) } else null,
+                        MenuChoice("Stop & send", current == Delivery.Interrupt, "Stop the turn, then send") { onChange(Delivery.Interrupt) },
+                    ),
+                ),
+            ),
+        )
+    }
+}
+
+@Composable
+private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val harness = row?.harness ?: "claude-code"
     var models by remember { mutableStateOf<List<ModelInfo>?>(null) }
     var menu by remember { mutableStateOf<String?>(null) }
 
-    fun loadModels() {
-        if (models != null) return
-        scope.launch {
+    fun open(which: String) {
+        menu = which
+        if (models == null) scope.launch {
             models = runCatching { client.listModels(c.host.deviceId, harness) }.getOrNull() ?: fallbackModels(harness)
         }
     }
@@ -242,66 +191,45 @@ private fun ComposerChips(client: CoreClient, c: ComposerState, row: SessionRow?
         runCatching { client.setSessionConfig(c.chatId, change(current)) }
     }
 
-    (row?.modelLabel ?: row?.harnessLabel)?.let { label ->
-        Box {
-            Chip(label, Icons.Outlined.AutoAwesome) { loadModels(); menu = "model" }
-            DropdownMenu(expanded = menu == "model", onDismissRequest = { menu = null }) {
-                for (m in models.orEmpty()) {
-                    DropdownMenuItem(
-                        text = { Text(m.label) },
-                        trailingIcon = { if (m.id == row?.model) Text("✓", color = MaterialTheme.colorScheme.primary) },
-                        onClick = { setConfig { it.copy(model = m.id) }; menu = null },
-                    )
-                }
-            }
+    val modelLabel = row?.modelLabel ?: row?.harnessLabel
+    if (modelLabel != null) {
+        ContextChip(modelLabel, leading = { HarnessMark(harness, 14.dp) }, onClick = { open("model") }) {
+            ChoiceMenu(menu == "model", { menu = null }, listOf(MenuSection(row?.harnessLabel, models.orEmpty().map { m ->
+                MenuChoice(m.label, m.id == row?.model, m.description) { setConfig { it.copy(model = m.id) } }
+            })))
         }
     }
     row?.reasoning?.takeIf { it.isNotEmpty() }?.let { level ->
-        Box {
-            Chip(reasoningLabel(level), Icons.Outlined.Speed) { loadModels(); menu = "effort" }
-            DropdownMenu(expanded = menu == "effort", onDismissRequest = { menu = null }) {
-                val levels = models?.let { list -> (list.firstOrNull { it.id == row.model } ?: list.firstOrNull())?.reasoningLevels }.orEmpty()
-                for (l in levels) {
-                    DropdownMenuItem(
-                        text = { Text(reasoningLabel(l)) },
-                        trailingIcon = { if (l == level) Text("✓", color = MaterialTheme.colorScheme.primary) },
-                        onClick = { setConfig { it.copy(reasoning = l) }; menu = null },
-                    )
-                }
-            }
+        ContextChip(reasoningLabel(level), leading = { Icon(Icons.Outlined.Speed, null, Modifier.size(16.dp)) }, onClick = { open("effort") }) {
+            val levels = models?.let { list -> (list.firstOrNull { it.id == row.model } ?: list.firstOrNull())?.reasoningLevels }.orEmpty()
+            ChoiceMenu(menu == "effort", { menu = null }, listOf(MenuSection("Reasoning effort", levels.map { l ->
+                MenuChoice(reasoningLabel(l), l == level) { setConfig { it.copy(reasoning = l) } }
+            })))
         }
     }
     val pr = row?.pullRequest
     if (pr != null) {
-        Chip("#${pr.number}", Icons.AutoMirrored.Outlined.CallSplit) {
+        ContextChip("#${pr.number}", leading = { Icon(Icons.AutoMirrored.Outlined.CallSplit, null, Modifier.size(16.dp)) }, onClick = {
             CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(pr.url))
-        }
+        })
     } else {
-        row?.branch?.takeIf { it.isNotEmpty() }?.let { Chip(it, Icons.AutoMirrored.Outlined.CallSplit) {} }
+        row?.branch?.takeIf { it.isNotEmpty() }?.let {
+            ContextChip(it, leading = { Icon(Icons.AutoMirrored.Outlined.CallSplit, null, Modifier.size(16.dp)) }, onClick = {})
+        }
     }
-    val usage = c.contextUsage
-    val tokens = usage?.tokens
-    val window = usage?.window
+    val tokens = c.contextUsage?.tokens
+    val window = c.contextUsage?.window
     if (tokens != null && window != null && window > 0u) {
         val fraction = tokens.toDouble() / window.toDouble()
-        if (fraction >= 0.5) Chip("${(fraction * 100).toInt()}% context", Icons.Outlined.DataUsage) {}
+        if (fraction >= 0.5) {
+            ContextChip(
+                "${(fraction * 100).toInt()}% context",
+                leading = { Icon(Icons.Outlined.DataUsage, null, Modifier.size(16.dp)) },
+                onClick = {},
+                tint = if (fraction >= 0.85) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
-}
-
-@Composable
-private fun Chip(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
-    AssistChip(
-        onClick = onClick,
-        label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        leadingIcon = { Icon(icon, null, Modifier.size(AssistChipDefaults.IconSize)) },
-        shape = RoundedCornerShape(50),
-        colors = AssistChipDefaults.assistChipColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-            labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            leadingIconContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-        ),
-        border = null,
-    )
 }
 
 @Composable
