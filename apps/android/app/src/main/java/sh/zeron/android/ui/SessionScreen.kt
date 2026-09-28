@@ -51,6 +51,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.background
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -185,6 +188,8 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
                 Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
+                    // The transcript fades out behind the composer.
+                    .background(Brush.verticalGradient(0f to Color.Transparent, 0.35f to MaterialTheme.colorScheme.background))
                     .imePadding()
                     .navigationBarsPadding()
                     .onSizeChanged { transcript.bottomInset = with(density) { it.height.toDp().value } + 8f },
