@@ -1,48 +1,31 @@
 package sh.zeron.android.ui
 
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CallSplit
-import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.outlined.AutoAwesome
-import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.ButtonGroupDefaults
+import androidx.compose.material.icons.outlined.Computer
+import androidx.compose.material.icons.outlined.Inbox
+import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ListItem
-import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
-import androidx.compose.material3.ToggleButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -51,69 +34,91 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
-import sh.zeron.android.core.NewSessionDraft
+import sh.zeron.android.design.HarnessMark
 import uniffi.zeron_core.ModelInfo
 import uniffi.zeron_core.fallbackHarnesses
 import uniffi.zeron_core.fallbackModels
+import uniffi.zeron_core.modelLabel
+import uniffi.zeron_core.harnessLabel
 import uniffi.zeron_core.reasoningLabel
 
 private data class ModelChoice(val harness: String, val harnessLabel: String, val model: ModelInfo)
 
-private data class Place(val projectId: String?, val hostId: String, val name: String, val detail: String, val colorIndex: Int, val git: Boolean, val online: Boolean)
+/** The last catalog each host reported, so chips open on real model names. */
+private val modelCache = HashMap<String, List<ModelChoice>>()
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+private fun catalogModels(): List<ModelChoice> = fallbackHarnesses().filter { it.offered }.flatMap { h ->
+    fallbackModels(h.id).map { ModelChoice(h.id, h.label, it) }
+}
+
+/**
+ * "What are we building?" — a composer-first canvas. Context is set with the
+ * composer's chips (project, branch or host, model, effort); the prompt is
+ * focused at once so the common case is: tap, type, send.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -> Unit) {
     val workspace by model.workspace.collectAsState()
     val client by model.client.collectAsState()
     var draft by remember { mutableStateOf(model.lastDraft) }
     var text by rememberSaveable { mutableStateOf("") }
-    var picking by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    val focus = remember { FocusRequester() }
+    val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
 
-    val places = remember(workspace) {
-        val ws = workspace ?: return@remember emptyList()
-        ws.projects.map { Place(it.id, it.deviceId, it.name, it.deviceName ?: "", it.colorIndex.toInt(), it.gitDetected, it.deviceOnline) } +
-            ws.devices.filter { it.isExecutionHost }.map { Place(null, it.id, "Home folder", it.name, uniffi.zeron_core.projectColorIndex("home").toInt(), false, it.online) }
-    }.sortedByDescending { it.online }
-    val selected = places.firstOrNull { p -> if (draft.projectId != null) p.projectId == draft.projectId else p.projectId == null && p.hostId == draft.hostId }
-        ?: places.firstOrNull()
-    LaunchedEffect(selected) {
-        if (selected != null && (draft.projectId != selected.projectId || draft.hostId != selected.hostId)) {
-            draft = draft.copy(projectId = selected.projectId, hostId = selected.hostId)
+    val projects = workspace?.projects.orEmpty()
+    val hosts = workspace?.devices.orEmpty().filter { it.isExecutionHost }
+    val project = projects.firstOrNull { it.id == draft.projectId }
+    LaunchedEffect(workspace) {
+        if (draft.projectId == null && draft.hostId == null) {
+            draft = draft.copy(projectId = (projects.firstOrNull { it.deviceOnline } ?: projects.firstOrNull())?.id)
+        }
+        if (draft.projectId == null && draft.hostId == null) {
+            // No projects yet: run on the first reachable host.
+            draft = draft.copy(hostId = (hosts.firstOrNull { it.online } ?: hosts.firstOrNull())?.id)
         }
     }
+    val deviceId = project?.deviceId ?: draft.hostId ?: ""
 
-    // Models offered by the selected host (live catalog, static fallback).
-    var choices by remember { mutableStateOf<List<ModelChoice>>(emptyList()) }
-    LaunchedEffect(selected?.hostId, client) {
+    // Models for the draft's host: cached (or the built-in catalog) at once, then the host's own list.
+    var models by remember(deviceId) { mutableStateOf(modelCache[deviceId] ?: catalogModels()) }
+    LaunchedEffect(deviceId, client) {
         val c = client ?: return@LaunchedEffect
-        val host = selected?.hostId ?: return@LaunchedEffect
-        val harnesses = runCatching { c.listHarnesses(host) }.getOrNull() ?: fallbackHarnesses()
-        val out = ArrayList<ModelChoice>()
-        for (h in harnesses.filter { it.offered }) {
-            val models = runCatching { c.listModels(host, h.id) }.getOrNull() ?: fallbackModels(h.id)
-            models.forEach { out.add(ModelChoice(h.id, h.label, it)) }
+        if (deviceId.isEmpty()) return@LaunchedEffect
+        val harnesses = runCatching { c.listHarnesses(deviceId) }.getOrNull() ?: return@LaunchedEffect
+        val fresh = harnesses.filter { it.offered }.flatMap { h ->
+            (runCatching { c.listModels(deviceId, h.id) }.getOrNull() ?: fallbackModels(h.id)).map { ModelChoice(h.id, h.label, it) }
         }
-        choices = out
-        if (out.none { it.harness == draft.harness && it.model.id == draft.model }) {
-            out.firstOrNull { it.harness == draft.harness }?.let { draft = draft.copy(model = it.model.id, effort = it.model.defaultReasoning) }
-                ?: out.firstOrNull()?.let { draft = draft.copy(harness = it.harness, model = it.model.id, effort = it.model.defaultReasoning) }
+        if (fresh.isNotEmpty()) {
+            modelCache[deviceId] = fresh
+            models = fresh
         }
     }
-    val choice = choices.firstOrNull { it.harness == draft.harness && it.model.id == draft.model }
+    val choice = models.firstOrNull { it.harness == draft.harness && it.model.id == draft.model }
+        ?: models.firstOrNull { it.harness == draft.harness }
+
+    LaunchedEffect(Unit) { focus.requestFocus() }
+
+    fun create() {
+        model.lastDraft = draft
+        val id = model.createSession(draft.copy(model = draft.model ?: choice?.model?.id), text.trim())
+        if (id != null) onCreated(id) else scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = { Text("New session") },
@@ -128,134 +133,162 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
                 .fillMaxSize()
                 .imePadding()
                 .navigationBarsPadding(),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                TextField(
-                    text,
-                    { text = it },
-                    placeholder = { Text("What should the agent do?") },
-                    textStyle = MaterialTheme.typography.bodyLarge,
-                    shape = RoundedCornerShape(28.dp),
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent,
-                    ),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).heightIn(min = 160.dp),
-                )
-
-                SectionHeader("Where")
-                Row(
-                    Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    for (p in places) {
-                        val on = p == selected
-                        Surface(
-                            shape = RoundedCornerShape(if (on) 28.dp else 20.dp),
-                            color = if (on) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLowest,
-                            border = if (on) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
-                            modifier = Modifier.width(156.dp).clip(RoundedCornerShape(if (on) 28.dp else 20.dp)).clickable {
-                                draft = draft.copy(projectId = p.projectId, hostId = p.hostId, worktree = draft.worktree && p.git)
-                            },
-                        ) {
-                            Column(Modifier.padding(14.dp)) {
-                                ProjectTile(if (p.projectId != null) p.name else null, p.colorIndex, 36.dp)
-                                Spacer(Modifier.height(10.dp))
-                                Text(p.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(
-                                    if (p.online) p.detail else "${p.detail} · offline",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                    }
+            // The headline lives in the free space above the composer.
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    HarnessMark(draft.harness, 40.dp, tint = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        "What are we building?",
+                        style = MaterialTheme.typography.headlineSmall,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 32.dp),
+                    )
                 }
-
-                SectionHeader("Agent")
-                val rows = 1 + (if (selected?.git == true) 1 else 0)
-                SegmentedGroup(rows) { i, shape ->
-                    when (i) {
-                        0 -> ListItem(
-                            headlineContent = { Text(choice?.model?.label ?: "Choose a model") },
-                            supportingContent = { Text(choice?.harnessLabel ?: "") },
-                            leadingContent = { Icon(Icons.Outlined.AutoAwesome, null) },
-                            modifier = Modifier.clip(shape).clickable { picking = true },
-                            colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
-                        )
-                        else -> ListItem(
-                            headlineContent = { Text("New worktree") },
-                            supportingContent = { Text("Run isolated from the checkout on the host") },
-                            leadingContent = { Icon(Icons.AutoMirrored.Outlined.CallSplit, null) },
-                            trailingContent = { Switch(draft.worktree, { draft = draft.copy(worktree = it) }) },
-                            modifier = Modifier.clip(shape),
-                            colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
-                        )
-                    }
-                }
-                val levels = choice?.model?.reasoningLevels.orEmpty()
-                if (levels.isNotEmpty()) {
-                    SectionHeader("Effort")
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
-                    ) {
-                        levels.forEachIndexed { i, level ->
-                            ToggleButton(
-                                checked = (draft.effort ?: choice?.model?.defaultReasoning) == level,
-                                onCheckedChange = { draft = draft.copy(effort = level) },
-                                shapes = when (i) {
-                                    0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
-                                    levels.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
-                                    else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
-                                },
-                            ) { Text(reasoningLabel(level)) }
-                        }
-                    }
-                }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(20.dp)) }
             }
-            Button(
-                onClick = {
-                    model.lastDraft = draft
-                    val id = model.createSession(draft, text.trim())
-                    if (id != null) onCreated(id) else error = "Couldn't start the session."
-                },
-                enabled = text.isNotBlank() && selected != null,
-                shapes = ButtonDefaults.shapes(),
-                modifier = Modifier.fillMaxWidth().padding(16.dp).heightIn(min = ButtonDefaults.MediumContainerHeight),
-                contentPadding = ButtonDefaults.contentPaddingFor(ButtonDefaults.MediumContainerHeight),
+            ComposerSurface(
+                text = text,
+                onText = { text = it },
+                placeholder = "Describe the task",
+                action = ComposerAction.Send,
+                onAction = ::create,
+                alwaysCard = true,
+                focusRequester = focus,
+                modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp).widthIn(max = 768.dp),
             ) {
-                Icon(Icons.Filled.ArrowUpward, null, Modifier.size(ButtonDefaults.iconSizeFor(ButtonDefaults.MediumContainerHeight)))
-                Spacer(Modifier.width(ButtonDefaults.iconSpacingFor(ButtonDefaults.MediumContainerHeight)))
-                Text("Start session", style = ButtonDefaults.textStyleFor(ButtonDefaults.MediumContainerHeight))
+                ProjectChip(draft, projects, onPick = { draft = it })
+                if (project != null) {
+                    if (project.gitDetected) BranchChip(model, draft, project.deviceId, project.path) { draft = it }
+                } else {
+                    HostChip(draft, hosts) { draft = it }
+                }
+                ModelChip(draft, choice, models) { draft = it }
+                val efforts = choice?.model?.reasoningLevels.orEmpty()
+                if (efforts.isNotEmpty()) {
+                    val effort = draft.effort?.takeIf { it in efforts } ?: choice?.model?.defaultReasoning ?: efforts[efforts.size / 2]
+                    EffortChip(effort, efforts) { draft = draft.copy(effort = it) }
+                }
             }
         }
     }
+}
 
-    if (picking) {
-        ModalBottomSheet(onDismissRequest = { picking = false }) {
-            Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
-                for ((harness, group) in choices.groupBy { it.harnessLabel }) {
-                    SectionHeader(harness)
-                    for (m in group) {
-                        ListItem(
-                            headlineContent = { Text(m.model.label) },
-                            supportingContent = m.model.description?.let { { Text(it, maxLines = 2) } },
-                            trailingContent = { if (m == choice) Icon(Icons.Outlined.Check, null, tint = MaterialTheme.colorScheme.primary) },
-                            modifier = Modifier.clickable {
-                                draft = draft.copy(harness = m.harness, model = m.model.id, effort = m.model.defaultReasoning)
-                                picking = false
-                            },
-                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                        )
+@Composable
+private fun ProjectChip(
+    draft: sh.zeron.android.core.NewSessionDraft,
+    projects: List<uniffi.zeron_core.ProjectView>,
+    onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    val project = projects.firstOrNull { it.id == draft.projectId }
+    ContextChip(
+        project?.name ?: "No project",
+        leading = {
+            if (project != null) ProjectTile(project.name, project.colorIndex.toInt(), 18.dp)
+            else Icon(Icons.Outlined.Inbox, null, Modifier.size(16.dp))
+        },
+        onClick = { open = true },
+    ) {
+        val sections = projects.groupBy { it.deviceId }.values.map { list ->
+            val first = list.first()
+            MenuSection(
+                (first.deviceName ?: "Host") + if (!first.deviceOnline) " · offline" else "",
+                list.map { p ->
+                    MenuChoice(p.name, p.id == draft.projectId, leading = { ProjectTile(p.name, p.colorIndex.toInt(), 24.dp) }) {
+                        onPick(draft.copy(projectId = p.id, hostId = null, branch = null))
                     }
-                }
-            }
+                },
+            )
+        } + MenuSection(null, listOf(
+            MenuChoice("No project", draft.projectId == null, "Run in a host's home folder", leading = { Icon(Icons.Outlined.Inbox, null) }) {
+                onPick(draft.copy(projectId = null, hostId = draft.hostId ?: projects.firstOrNull()?.deviceId, worktree = false))
+            },
+        ))
+        ChoiceMenu(open, { open = false }, sections)
+    }
+}
+
+@Composable
+private fun HostChip(
+    draft: sh.zeron.android.core.NewSessionDraft,
+    hosts: List<uniffi.zeron_core.DeviceView>,
+    onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    ContextChip(
+        hosts.firstOrNull { it.id == draft.hostId }?.name ?: "Choose host",
+        leading = { Icon(Icons.Outlined.Computer, null, Modifier.size(16.dp)) },
+        onClick = { open = true },
+    ) {
+        ChoiceMenu(open, { open = false }, listOf(MenuSection("Run on", hosts.map { h ->
+            MenuChoice(h.name, h.id == draft.hostId, if (h.online) "Online" else "Offline") { onPick(draft.copy(hostId = h.id)) }
+        })))
+    }
+}
+
+@Composable
+private fun BranchChip(
+    model: AppModel,
+    draft: sh.zeron.android.core.NewSessionDraft,
+    deviceId: String,
+    repoPath: String,
+    onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    var refs by remember(deviceId, repoPath) { mutableStateOf<List<String>?>(null) }
+    val client by model.client.collectAsState()
+    LaunchedEffect(open, deviceId, repoPath) {
+        if (open && refs == null) {
+            refs = runCatching { client?.listRefs(deviceId, repoPath) }.getOrNull().orEmpty()
+                .sortedByDescending { it.current }.map { it.name }
         }
+    }
+    ContextChip(
+        if (draft.worktree) "New worktree" else draft.branch ?: "Current branch",
+        leading = { Icon(Icons.AutoMirrored.Outlined.CallSplit, null, Modifier.size(16.dp)) },
+        onClick = { open = true },
+    ) {
+        val branches = refs.orEmpty()
+        ChoiceMenu(open, { open = false }, listOf(
+            MenuSection("Checkout", listOf(
+                MenuChoice("New worktree", draft.worktree, "Run isolated from the checkout") { onPick(draft.copy(worktree = !draft.worktree)) },
+            )),
+            MenuSection("Branch", branches.map { b ->
+                MenuChoice(b, b == (draft.branch ?: branches.firstOrNull())) { onPick(draft.copy(branch = b)) }
+            }),
+        ))
+    }
+}
+
+@Composable
+private fun ModelChip(
+    draft: sh.zeron.android.core.NewSessionDraft,
+    choice: ModelChoice?,
+    models: List<ModelChoice>,
+    onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    // Never the harness name in place of a model.
+    val title = choice?.model?.label ?: draft.model?.let { modelLabel(draft.harness, it) }
+        ?: fallbackModels(draft.harness).firstOrNull()?.label ?: harnessLabel(draft.harness)
+    ContextChip(title, leading = { HarnessMark(draft.harness, 14.dp) }, onClick = { open = true }) {
+        ChoiceMenu(open, { open = false }, models.groupBy { it.harness }.map { (harness, list) ->
+            MenuSection(list.first().harnessLabel, list.map { m ->
+                MenuChoice(m.model.label, m.harness == draft.harness && m.model.id == choice?.model?.id, leading = { HarnessMark(harness, 18.dp) }) {
+                    onPick(draft.copy(harness = m.harness, model = m.model.id, effort = null))
+                }
+            })
+        })
+    }
+}
+
+@Composable
+private fun EffortChip(effort: String, efforts: List<String>, onPick: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    ContextChip(reasoningLabel(effort), leading = { Icon(Icons.Outlined.Speed, null, Modifier.size(16.dp)) }, onClick = { open = true }) {
+        ChoiceMenu(open, { open = false }, listOf(MenuSection("Reasoning effort", efforts.map { e ->
+            MenuChoice(reasoningLabel(e), e == effort) { onPick(e) }
+        })))
     }
 }

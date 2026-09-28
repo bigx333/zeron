@@ -39,13 +39,16 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MediumExtendedFloatingActionButton
+import androidx.compose.material3.SmallExtendedFloatingActionButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import sh.zeron.android.design.HarnessMark
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
@@ -136,7 +139,7 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit, onNew: () -> Unit,
             )
         },
         floatingActionButton = {
-            MediumExtendedFloatingActionButton(
+            SmallExtendedFloatingActionButton(
                 onClick = onNew,
                 expanded = expanded,
                 icon = { Icon(Icons.Filled.Edit, null) },
@@ -205,7 +208,7 @@ private fun LazyListScope.group(
     archive: (SessionRow) -> Unit,
     trailing: (@Composable () -> Unit)? = null,
 ) {
-    item("h-$id") { SectionHeader(title, Modifier.animateItem(), trailing) }
+    item("h-$id") { SectionHeader(if (rows.isEmpty()) title else "$title  ${rows.size}", Modifier.animateItem(), trailing) }
     itemsIndexed(rows, key = { _, r -> "$id/${r.id}" }) { i, row ->
         Box(Modifier.animateItem().padding(horizontal = 12.dp).padding(bottom = if (i < rows.size - 1) 2.dp else 0.dp)) {
             SwipeableSessionRow(row, segmentShape(i, rows.size), model, onOpen, archive)
@@ -266,10 +269,13 @@ fun SessionItem(
             ),
     ) {
         Row(
-            Modifier.padding(horizontal = 16.dp, vertical = 14.dp).animateContentSize(),
+            Modifier.padding(start = 12.dp, end = 16.dp, top = 12.dp, bottom = 12.dp).animateContentSize(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ProjectTile(row.project?.name, row.colorIndex())
+            Box(
+                Modifier.size(40.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainer),
+                contentAlignment = Alignment.Center,
+            ) { HarnessMark(row.harness, 20.dp, tint = MaterialTheme.colorScheme.onSurface) }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -279,23 +285,13 @@ fun SessionItem(
                     overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
-                Spacer(Modifier.height(2.dp))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        subtitle(row),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    row.pullRequest?.let { PrBadge(it.number, it.state) }
-                }
+                Spacer(Modifier.height(3.dp))
+                Subline(row)
             }
             Spacer(Modifier.width(10.dp))
             Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(row.timeLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
-                StatusIndicator(row.indicator, row.unseen)
+                StatusLabel(row)
+                row.pullRequest?.let { PrBadge(it.number, it.state) }
             }
         }
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -324,18 +320,45 @@ fun subtitle(row: SessionRow): String = listOfNotNull(
     row.branch?.takeIf { it.isNotEmpty() && row.pullRequest == null },
 ).joinToString(" · ")
 
+/** Project monogram + name, then the branch — the desktop sidebar subline. */
+@Composable
+private fun Subline(row: SessionRow) {
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        val project = row.project
+        if (project != null) {
+            ProjectTile(project.name, project.colorIndex.toInt(), 16.dp)
+            Spacer(Modifier.width(6.dp))
+        }
+        Text(
+            project?.name ?: row.deviceName ?: "No project",
+            style = MaterialTheme.typography.bodyMedium,
+            color = muted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        row.branch?.takeIf { it.isNotEmpty() }?.let { branch ->
+            Spacer(Modifier.width(10.dp))
+            Icon(Icons.AutoMirrored.Outlined.CallSplit, null, Modifier.size(13.dp), tint = muted.copy(alpha = 0.6f))
+            Spacer(Modifier.width(3.dp))
+            Text(branch, style = MaterialTheme.typography.bodyMedium, color = muted.copy(alpha = 0.6f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
 @Composable
 fun PrBadge(number: ULong, state: PullRequestState) {
-    val (bg, fg) = when (state) {
-        PullRequestState.OPEN -> MaterialTheme.colorScheme.tertiaryContainer to MaterialTheme.colorScheme.onTertiaryContainer
-        PullRequestState.MERGED -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
-        PullRequestState.CLOSED -> MaterialTheme.colorScheme.surfaceContainerHighest to MaterialTheme.colorScheme.onSurfaceVariant
+    val tone = when (state) {
+        PullRequestState.OPEN -> successColor()
+        PullRequestState.MERGED -> MaterialTheme.colorScheme.primary
+        PullRequestState.CLOSED -> MaterialTheme.colorScheme.error
     }
-    Surface(shape = RoundedCornerShape(6.dp), color = bg, contentColor = fg) {
-        Row(Modifier.padding(horizontal = 5.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.AutoMirrored.Outlined.CallSplit, null, Modifier.size(11.dp))
-            Spacer(Modifier.width(2.dp))
-            Text("$number", style = MaterialTheme.typography.labelSmall)
+    Surface(shape = RoundedCornerShape(8.dp), color = tone.copy(alpha = 0.12f), contentColor = tone) {
+        Row(Modifier.padding(horizontal = 6.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.AutoMirrored.Outlined.CallSplit, null, Modifier.size(12.dp))
+            Spacer(Modifier.width(3.dp))
+            Text("$number", style = MaterialTheme.typography.labelMedium)
         }
     }
 }
