@@ -84,7 +84,7 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
         val ws = workspace ?: return@remember emptyList()
         ws.projects.map { Place(it.id, it.deviceId, it.name, it.deviceName ?: "", it.colorIndex.toInt(), it.gitDetected, it.deviceOnline) } +
             ws.devices.filter { it.isExecutionHost }.map { Place(null, it.id, "Home folder", it.name, uniffi.zeron_core.projectColorIndex("home").toInt(), false, it.online) }
-    }
+    }.sortedByDescending { it.online }
     val selected = places.firstOrNull { p -> if (draft.projectId != null) p.projectId == draft.projectId else p.projectId == null && p.hostId == draft.hostId }
         ?: places.firstOrNull()
     LaunchedEffect(selected) {
