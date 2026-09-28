@@ -59,6 +59,7 @@ object ZIcons {
     val Chat = R.drawable.zi_chat_round_line
     val Refresh = R.drawable.zi_refresh
     val Text = R.drawable.zi_document
+    val Image = R.drawable.zi_file_image
     val Link = R.drawable.zi_arrow_up_right
 }
 

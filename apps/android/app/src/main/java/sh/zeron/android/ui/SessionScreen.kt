@@ -60,6 +60,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -109,6 +110,8 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
     LaunchedEffect(chatId) {
         model.sessionEvents.collect { if (it == chatId) composer = handle.composer() }
     }
+    // Upload rings on pending thumbnails follow the escort.
+    LaunchedEffect(composer.transferProgress) { transcript.uploadProgress = composer.transferProgress }
     val row = remember(workspace, chatId) { model.row(chatId) }
 
     val context = LocalContext.current
@@ -170,12 +173,18 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
                 )
             }
         }
+        val bg = MaterialTheme.colorScheme.background
         Column(
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                // The transcript fades out behind the composer.
-                .background(Brush.verticalGradient(0f to Color.Transparent, 0.35f to MaterialTheme.colorScheme.background))
+                // The transcript fades out over a short band, then the chrome sits on solid background.
+                .drawBehind {
+                    val band = 28.dp.toPx()
+                    drawRect(Brush.verticalGradient(listOf(Color.Transparent, bg), startY = 0f, endY = band))
+                    drawRect(bg, topLeft = androidx.compose.ui.geometry.Offset(0f, band), size = androidx.compose.ui.geometry.Size(size.width, size.height - band))
+                }
+                .padding(top = 20.dp)
                 .imePadding()
                 .navigationBarsPadding()
                 .onSizeChanged { transcript.bottomInset = with(density) { it.height.toDp().value } + 8f },
@@ -193,8 +202,7 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
             }
             Banner(composer, connectivity?.state, onRetry = { runCatching { handle.retryDelivery() } })
             composer.openInput?.let { QuestionPanel(it) { answers -> runCatching { handle.respondInput(it.requestId, answers) } } }
-            if (composer.queue.isNotEmpty()) QueuePanel(composer.queue, handle)
-            Composer(model, core, handle, composer, row, onSend = { transcript.scrollToBottom() })
+            Composer(model, core, handle, composer, row, transcript)
         }
     }
 

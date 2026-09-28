@@ -42,6 +42,15 @@ import androidx.compose.material.icons.outlined.Send
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Schedule
 import sh.zeron.android.design.HarnessMark
+import sh.zeron.android.transcript.TranscriptState
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.focus.FocusRequester
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import uniffi.zeron_core.QueueEditAction
+import uniffi.zeron_core.QueueEditLease
+import uniffi.zeron_core.QueueEditStart
+import java.util.UUID
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import androidx.compose.material3.AssistChip
@@ -95,7 +104,11 @@ import uniffi.zeron_core.reasoningLabel
 
 private enum class Delivery(val label: String) { Queue("Queue"), Steer("Steer"), Interrupt("Stop & send") }
 
-/** The session composer: the shared surface plus this chat's context chips. */
+/**
+ * The session composer: the shared surface plus this chat's context chips,
+ * staged photos, `@` mentions, and editing of messages queued behind the
+ * live turn (a host lease, renewed while the edit is open).
+ */
 @Composable
 fun Composer(
     model: AppModel,
@@ -103,48 +116,158 @@ fun Composer(
     handle: SessionHandle,
     c: ComposerState,
     row: SessionRow?,
-    onSend: () -> Unit,
+    transcript: TranscriptState,
 ) {
-    var text by rememberSaveable(c.chatId) { mutableStateOf("") }
+    val draft = remember(c.chatId) { ComposerModel() }
+    val scope = rememberCoroutineScope()
+    val focus = remember { FocusRequester() }
     var error by remember { mutableStateOf<String?>(null) }
     var delivery by remember { mutableStateOf(Delivery.Queue) }
     val running = c.live.turnRunning
     val canSteer = c.host.capabilities.midTurnSteering == true
 
+    // Queue editing: the row being edited, its lease, and the user's own draft parked meanwhile.
+    var editingId by remember { mutableStateOf<String?>(null) }
+    var lease by remember { mutableStateOf<QueueEditLease?>(null) }
+    var editBase by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var renewal by remember { mutableStateOf<Job?>(null) }
+    var stash by remember { mutableStateOf<Pair<String, List<StagedImage>>?>(null) }
+    var editPending by remember { mutableStateOf(false) }
+
+    fun restoreStash() {
+        stash?.let { (text, images) ->
+            draft.clear()
+            draft.setText(text)
+            draft.images.addAll(images)
+        }
+        stash = null
+    }
+
+    fun finishEdit(text: String?) {
+        val held = lease ?: return
+        val base = editBase
+        renewal?.cancel()
+        lease = null
+        editBase = null
+        editingId = null
+        // Unchanged: release the row as it was (a commit would drop what the composer never showed).
+        val body = if (text != null && base != null) {
+            if (text == base.second) null else replacingVisible(base.first, base.second, text)
+        } else {
+            text
+        }
+        scope.launch { runCatching { handle.finishQueuedEdit(held, if (body == null) QueueEditAction.CANCEL else QueueEditAction.COMMIT, body) } }
+    }
+
+    fun beginEdit(id: String) {
+        if (editPending) return
+        editPending = true
+        scope.launch {
+            try {
+                if (editingId != null) {
+                    finishEdit(null)
+                    restoreStash()
+                }
+                val start = runCatching { handle.beginQueuedEdit(id, UUID.randomUUID().toString()) }.getOrNull()
+                if (start !is QueueEditStart.Acquired) {
+                    error = "Can't edit right now — another device is editing it, or it was just sent."
+                    return@launch
+                }
+                lease = start.lease
+                renewal = scope.launch {
+                    while (true) {
+                        delay(20_000)
+                        val held = lease ?: break
+                        if (!runCatching { handle.renewQueuedEdit(held) }.getOrDefault(false)) break
+                    }
+                }
+                val item = handle.composer().queue.firstOrNull { it.id == id }
+                editBase = item?.let { it.text to it.visibleText }
+                if (stash == null) stash = draft.text to draft.images.toList()
+                draft.clear()
+                draft.setText(item?.visibleText ?: "")
+                editingId = id
+                error = null
+                focus.requestFocus()
+            } finally {
+                editPending = false
+            }
+        }
+    }
+
     fun send() {
-        val body = text.trim()
-        if (body.isEmpty()) return
+        if (!draft.hasContent) return
+        if (editingId != null) {
+            finishEdit(draft.encoded())
+            restoreStash()
+            return
+        }
+        val body = draft.encoded()
         try {
+            val queued = running && delivery == Delivery.Queue
             if (delivery == Delivery.Interrupt && running) handle.interrupt()
-            handle.send(SendRequest(body, emptyList(), null, if (running && delivery == Delivery.Steer) BusyPolicy.STEER else BusyPolicy.QUEUE))
-            text = ""
+            handle.send(
+                SendRequest(
+                    body,
+                    draft.images.map { it.outgoing },
+                    null,
+                    if (running && delivery == Delivery.Steer) BusyPolicy.STEER else BusyPolicy.QUEUE,
+                ),
+            )
+            draft.clear()
             error = null
             delivery = Delivery.Queue
-            onSend()
+            // An immediate send gets the runway; one queued behind a live turn
+            // takes it over once its bubble lands.
+            if (queued) transcript.expectQueuedTurn() else transcript.beginOwnTurn()
         } catch (e: Exception) {
             error = "Couldn't send: ${e.message}"
         }
     }
 
+    // Leaving the session gives an edited row straight back.
+    DisposableEffect(c.chatId) { onDispose { finishEdit(null) } }
+
     Column(Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp)) {
+        if (c.queue.isNotEmpty()) QueuePanel(c.queue, handle, editingId, onEdit = ::beginEdit)
+        MentionSuggestions(draft, search = { q ->
+            client.searchFiles(c.host.deviceId, c.chatId, null, q)
+        })
         error?.let {
             Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 16.dp, bottom = 6.dp))
         }
+        if (editingId != null) {
+            StatusBanner("Editing queued message", "Cancel" to {
+                finishEdit(null)
+                restoreStash()
+            })
+        }
         ComposerSurface(
-            text = text,
-            onText = { text = it },
-            placeholder = "Message ${row?.harnessLabel ?: "the agent"}",
+            model = draft,
+            placeholder = if (editingId != null) "Edit queued message" else "Message ${row?.harnessLabel ?: "the agent"}",
             action = when {
-                running && text.isBlank() -> ComposerAction.Stop
+                editingId != null -> ComposerAction.Send
+                running && !draft.hasContent -> ComposerAction.Stop
                 running -> ComposerAction.Queue
                 else -> ComposerAction.Send
             },
-            onAction = { if (running && text.isBlank()) runCatching { handle.interrupt() } else send() },
+            onAction = { if (editingId == null && running && !draft.hasContent) runCatching { handle.interrupt() } else send() },
+            attach = editingId == null,
+            focusRequester = focus,
         ) {
-            if (running) DeliveryChip(delivery, canSteer) { delivery = it }
+            if (running && editingId == null) DeliveryChip(delivery, canSteer) { delivery = it }
             SessionChips(client, c, row)
         }
     }
+}
+
+/** The row's raw text with its visible part replaced, keeping the hidden context after it. */
+private fun replacingVisible(raw: String, visible: String, edited: String): String {
+    if (edited.isBlank() || raw == visible) return edited
+    val body = raw.trimStart()
+    if (body.startsWith(visible)) return edited + body.substring(visible.length)
+    // Attachment-only rows show a placeholder: all of the raw text is context.
+    return if (body.isEmpty()) edited else edited + "\n\n" + body
 }
 
 @Composable
@@ -295,51 +418,45 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
 
 /** Messages queued behind the live turn (shared across devices). */
 @Composable
-fun QueuePanel(queue: List<QueueItem>, handle: SessionHandle) {
+fun QueuePanel(queue: List<QueueItem>, handle: SessionHandle, editingId: String?, onEdit: (String) -> Unit) {
     val scope = rememberCoroutineScope()
-    Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)) {
+    Column(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         queue.forEachIndexed { i, item ->
+            val editing = item.id == editingId
             Surface(
-                shape = segmentShape(i, queue.size, outer = 20.dp, inner = 4.dp),
-                color = MaterialTheme.colorScheme.surfaceContainer,
-                modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp),
+                shape = segmentShape(i, queue.size, outer = 20.dp, inner = 6.dp),
+                color = if (editing) MaterialTheme.colorScheme.secondaryContainer else composerContainer(),
+                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                Row(Modifier.padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ZIcon(ZIcons.Queue, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("Queued", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                         Text(
                             item.visibleText.ifEmpty { "Attachment" },
                             style = MaterialTheme.typography.bodyMedium,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        gate(item)?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        (if (editing) "Editing" else gate(item))?.let {
+                            Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                     var menu by remember { mutableStateOf(false) }
                     Box {
                         IconButton(onClick = { menu = true }) { ZIcon(ZIcons.More, "Queued message actions", Modifier.size(20.dp)) }
-                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Send now") },
-                                leadingIcon = { ZIcon(ZIcons.Send, null, Modifier.size(20.dp)) },
-                                onClick = { menu = false; scope.launch { runCatching { handle.deliverQueuedNow(item.id) } } },
-                            )
-                            if (i > 0) DropdownMenuItem(
-                                text = { Text("Move up") },
-                                leadingIcon = { ZIcon(ZIcons.ChevronUp, null, Modifier.size(20.dp)) },
-                                onClick = { menu = false; runCatching { handle.moveQueuedBy(item.id, -1) } },
-                            )
-                            if (i < queue.size - 1) DropdownMenuItem(
-                                text = { Text("Move down") },
-                                leadingIcon = { ZIcon(ZIcons.ChevronDown, null, Modifier.size(20.dp)) },
-                                onClick = { menu = false; runCatching { handle.moveQueuedBy(item.id, 1) } },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Remove") },
-                                leadingIcon = { ZIcon(ZIcons.Delete, null, Modifier.size(20.dp)) },
-                                onClick = { menu = false; scope.launch { runCatching { handle.removeQueued(item.id) } } },
-                            )
-                        }
+                        ActionMenu(
+                            menu,
+                            { menu = false },
+                            listOfNotNull(
+                                MenuAction("Send now", ZIcons.Send) { scope.launch { runCatching { handle.deliverQueuedNow(item.id) } } },
+                                if (!editing && item.gate == null) MenuAction("Edit", ZIcons.Rename) { onEdit(item.id) } else null,
+                                if (i > 0) MenuAction("Move up", ZIcons.ChevronUp) { runCatching { handle.moveQueuedBy(item.id, -1) } } else null,
+                                if (i < queue.size - 1) MenuAction("Move down", ZIcons.ChevronDown) { runCatching { handle.moveQueuedBy(item.id, 1) } } else null,
+                                MenuAction("Remove", ZIcons.Delete, destructive = true) { scope.launch { runCatching { handle.removeQueued(item.id) } } },
+                            ),
+                        )
                     }
                 }
             }
