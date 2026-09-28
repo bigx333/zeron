@@ -32,6 +32,9 @@ import androidx.compose.material.icons.automirrored.outlined.CallSplit
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.CircularWavyProgressIndicator
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LoadingIndicator
@@ -117,7 +120,7 @@ private fun Widget(state: TranscriptState, model: RowModel, w: Widget, palette: 
                 tint = Color(palette[if (kind.failed) ColorRole.DANGER else ColorRole.TEXT_TERTIARY]),
             )
         }
-        is WidgetKind.Image -> RemoteImage(kind.reference, w, actions)
+        is WidgetKind.Image -> RemoteImage(kind.reference, w, actions) { state.uploadProgress }
         WidgetKind.Spinner -> CircularProgressIndicator(Modifier.fillMaxSize().padding(1.dp), strokeWidth = 1.5.dp, color = Color(palette[ColorRole.TEXT_TERTIARY]))
         is WidgetKind.Working -> WorkingIndicator(kind.sinceMs, kind.streaming, palette)
         is WidgetKind.Detail -> Tap("${kind.title} details") { actions.showText(kind.title, w.payload ?: "", true) }
@@ -259,14 +262,34 @@ object IconAssets {
 private val images = LruCache<String, ImageBitmap>(48)
 
 @Composable
-private fun RemoteImage(reference: String, w: Widget, actions: TranscriptActions) {
+private fun RemoteImage(reference: String, w: Widget, actions: TranscriptActions, progress: () -> Double?) {
     val image by produceState(images.get(reference), reference) {
         if (value == null) value = actions.loadImage(reference)?.also { images.put(reference, it) }
     }
     val radius = if (minOf(w.w, w.h) > 120) 14.dp else 12.dp
-    Box(Modifier.fillMaxSize().clip(RoundedCornerShape(radius))) {
+    Box(Modifier.fillMaxSize().clip(RoundedCornerShape(radius)), contentAlignment = Alignment.Center) {
         image?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
             ?: Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerHigh))
+        // Still being escorted to the host: a scrim and a wavy ring that fills with the transfer.
+        val p = if (reference.startsWith("pending://")) progress() else null
+        androidx.compose.animation.AnimatedVisibility(p != null, enter = fadeIn(), exit = fadeOut()) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.38f)), contentAlignment = Alignment.Center) {
+                val side = minOf(w.w, w.h)
+                CircularWavyProgressIndicator(
+                    progress = { (p ?: 0.0).toFloat().coerceIn(0.02f, 1f) },
+                    modifier = Modifier.size(minOf(40f, side * 0.55f).dp),
+                    color = Color.White,
+                    trackColor = Color.White.copy(alpha = 0.3f),
+                )
+                Text(
+                    "${((p ?: 0.0).coerceIn(0.0, 1.0) * 100).toInt()}%",
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    style = MaterialTheme.typography.labelSmallEmphasized,
+                    modifier = Modifier.semantics { contentDescription = "Uploading" },
+                )
+            }
+        }
     }
 }
 

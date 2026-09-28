@@ -2,6 +2,8 @@ package sh.zeron.android.transcript
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberScrollableState
@@ -64,6 +66,7 @@ import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.pow
 
 /** What the transcript asks of its host (links, images, text sheets). */
 class TranscriptActions(
@@ -96,7 +99,7 @@ fun Transcript(state: TranscriptState, actions: TranscriptActions, modifier: Mod
             when (i) {
                 is DragInteraction.Start -> {
                     state.dragging = true
-                    state.following = false
+                    state.released()
                 }
                 is DragInteraction.Stop, is DragInteraction.Cancel -> {
                     state.dragging = false
@@ -124,7 +127,14 @@ fun Transcript(state: TranscriptState, actions: TranscriptActions, modifier: Mod
                         state.offset = target
                         break
                     }
-                    state.offset += delta * (1f - exp(-dt * 16f))
+                    state.offset += if (state.runwayActive) {
+                        // Runway glide: the desktop's frame-rate-independent ease-out
+                        // (15% of the remaining glide per 60 fps frame).
+                        delta * (1f - 0.85f.pow(min(8f, dt * 60f)))
+                    } else {
+                        // Critically damped: the tail settles into place.
+                        delta * (1f - exp(-dt * 16f))
+                    }
                 }
             }
     }
@@ -151,6 +161,16 @@ fun Transcript(state: TranscriptState, actions: TranscriptActions, modifier: Mod
         val band by remember(state) {
             derivedStateOf { floor((state.offset - OVERSCAN) / BAND) * BAND }
         }
+        val motion = state.motion
+        val progress = remember { Animatable(1f) }
+        LaunchedEffect(motion?.id) {
+            if (motion == null) return@LaunchedEffect
+            progress.snapTo(0f)
+            progress.animateTo(
+                1f,
+                tween(motion.durationMs, easing = if (motion.expo) CubicBezierEasing(0.16f, 1f, 0.3f, 1f) else FastOutSlowInEasing),
+            )
+        }
         val placements = remember(frame, band, heightDp) {
             frame.rowsIn(band, band + heightDp + OVERSCAN * 2 + BAND)
         }
@@ -162,14 +182,21 @@ fun Transcript(state: TranscriptState, actions: TranscriptActions, modifier: Mod
             },
         ) { measurables, constraints ->
             val w = constraints.maxWidth
+            // Mid-motion, rows interpolate from the previous frame's placement.
+            val t = progress.value
+            val from = if (t < 1f) motion?.from else null
+            fun lerp(a: Float, b: Float) = a + (b - a) * t
             val placeables = measurables.mapIndexed { i, m ->
-                val h = (placements[i].height * d).roundToInt()
-                m.measure(Constraints.fixed(w, h))
+                val p = placements[i]
+                val h = from?.get(p.key)?.let { lerp(it.second, p.height) } ?: p.height
+                m.measure(Constraints.fixed(w, (h * d).roundToInt().coerceAtLeast(0)))
             }
             layout(w, constraints.maxHeight) {
                 val off = state.offset
                 placeables.forEachIndexed { i, pl ->
-                    pl.placeRelative(0, ((placements[i].y - off) * d).roundToInt())
+                    val p = placements[i]
+                    val y = from?.get(p.key)?.let { lerp(it.first, p.y) } ?: p.y
+                    pl.placeRelative(0, ((y - off) * d).roundToInt())
                 }
             }
         }
@@ -213,6 +240,7 @@ private fun RowHost(
 
     Box(
         Modifier
+            .clipToBounds()
             .graphicsLayer { alpha = appear.value }
             .drawBehind {
                 drawIntoCanvas { c ->
