@@ -42,6 +42,8 @@ import androidx.compose.material.icons.outlined.Send
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Schedule
 import sh.zeron.android.design.HarnessMark
+import sh.zeron.android.design.ZIcon
+import sh.zeron.android.design.ZIcons
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
@@ -150,7 +152,7 @@ private fun DeliveryChip(current: Delivery, canSteer: Boolean, onChange: (Delive
     var open by remember { mutableStateOf(false) }
     ContextChip(
         current.label,
-        leading = { Icon(Icons.Outlined.Schedule, null, Modifier.size(16.dp)) },
+        leading = { ZIcon(ZIcons.Queue, null, Modifier.size(16.dp)) },
         onClick = { open = true },
         tint = MaterialTheme.colorScheme.primary,
     ) {
@@ -200,7 +202,7 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
         }
     }
     row?.reasoning?.takeIf { it.isNotEmpty() }?.let { level ->
-        ContextChip(reasoningLabel(level), leading = { Icon(Icons.Outlined.Speed, null, Modifier.size(16.dp)) }, onClick = { open("effort") }) {
+        ContextChip(reasoningLabel(level), leading = { ZIcon(ZIcons.Effort, null, Modifier.size(16.dp)) }, onClick = { open("effort") }) {
             val levels = models?.let { list -> (list.firstOrNull { it.id == row.model } ?: list.firstOrNull())?.reasoningLevels }.orEmpty()
             ChoiceMenu(menu == "effort", { menu = null }, listOf(MenuSection("Reasoning effort", levels.map { l ->
                 MenuChoice(reasoningLabel(l), l == level) { setConfig { it.copy(reasoning = l) } }
@@ -209,12 +211,12 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
     }
     val pr = row?.pullRequest
     if (pr != null) {
-        ContextChip("#${pr.number}", leading = { Icon(Icons.AutoMirrored.Outlined.CallSplit, null, Modifier.size(16.dp)) }, onClick = {
+        ContextChip("#${pr.number}", leading = { ZIcon(ZIcons.PullRequest, null, Modifier.size(16.dp)) }, onClick = {
             CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(pr.url))
         })
     } else {
         row?.branch?.takeIf { it.isNotEmpty() }?.let {
-            ContextChip(it, leading = { Icon(Icons.AutoMirrored.Outlined.CallSplit, null, Modifier.size(16.dp)) }, onClick = {})
+            ContextChip(it, leading = { ZIcon(ZIcons.Branch, null, Modifier.size(16.dp)) }, onClick = {})
         }
     }
     val tokens = c.contextUsage?.tokens
@@ -224,7 +226,7 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
         if (fraction >= 0.5) {
             ContextChip(
                 "${(fraction * 100).toInt()}% context",
-                leading = { Icon(Icons.Outlined.DataUsage, null, Modifier.size(16.dp)) },
+                leading = { ZIcon(if (fraction >= 0.85) ZIcons.Warning else ZIcons.Context, null, Modifier.size(16.dp)) },
                 onClick = {},
                 tint = if (fraction >= 0.85) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -283,7 +285,7 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
                 shapes = ButtonDefaults.shapes(),
                 modifier = Modifier.align(Alignment.End),
             ) {
-                Icon(Icons.Outlined.Send, null, Modifier.size(18.dp))
+                ZIcon(ZIcons.Send, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Answer")
             }
@@ -315,26 +317,26 @@ fun QueuePanel(queue: List<QueueItem>, handle: SessionHandle) {
                     }
                     var menu by remember { mutableStateOf(false) }
                     Box {
-                        IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreHoriz, "Queued message actions") }
+                        IconButton(onClick = { menu = true }) { ZIcon(ZIcons.More, "Queued message actions", Modifier.size(20.dp)) }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(
                                 text = { Text("Send now") },
-                                leadingIcon = { Icon(Icons.Outlined.Send, null) },
+                                leadingIcon = { ZIcon(ZIcons.Send, null, Modifier.size(20.dp)) },
                                 onClick = { menu = false; scope.launch { runCatching { handle.deliverQueuedNow(item.id) } } },
                             )
                             if (i > 0) DropdownMenuItem(
                                 text = { Text("Move up") },
-                                leadingIcon = { Icon(Icons.Outlined.KeyboardArrowUp, null) },
+                                leadingIcon = { ZIcon(ZIcons.ChevronUp, null, Modifier.size(20.dp)) },
                                 onClick = { menu = false; runCatching { handle.moveQueuedBy(item.id, -1) } },
                             )
                             if (i < queue.size - 1) DropdownMenuItem(
                                 text = { Text("Move down") },
-                                leadingIcon = { Icon(Icons.Outlined.KeyboardArrowDown, null) },
+                                leadingIcon = { ZIcon(ZIcons.ChevronDown, null, Modifier.size(20.dp)) },
                                 onClick = { menu = false; runCatching { handle.moveQueuedBy(item.id, 1) } },
                             )
                             DropdownMenuItem(
                                 text = { Text("Remove") },
-                                leadingIcon = { Icon(Icons.Outlined.Delete, null) },
+                                leadingIcon = { ZIcon(ZIcons.Delete, null, Modifier.size(20.dp)) },
                                 onClick = { menu = false; scope.launch { runCatching { handle.removeQueued(item.id) } } },
                             )
                         }

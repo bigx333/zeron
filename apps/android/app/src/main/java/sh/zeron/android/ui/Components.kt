@@ -112,7 +112,7 @@ fun ProjectTile(name: String?, colorIndex: Int, size: Dp = 40.dp, modifier: Modi
                 ),
             )
         } else {
-            Icon(Icons.Outlined.Home, null, Modifier.size(size * 0.5f), tint = tone)
+            sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Home, null, Modifier.size(size * 0.5f), tint = tone)
         }
     }
 }
@@ -132,7 +132,7 @@ fun StatusLabel(row: SessionRow) {
             if (dot) {
                 Box(Modifier.size(7.dp).clip(CircleShape).background(color))
             } else {
-                Icon(Icons.Filled.Check, null, Modifier.size(15.dp), tint = color)
+                sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Check, null, Modifier.size(15.dp), tint = color)
             }
             Spacer(Modifier.width(5.dp))
             Text(text, style = MaterialTheme.typography.labelLarge, color = color)

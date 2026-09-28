@@ -169,7 +169,7 @@ fun ComposerSurface(
 private fun AttachButton() {
     // Attachments land with the picker; the affordance stays where it will live.
     IconButton(onClick = {}, enabled = false) {
-        Icon(Icons.Filled.Add, "Attach", tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+        sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Plus, "Attach", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
     }
 }
 
@@ -195,7 +195,7 @@ private fun ActionButton(action: ComposerAction, hasText: Boolean, onClick: () -
                     contentColor = MaterialTheme.colorScheme.onErrorContainer,
                 ),
                 modifier = Modifier.size(40.dp),
-            ) { Icon(Icons.Filled.Stop, "Stop", Modifier.size(20.dp)) }
+            ) { sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Stop, "Stop", Modifier.size(18.dp)) }
         } else {
             FilledIconButton(
                 onClick = {
@@ -209,7 +209,7 @@ private fun ActionButton(action: ComposerAction, hasText: Boolean, onClick: () -
                     disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                 ),
                 modifier = Modifier.size(40.dp),
-            ) { Icon(Icons.Filled.ArrowUpward, if (action == ComposerAction.Queue) "Queue" else "Send", Modifier.size(20.dp)) }
+            ) { sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Send, if (action == ComposerAction.Queue) "Queue" else "Send", Modifier.size(20.dp)) }
         }
     }
 }
@@ -275,7 +275,7 @@ fun ChoiceMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<MenuSect
                         supportingText = choice.supporting?.let { { Text(it) } },
                         shapes = MenuDefaults.itemShape(i, section.choices.size),
                         leadingIcon = choice.leading,
-                        selectedLeadingIcon = { Icon(Icons.Filled.Check, null) },
+                        selectedLeadingIcon = { sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Check, null, Modifier.size(20.dp)) },
                         colors = MenuDefaults.selectableItemColors(
                             selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
                             selectedTextColor = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -285,6 +285,30 @@ fun ChoiceMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<MenuSect
                 }
             }
             if (g < groups.size - 1) Spacer(Modifier.size(MenuDefaults.GroupSpacing))
+        }
+    }
+}
+
+class MenuAction(val label: String, @androidx.annotation.DrawableRes val icon: Int, val destructive: Boolean = false, val onClick: () -> Unit)
+
+/** An expressive action menu (one segmented group). */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun ActionMenu(expanded: Boolean, onDismiss: () -> Unit, actions: List<MenuAction>) {
+    DropdownMenuPopup(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenuGroup(shapes = MenuDefaults.groupShape(0, 1)) {
+            actions.forEachIndexed { i, a ->
+                val tint = if (a.destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                DropdownMenuItem(
+                    onClick = {
+                        onDismiss()
+                        a.onClick()
+                    },
+                    text = { Text(a.label, color = tint) },
+                    shape = MenuDefaults.itemShape(i, actions.size).shape,
+                    leadingIcon = { sh.zeron.android.design.ZIcon(a.icon, null, Modifier.size(20.dp), tint = tint) },
+                )
+            }
         }
     }
 }
