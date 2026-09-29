@@ -44,6 +44,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.design.ThemeMode
 import sh.zeron.android.design.ZIcon
@@ -51,17 +52,33 @@ import sh.zeron.android.design.ZIcons
 import uniffi.zeron_core.coreVersion
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SettingsScreen(model: AppModel) {
+fun SettingsScreen(model: AppModel, onBack: () -> Unit) {
     val appearance by model.appearance.collectAsState()
     val workspace by model.workspace.collectAsState()
     val devices = workspace?.devices.orEmpty()
+    val scroll = androidx.compose.material3.TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    androidx.compose.material3.Scaffold(
+        modifier = Modifier.nestedScroll(scroll.nestedScrollConnection),
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            androidx.compose.material3.LargeFlexibleTopAppBar(
+                title = { Text("Settings") },
+                navigationIcon = {
+                    androidx.compose.material3.IconButton(onClick = onBack) { ZIcon(ZIcons.Back, "Back", Modifier.size(24.dp)) }
+                },
+                scrollBehavior = scroll,
+                colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
+            )
+        },
+    ) { padding ->
     LazyColumn(
         Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 8.dp, bottom = 140.dp),
+        contentPadding = PaddingValues(top = padding.calculateTopPadding(), bottom = 32.dp + padding.calculateBottomPadding()),
     ) {
-        item { ScreenHeader("Settings", null) }
         item {
             // Account: a tonal hero card with a shaped monogram.
             Surface(
@@ -186,6 +203,7 @@ fun SettingsScreen(model: AppModel) {
             }
         }
     }
+}
 }
 
 private fun LazyListScope.section(title: String) {
