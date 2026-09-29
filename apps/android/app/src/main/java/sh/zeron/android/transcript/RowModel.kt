@@ -79,8 +79,10 @@ class RowModel(val display: RowDisplay) {
     /** Which runs to paint: `veilFrom` splits a streaming row into settled and fresh text. */
     sealed interface Pass {
         data object All : Pass
-        data class Settled(val veilFrom: Int) : Pass
-        data class Fresh(val veilFrom: Int) : Pass
+        /** Only text in `[from, to)` (UTF-16), clipped at glyph edges; no boxes or fades. */
+        data class Range(val from: Int, val to: Int) : Pass
+        /** Boxes and overflow fades only (the text is drawn by ranges). */
+        data object Chrome : Pass
     }
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -91,7 +93,7 @@ class RowModel(val display: RowDisplay) {
     /** Paint one layer in its own coordinates (dp × `d` = px). */
     fun draw(canvas: Canvas, layer: Int, d: Float, fonts: StyleFonts, palette: TranscriptPalette, pass: Pass = Pass.All) {
         val hairline = 1f
-        if (pass !is Pass.Fresh) {
+        if (pass !is Pass.Range) {
             for (i in boxesByLayer[layer]) {
                 val b = display.boxes[i]
                 rect.set(b.x * d, b.y * d, (b.x + b.w) * d, (b.y + b.h) * d)
@@ -116,32 +118,26 @@ class RowModel(val display: RowDisplay) {
             val run = display.runs[i]
             val start = run.start.toInt()
             val end = start + run.len.toInt()
+            val (from, to) = when (pass) {
+                Pass.All -> 0 to Int.MAX_VALUE
+                is Pass.Range -> pass.from to pass.to
+                Pass.Chrome -> break
+            }
+            if (end <= from || start >= to) continue
             var clipped = false
-            when (pass) {
-                Pass.All -> Unit
-                is Pass.Settled -> {
-                    if (start >= pass.veilFrom) continue
-                    if (end > pass.veilFrom) {
-                        val dx = fonts[run.style]?.getRunAdvance(display.text, start, end, start, end, false, pass.veilFrom) ?: 0f
-                        canvas.save()
-                        canvas.clipRect(run.x * d, -1e5f, run.x * d + dx, 1e5f)
-                        clipped = true
-                    }
-                }
-                is Pass.Fresh -> {
-                    if (end <= pass.veilFrom) continue
-                    if (start < pass.veilFrom) {
-                        val dx = fonts[run.style]?.getRunAdvance(display.text, start, end, start, end, false, pass.veilFrom) ?: 0f
-                        canvas.save()
-                        canvas.clipRect(run.x * d + dx, -1e5f, 1e5f, 1e5f)
-                        clipped = true
-                    }
-                }
+            if (start < from || end > to) {
+                val paint = fonts[run.style]
+                fun dx(at: Int) = paint?.getRunAdvance(display.text, start, end, start, end, false, at) ?: 0f
+                val left = if (start < from) run.x * d + dx(from) else -1e5f
+                val right = if (end > to) run.x * d + dx(to) else 1e5f
+                canvas.save()
+                canvas.clipRect(left, -1e5f, right, 1e5f)
+                clipped = true
             }
             drawRun(canvas, i, d, fonts, palette)
             if (clipped) canvas.restore()
         }
-        if (pass !is Pass.Fresh) drawFades(canvas, layer, d, fonts, palette)
+        if (pass !is Pass.Range) drawFades(canvas, layer, d, fonts, palette)
     }
 
     private fun drawRun(canvas: Canvas, i: Int, d: Float, fonts: StyleFonts, palette: TranscriptPalette, color: Int? = null) {

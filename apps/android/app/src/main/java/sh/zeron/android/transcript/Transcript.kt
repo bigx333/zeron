@@ -34,6 +34,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -215,20 +216,17 @@ private fun RowHost(
     val d = LocalDensity.current.density
     val fonts = state.fonts
 
-    // Streaming veil: freshly appended text fades in over the settled row.
-    val veil = remember(p.key) { Animatable(1f) }
-    var veilFrom by remember(p.key) { mutableStateOf(0) }
-    var previous by remember(p.key) { mutableStateOf<RowModel?>(null) }
+    // Streaming veil: each appended chunk fades in on its own clock, so a
+    // new token never restarts (or pops) the ones still fading. Chunks are
+    // recorded during composition — before the new text is ever drawn.
+    val veil = remember(p.key) { Veil() }
+    remember(model) { veil.grow(model); Unit }
+    val clock = remember(p.key) { mutableLongStateOf(0L) }
     LaunchedEffect(model) {
-        val prev = previous
-        previous = model
-        if (prev != null && prev !== model && model.display.text.length > prev.display.text.length &&
-            model.display.text.startsWith(prev.display.text)
-        ) {
-            veilFrom = prev.display.text.length
-            veil.snapTo(0f)
-            veil.animateTo(1f, tween(220))
+        while (veil.active(System.nanoTime())) {
+            withFrameNanos { clock.longValue = it }
         }
+        clock.longValue = System.nanoTime()
     }
 
     // Rows that arrive after the first frame fade in.
@@ -243,18 +241,8 @@ private fun RowHost(
             .clipToBounds()
             .graphicsLayer { alpha = appear.value }
             .drawBehind {
-                drawIntoCanvas { c ->
-                    val canvas = c.nativeCanvas
-                    val v = veil.value
-                    if (v >= 1f) {
-                        model.draw(canvas, 0, d, fonts, palette)
-                    } else {
-                        model.draw(canvas, 0, d, fonts, palette, RowModel.Pass.Settled(veilFrom))
-                        val save = canvas.saveLayerAlpha(null, (v * 255).toInt())
-                        model.draw(canvas, 0, d, fonts, palette, RowModel.Pass.Fresh(veilFrom))
-                        canvas.restoreToCount(save)
-                    }
-                }
+                clock.longValue // redraw on every veil frame
+                drawIntoCanvas { c -> veil.draw(c.nativeCanvas, model, d, fonts, palette, System.nanoTime()) }
             }
             .pointerTaps(model, d, actions, onLongPress = {
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -323,5 +311,81 @@ private fun RowMenu(
                 if (selectable.isNotEmpty()) sh.zeron.android.ui.MenuAction("Select text", ZIcons.Text) { actions.showText("Select text", selectable, false) } else null,
             ),
         )
+    }
+}
+
+/**
+ * Fade-in bookkeeping for one streaming row: each inserted chunk of text
+ * (UTF-16 `[from, to)`) with its start time. Chunks come from a prefix +
+ * suffix diff, not a prefix check: list rows carry their bullet after the
+ * item text, so streamed words land *before* the row's tail.
+ */
+private class Veil {
+    private class Chunk(var from: Int, var to: Int, val started: Long)
+
+    private var last: RowModel? = null
+    private val chunks = ArrayList<Chunk>()
+
+    fun grow(model: RowModel) {
+        val prev = last
+        last = model
+        if (prev == null || prev === model) return
+        val old = prev.display.text
+        val new = model.display.text
+        val delta = new.length - old.length
+        if (delta <= 0) {
+            chunks.clear()
+            return
+        }
+        var p = 0
+        val max = old.length
+        while (p < max && old[p] == new[p]) p++
+        var sfx = 0
+        while (sfx < max - p && old[old.length - 1 - sfx] == new[new.length - 1 - sfx]) sfx++
+        if (new.length - p - sfx != delta) {
+            // More than an insertion (the block was re-flowed): show it as is.
+            chunks.clear()
+            return
+        }
+        for (c in chunks) {
+            if (c.from >= p) {
+                c.from += delta
+                c.to += delta
+            }
+        }
+        chunks.add(Chunk(p, p + delta, System.nanoTime()))
+        chunks.sortBy { it.from }
+    }
+
+    fun active(now: Long): Boolean {
+        chunks.removeAll { now - it.started >= DURATION }
+        return chunks.isNotEmpty()
+    }
+
+    fun draw(canvas: android.graphics.Canvas, model: RowModel, d: Float, fonts: StyleFonts, palette: sh.zeron.android.design.TranscriptPalette, now: Long) {
+        val live = chunks.filter { now - it.started < DURATION }
+        if (live.isEmpty()) {
+            model.draw(canvas, 0, d, fonts, palette)
+            return
+        }
+        model.draw(canvas, 0, d, fonts, palette, RowModel.Pass.Chrome)
+        // Settled text: everything between the fading chunks.
+        var cursor = 0
+        for (c in live) {
+            if (c.from > cursor) model.draw(canvas, 0, d, fonts, palette, RowModel.Pass.Range(cursor, c.from))
+            cursor = maxOf(cursor, c.to)
+        }
+        model.draw(canvas, 0, d, fonts, palette, RowModel.Pass.Range(cursor, Int.MAX_VALUE))
+        for (c in live) {
+            val t = ((now - c.started).toFloat() / DURATION).coerceIn(0f, 1f)
+            val alpha = 1f - (1f - t) * (1f - t) // ease-out
+            val save = canvas.saveLayerAlpha(null, (alpha * 255).toInt())
+            model.draw(canvas, 0, d, fonts, palette, RowModel.Pass.Range(c.from, c.to))
+            canvas.restoreToCount(save)
+        }
+    }
+
+    companion object {
+        const val DURATION = 220_000_000L
     }
 }
