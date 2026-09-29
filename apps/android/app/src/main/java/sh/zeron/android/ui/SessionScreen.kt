@@ -10,6 +10,9 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.animation.animateColorAsState
+import sh.zeron.android.design.ZIcon
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
@@ -42,6 +45,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.material3.Surface
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -142,64 +147,61 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
     var overflow by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        val density = LocalDensity.current
-        val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 64.dp
-        Transcript(transcript, actions, Modifier.fillMaxSize().padding(top = top))
-        // Round tonal controls over a scrim, the title centered between them.
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .background(Brush.verticalGradient(0.7f to MaterialTheme.colorScheme.background, 1f to Color.Transparent))
-                .statusBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TonalCircleButton(ZIcons.Back, "Back", onClick = onBack)
-            Column(Modifier.weight(1f).padding(horizontal = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(composer.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMediumEmphasized)
-                Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Box {
-                TonalCircleButton(ZIcons.More, "More", onClick = { overflow = true })
-                ActionMenu(
-                    overflow,
-                    { overflow = false },
-                    listOfNotNull(
-                        MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
-                        row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
-                        row?.let { MenuAction("Archive", ZIcons.Archive) { model.archive(chatId); onBack() } },
-                    ),
-                )
+    // Flat Material chrome: the header sits on the page and takes the
+    // container tone once the transcript scrolls under it; the transcript
+    // ends where the composer begins (nothing streams behind it).
+    val scrolled by remember { derivedStateOf { transcript.offset > 1f } }
+    val headerColor by animateColorAsState(
+        if (scrolled) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.background,
+        MaterialTheme.motionScheme.defaultEffectsSpec(),
+        label = "header",
+    )
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Surface(color = headerColor) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TonalCircleButton(ZIcons.Back, "Back", onClick = onBack, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                Column(Modifier.weight(1f).padding(horizontal = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(composer.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMediumEmphasized)
+                    Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Box {
+                    TonalCircleButton(ZIcons.More, "More", onClick = { overflow = true }, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                    ActionMenu(
+                        overflow,
+                        { overflow = false },
+                        listOfNotNull(
+                            MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
+                            row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
+                            row?.let { MenuAction("Archive", ZIcons.Archive) { model.archive(chatId); onBack() } },
+                        ),
+                    )
+                }
             }
         }
-        val bg = MaterialTheme.colorScheme.background
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                // The transcript fades out over a short band, then the chrome sits on solid background.
-                .drawBehind {
-                    val band = 28.dp.toPx()
-                    drawRect(Brush.verticalGradient(listOf(Color.Transparent, bg), startY = 0f, endY = band))
-                    drawRect(bg, topLeft = androidx.compose.ui.geometry.Offset(0f, band), size = androidx.compose.ui.geometry.Size(size.width, size.height - band))
-                }
-                .padding(top = 20.dp)
-                .imePadding()
-                .navigationBarsPadding()
-                .onSizeChanged { transcript.bottomInset = with(density) { it.height.toDp().value } + 8f },
-        ) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            Transcript(transcript, actions, Modifier.fillMaxSize())
             val showJump by remember { derivedStateOf { !transcript.following && transcript.distanceFromBottom > 400f } }
-            Box(Modifier.fillMaxWidth()) {
-                androidx.compose.animation.AnimatedVisibility(
-                    showJump,
-                    enter = fadeIn() + scaleIn(),
-                    exit = fadeOut() + scaleOut(),
-                    modifier = Modifier.align(Alignment.Center).padding(bottom = 8.dp),
-                ) {
-                    TonalCircleButton(ZIcons.ArrowDown, "Jump to latest", onClick = { transcript.scrollToBottom() }, size = 44.dp)
-                }
+            androidx.compose.animation.AnimatedVisibility(
+                showJump,
+                enter = fadeIn() + scaleIn(),
+                exit = fadeOut() + scaleOut(),
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+            ) {
+                SmallFloatingActionButton(
+                    onClick = { transcript.scrollToBottom() },
+                    shape = CircleShape,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                ) { ZIcon(ZIcons.ArrowDown, "Jump to latest", Modifier.size(22.dp)) }
             }
+        }
+        Column(Modifier.fillMaxWidth().imePadding().navigationBarsPadding()) {
             Banner(composer, connectivity?.state, onRetry = { runCatching { handle.retryDelivery() } })
             composer.openInput?.let { QuestionPanel(it) { answers -> runCatching { handle.respondInput(it.requestId, answers) } } }
             Composer(model, core, handle, composer, row, transcript)

@@ -41,8 +41,8 @@ class TranscriptState {
     /** Scroll offset in dp (0 = top of the content). */
     var offset by mutableFloatStateOf(0f)
     var viewport by mutableFloatStateOf(0f)
-    /** Space the composer covers at the bottom (dp). */
-    var bottomInset by mutableFloatStateOf(0f)
+    /** Breathing room below the last row, on top of the frame's own (dp). */
+    var bottomInset by mutableFloatStateOf(12f)
     var following by mutableStateOf(true)
     var dragging by mutableStateOf(false)
     val fonts = StyleFonts()
