@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -23,6 +24,22 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AppBarWithSearch
+import androidx.compose.material3.ExpandedFullScreenSearchBar
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SearchBarDefaults
+import androidx.compose.material3.SearchBarValue
+import androidx.compose.material3.rememberSearchBarState
+import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.IconButton
@@ -93,11 +110,23 @@ private fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
     return rows.count { it.indicator == ChatIndicator.WORKING } to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+/**
+ * Sessions home, in the Material pattern for a search-led app with two
+ * destinations: a search app bar with the account avatar (→ Settings), the
+ * list, and an extended FAB for the primary action. No navigation bar —
+ * Material reserves it for three to five destinations.
+ */
 @Composable
-fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
+fun SessionsScreen(
+    model: AppModel,
+    onOpen: (String) -> Unit,
+    onNew: () -> Unit,
+    onSettings: () -> Unit,
+    startSearching: Boolean = false,
+) {
     val workspace by model.workspace.collectAsState()
     val connectivity by model.connectivity.collectAsState()
+    val client by model.client.collectAsState()
     var filter by rememberSaveable { mutableStateOf(Filter.All) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -105,13 +134,13 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
     val pull = rememberPullToRefreshState()
     val ws = workspace
     val counts = remember(ws) { ws?.let { liveCounts(it) } ?: (0 to 0) }
+    val list = rememberLazyListState()
+    val fabExpanded by remember { derivedStateOf { list.firstVisibleItemIndex == 0 } }
+    val density = LocalDensity.current
 
-    val subtitle = when {
-        connectivity?.state == ConnectivityState.OFFLINE -> "Offline"
-        connectivity?.state == ConnectivityState.RECONNECTING -> "Reconnecting…"
-        model.isDemo -> "Demo workspace"
-        else -> model.accountDetail.takeIf { it.isNotEmpty() }
-    }
+    val searchState = rememberSearchBarState(if (startSearching) SearchBarValue.Expanded else SearchBarValue.Collapsed)
+    val query = rememberTextFieldState()
+    val scrollBehavior = SearchBarDefaults.enterAlwaysSearchBarScrollBehavior()
 
     val archive: (SessionRow) -> Unit = { row ->
         model.archive(row.id)
@@ -122,9 +151,23 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
         }
     }
 
-    val list = androidx.compose.foundation.lazy.rememberLazyListState()
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    Box(Modifier.fillMaxSize()) {
+    val inputField = @Composable {
+        SearchBarDefaults.InputField(
+            textFieldState = query,
+            searchBarState = searchState,
+            onSearch = {},
+            placeholder = { Text("Search sessions", maxLines = 1) },
+            leadingIcon = {
+                if (searchState.currentValue == SearchBarValue.Expanded) {
+                    IconButton(onClick = { scope.launch { searchState.animateToCollapsed() } }) { ZIcon(ZIcons.Back, "Back", Modifier.size(22.dp)) }
+                } else {
+                    ZIcon(ZIcons.Search, null, Modifier.size(22.dp))
+                }
+            },
+        )
+    }
+
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         sh.zeron.android.design.WallpaperHero(
             model.wallpaper,
             scrollFade = {
@@ -132,85 +175,148 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
                 else 1f - list.firstVisibleItemScrollOffset / (with(density) { 400.dp.toPx() })
             },
         )
-        PullToRefreshBox(
-            isRefreshing = refreshing,
-            onRefresh = {
-                refreshing = true
-                scope.launch {
-                    model.refresh()
-                    refreshing = false
-                }
-            },
-            state = pull,
-            modifier = Modifier.fillMaxSize(),
-            indicator = {
-                PullToRefreshDefaults.LoadingIndicator(
-                    state = pull,
-                    isRefreshing = refreshing,
-                    modifier = Modifier.align(Alignment.TopCenter).padding(WindowInsets.statusBars.asPaddingValues()),
+        Scaffold(
+            modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+            containerColor = Color.Transparent,
+            snackbarHost = { SnackbarHost(snackbar) },
+            topBar = {
+                AppBarWithSearch(
+                    state = searchState,
+                    inputField = inputField,
+                    scrollBehavior = scrollBehavior,
+                    colors = SearchBarDefaults.appBarWithSearchColors(appBarContainerColor = Color.Transparent),
+                    actions = {
+                        if (connectivity?.state == ConnectivityState.OFFLINE || connectivity?.state == ConnectivityState.RECONNECTING) {
+                            ZIcon(ZIcons.Offline, "Offline", Modifier.padding(end = 8.dp).size(22.dp), tint = MaterialTheme.colorScheme.error)
+                        }
+                        AccountAvatar(model.accountName, onSettings)
+                    },
                 )
-            },
-        ) {
-            LazyColumn(
-                state = list,
-                contentPadding = PaddingValues(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 8.dp, bottom = 200.dp),
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                item("header") {
-                    ScreenHeader("Sessions", subtitle) {
-                        if (connectivity?.state == ConnectivityState.OFFLINE) {
-                            TonalCircleButton(
-                                ZIcons.Offline, "Offline", onClick = { scope.launch { model.refresh() } },
-                                container = MaterialTheme.colorScheme.errorContainer, content = MaterialTheme.colorScheme.onErrorContainer,
+                ExpandedFullScreenSearchBar(state = searchState, inputField = inputField) {
+                    val q = query.text.toString().trim()
+                    val results = remember(q, ws) {
+                        if (q.isEmpty()) ws?.front?.recent.orEmpty() else client?.search(q, 60u)?.map { it.session }.orEmpty()
+                    }
+                    LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+                        item {
+                            Text(
+                                if (q.isEmpty()) "Recent" else "${results.size} results",
+                                style = MaterialTheme.typography.titleSmallEmphasized,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(start = 28.dp, top = 8.dp, bottom = 8.dp),
                             )
                         }
-                    }
-                }
-                item("filters") {
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        for (f in Filter.entries) {
-                            Pill(
-                                f.label,
-                                filter == f,
-                                onClick = { filter = f },
-                                count = when (f) {
-                                    Filter.NeedsYou -> counts.second
-                                    Filter.Working -> counts.first
-                                    else -> null
-                                },
-                            )
-                        }
-                    }
-                }
-                if (ws == null) return@LazyColumn
-                val front = ws.front
-                when (filter) {
-                    Filter.All -> {
-                        if (front.pinned.isNotEmpty()) group("pinned", "Pinned", front.pinned, model, onOpen, archive)
-                        for (section in front.sections) {
-                            group(section.id, section.name, section.sessions, model, onOpen, archive, collapsed = section.collapsed) {
-                                model.setSectionCollapsed(section.id, !section.collapsed)
+                        itemsIndexed(results, key = { _, r -> r.id }) { i, row ->
+                            Box(Modifier.padding(horizontal = 16.dp).padding(bottom = ListItemDefaults.SegmentedGap)) {
+                                SessionItem(row, i, results.size, model, onOpen = {
+                                    scope.launch { searchState.animateToCollapsed() }
+                                    onOpen(it)
+                                }, archive)
                             }
                         }
-                        if (front.recent.isNotEmpty()) group("recent", "Recent", front.recent, model, onOpen, archive)
                     }
-                    Filter.NeedsYou -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.AWAITING_INPUT }, model, onOpen, archive)
-                    Filter.Working -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.WORKING }, model, onOpen, archive)
-                    Filter.Pinned -> group("f", null, front.pinned, model, onOpen, archive)
                 }
-                val empty = when (filter) {
-                    Filter.All -> front.pinned.isEmpty() && front.sections.isEmpty() && front.recent.isEmpty()
-                    Filter.NeedsYou -> counts.second == 0
-                    Filter.Working -> counts.first == 0
-                    Filter.Pinned -> front.pinned.isEmpty()
+            },
+            floatingActionButton = {
+                ExtendedFloatingActionButton(
+                    onClick = onNew,
+                    expanded = fabExpanded,
+                    icon = { ZIcon(ZIcons.NewSession, null, Modifier.size(24.dp)) },
+                    text = { Text("New session") },
+                )
+            },
+        ) { padding ->
+            PullToRefreshBox(
+                isRefreshing = refreshing,
+                onRefresh = {
+                    refreshing = true
+                    scope.launch {
+                        model.refresh()
+                        refreshing = false
+                    }
+                },
+                state = pull,
+                modifier = Modifier.fillMaxSize().padding(top = padding.calculateTopPadding()),
+                indicator = {
+                    PullToRefreshDefaults.LoadingIndicator(state = pull, isRefreshing = refreshing, modifier = Modifier.align(Alignment.TopCenter))
+                },
+            ) {
+                LazyColumn(
+                    state = list,
+                    contentPadding = PaddingValues(bottom = 112.dp + padding.calculateBottomPadding()),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    item("filters") {
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            for (f in Filter.entries) {
+                                val count = when (f) {
+                                    Filter.NeedsYou -> counts.second
+                                    Filter.Working -> counts.first
+                                    else -> 0
+                                }
+                                FilterChip(
+                                    selected = filter == f,
+                                    onClick = { filter = f },
+                                    label = { Text(if (count > 0) "${f.label}  $count" else f.label) },
+                                    leadingIcon = if (filter == f) {
+                                        { ZIcon(ZIcons.Check, null, Modifier.size(FilterChipDefaults.IconSize)) }
+                                    } else {
+                                        null
+                                    },
+                                    colors = FilterChipDefaults.filterChipColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                                )
+                            }
+                        }
+                    }
+                    if (ws == null) return@LazyColumn
+                    val front = ws.front
+                    when (filter) {
+                        Filter.All -> {
+                            if (front.pinned.isNotEmpty()) group("pinned", "Pinned", front.pinned, model, onOpen, archive)
+                            for (section in front.sections) {
+                                group(section.id, section.name, section.sessions, model, onOpen, archive, collapsed = section.collapsed) {
+                                    model.setSectionCollapsed(section.id, !section.collapsed)
+                                }
+                            }
+                            if (front.recent.isNotEmpty()) group("recent", "Recent", front.recent, model, onOpen, archive)
+                        }
+                        Filter.NeedsYou -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.AWAITING_INPUT }, model, onOpen, archive)
+                        Filter.Working -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.WORKING }, model, onOpen, archive)
+                        Filter.Pinned -> group("f", null, front.pinned, model, onOpen, archive)
+                    }
+                    val empty = when (filter) {
+                        Filter.All -> front.pinned.isEmpty() && front.sections.isEmpty() && front.recent.isEmpty()
+                        Filter.NeedsYou -> counts.second == 0
+                        Filter.Working -> counts.first == 0
+                        Filter.Pinned -> front.pinned.isEmpty()
+                    }
+                    if (empty) item("empty") { EmptyState(filter) }
                 }
-                if (empty) item("empty") { EmptyState(filter) }
             }
         }
-        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(bottom = 180.dp))
+        // Once the list scrolls under it, the status bar gets the page tone.
+        val scrolled by remember { derivedStateOf { list.firstVisibleItemIndex > 0 || list.firstVisibleItemScrollOffset > 0 } }
+        val scrim by androidx.compose.animation.animateColorAsState(
+            if (scrolled) MaterialTheme.colorScheme.background else Color.Transparent,
+            label = "status-scrim",
+        )
+        Box(Modifier.fillMaxWidth().windowInsetsTopHeight(WindowInsets.statusBars).background(scrim))
+    }
+}
+
+/** The signed-in account: a monogram avatar that opens Settings. */
+@Composable
+private fun AccountAvatar(name: String, onClick: () -> Unit) {
+    IconButton(onClick = onClick) {
+        Box(
+            Modifier.size(32.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(name.take(1).uppercase(), style = MaterialTheme.typography.labelLargeEmphasized, color = MaterialTheme.colorScheme.onPrimary)
+        }
     }
 }
 
