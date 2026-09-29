@@ -105,11 +105,14 @@ internal fun ActionButton(action: ComposerAction, hasText: Boolean, onClick: () 
                 enabled = hasText,
                 shapes = IconButtonDefaults.shapes(),
                 colors = IconButtonDefaults.filledIconButtonColors(
+                    // White on the accent in both appearances, like iOS (the
+                    // dark scheme's on-primary is a navy that muddies the arrow).
+                    contentColor = Color.White,
                     disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
                     disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                 ),
                 modifier = Modifier.size(40.dp),
-            ) { sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Send, if (action == ComposerAction.Queue) "Queue" else "Send", Modifier.size(20.dp)) }
+            ) { sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Send, if (action == ComposerAction.Queue) "Queue" else "Send", Modifier.size(22.dp)) }
         }
     }
 }
