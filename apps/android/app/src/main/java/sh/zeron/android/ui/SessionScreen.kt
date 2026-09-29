@@ -152,26 +152,21 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
     // ends where the composer begins (nothing streams behind it).
     val scrolled by remember { derivedStateOf { transcript.offset > 1f } }
     val headerColor by animateColorAsState(
-        if (scrolled) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.background,
+        if (scrolled) MaterialTheme.colorScheme.surfaceContainer else MaterialTheme.colorScheme.background,
         MaterialTheme.motionScheme.defaultEffectsSpec(),
         label = "header",
     )
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        Surface(color = headerColor) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TonalCircleButton(ZIcons.Back, "Back", onClick = onBack, container = MaterialTheme.colorScheme.surfaceContainerHighest)
-                Column(Modifier.weight(1f).padding(horizontal = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(composer.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMediumEmphasized)
-                    Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+        androidx.compose.material3.TopAppBar(
+            title = { Text(composer.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            subtitle = { Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            titleHorizontalAlignment = Alignment.CenterHorizontally,
+            navigationIcon = {
+                IconButton(onClick = onBack) { ZIcon(ZIcons.Back, "Back", Modifier.size(24.dp)) }
+            },
+            actions = {
                 Box {
-                    TonalCircleButton(ZIcons.More, "More", onClick = { overflow = true }, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                    IconButton(onClick = { overflow = true }) { ZIcon(ZIcons.More, "More", Modifier.size(24.dp)) }
                     ActionMenu(
                         overflow,
                         { overflow = false },
@@ -182,8 +177,9 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit) {
                         ),
                     )
                 }
-            }
-        }
+            },
+            colors = TopAppBarDefaults.topAppBarColors(containerColor = headerColor),
+        )
         Box(Modifier.weight(1f).fillMaxWidth()) {
             Transcript(transcript, actions, Modifier.fillMaxSize())
             val showJump by remember { derivedStateOf { !transcript.following && transcript.distanceFromBottom > 400f } }

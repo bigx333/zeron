@@ -130,8 +130,8 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
-                title = { Text("New session", style = MaterialTheme.typography.titleLargeEmphasized, modifier = Modifier.padding(start = 12.dp)) },
-                navigationIcon = { TonalCircleButton(ZIcons.Close, "Close", onClick = onClose, modifier = Modifier.padding(start = 8.dp), size = 44.dp) },
+                title = { Text("New session") },
+                navigationIcon = { IconButton(onClick = onClose) { ZIcon(ZIcons.Close, "Close", Modifier.size(24.dp)) } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
             )
         },
