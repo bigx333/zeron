@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -27,8 +28,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AppBarWithSearch
 import androidx.compose.material3.ExpandedFullScreenSearchBar
 import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SearchBarDefaults
 import androidx.compose.material3.SearchBarValue
@@ -248,25 +247,19 @@ fun SessionsScreen(
                 ) {
                     item("filters") {
                         Row(
-                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 4.dp),
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             for (f in Filter.entries) {
-                                val count = when (f) {
-                                    Filter.NeedsYou -> counts.second
-                                    Filter.Working -> counts.first
-                                    else -> 0
-                                }
-                                FilterChip(
-                                    selected = filter == f,
+                                Pill(
+                                    f.label,
+                                    filter == f,
                                     onClick = { filter = f },
-                                    label = { Text(if (count > 0) "${f.label}  $count" else f.label) },
-                                    leadingIcon = if (filter == f) {
-                                        { ZIcon(ZIcons.Check, null, Modifier.size(FilterChipDefaults.IconSize)) }
-                                    } else {
-                                        null
+                                    count = when (f) {
+                                        Filter.NeedsYou -> counts.second
+                                        Filter.Working -> counts.first
+                                        else -> null
                                     },
-                                    colors = FilterChipDefaults.filterChipColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
                                 )
                             }
                         }
@@ -518,5 +511,35 @@ private fun EmptyState(filter: Filter) {
             },
             style = MaterialTheme.typography.titleLarge,
         )
+    }
+}
+
+/** A filter pill: filled when selected, tonal otherwise, with an optional count. */
+@Composable
+private fun Pill(label: String, selected: Boolean, onClick: () -> Unit, count: Int? = null) {
+    val container by androidx.compose.animation.animateColorAsState(
+        if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
+        MaterialTheme.motionScheme.defaultEffectsSpec(),
+        label = "pill",
+    )
+    val fg = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+    Surface(onClick = onClick, shape = RoundedCornerShape(50), color = container, contentColor = fg) {
+        Row(
+            Modifier.heightIn(min = 40.dp).padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(label, style = MaterialTheme.typography.labelLarge)
+            if (count != null && count > 0) {
+                Box(
+                    Modifier
+                        .clip(CircleShape)
+                        .background(if (selected) fg.copy(alpha = 0.2f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
+                        .padding(horizontal = 7.dp, vertical = 1.dp),
+                ) {
+                    Text("$count", style = MaterialTheme.typography.labelMedium, color = if (selected) fg else MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
     }
 }
