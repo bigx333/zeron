@@ -198,7 +198,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         }
         s.appendSections(["Messages"])
         s.appendItems([
-            Row(id: "steerMode", title: "Steer mode", subtitle: "Send into the active turn without confirmation. Off queues messages for the next turn. Syncs across your devices.", symbol: "arrow.turn.down.right", accessory: .toggle(app.steerMode)),
+            Row(id: "steerMode", title: "Steer mode", subtitle: "Send into the active turn without confirmation.", symbol: "arrow.turn.down.right", accessory: .toggle(app.steerMode)),
         ])
         s.appendSections(["Notifications"])
         s.appendItems(notificationRows())

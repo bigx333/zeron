@@ -798,7 +798,7 @@ impl Render for ShortcutsPage {
                     .child(widgets::meta_line(
                         &theme,
                         vec![div()
-                            .child("Send into the active turn without confirmation. Off queues messages for the next turn. Syncs across your devices.")
+                            .child("Send into the active turn without confirmation.")
                             .into_any_element()],
                     )),
             )
