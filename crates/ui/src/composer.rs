@@ -494,6 +494,8 @@ pub enum SendButtonMode {
     Send,
     /// Live run with text typed: queue for the next turn.
     Queue,
+    /// Live run with content: send directly into the active turn.
+    Steer,
     /// Live run, nothing typed: red stop square.
     Stop,
 }
@@ -8685,7 +8687,19 @@ impl Composer {
                 self.staged().len() + self.staged_appshots().len(),
                 self.staged_comments(cx).len(),
             );
-        send_button_mode(self.run_live(cx), has_text)
+        match send_button_mode(self.run_live(cx), has_text) {
+            SendButtonMode::Queue
+                if self
+                    .state
+                    .read(cx)
+                    .queue_send_mode
+                    .unwrap_or_else(|| crate::settings::queue_send_mode(cx))
+                    == crate::settings::QueueSendMode::Steer =>
+            {
+                SendButtonMode::Steer
+            }
+            mode => mode,
+        }
     }
 
     fn execute_workspace_command(
@@ -8749,9 +8763,7 @@ impl Composer {
             SendButtonMode::Stop => {}
             _ if no_content => {}
             _ if self.send_blocked(cx) => {}
-            SendButtonMode::Send => self.send(text, false, cx),
-            // Busy: keep the message queued until the current turn ends.
-            SendButtonMode::Queue => self.send(text, true, cx),
+            mode => self.send(text, mode, cx),
         }
     }
 
@@ -8779,12 +8791,14 @@ impl Composer {
         }
     }
 
-    /// Queue a Run doc command with an optimistic echo — or, with the agent
-    /// busy, park the message on the chat's pending queue instead. New chats
+    /// Submit a Run or Steer command with an optimistic echo, or park the
+    /// message on the pending queue when Queue mode is selected. New chats
     /// thread the picked config in: worktree creation (when the isolated toggle
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
-    fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
+    fn send(&mut self, text: String, mode: SendButtonMode, cx: &mut Context<Self>) {
+        let queue = mode == SendButtonMode::Queue;
+        let steer = mode == SendButtonMode::Steer;
         if !self.check_reference_delivery(&text, cx) {
             return;
         }
@@ -8922,7 +8936,7 @@ impl Composer {
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().timestamp_millis();
-        // Existing busy chats always queue; compatibility was checked before
+        // Queue mode keeps busy-chat messages held; compatibility was checked before
         // taking the draft, attachments, or review comments.
         let queue = queue && !is_new;
         let clean_queue_attachment_text = staged.is_empty()
@@ -9406,22 +9420,29 @@ impl Composer {
                     .as_ref()
                     .and_then(|spec| spec.space_id.as_ref())
                     .is_some();
-                let command = SessionCommandPayload::Run {
-                    request: RunRequest {
-                        mcp: None,
+                let command = if steer && !is_new {
+                    SessionCommandPayload::Steer {
                         prompt: content.clone(),
-                        harness: resolved.harness,
-                        model: resolved.model.clone(),
-                        reasoning: resolved.reasoning,
-                        model_options: resolved.model_options.clone(),
-                        cwd,
-                        sandbox: SandboxLevel::WorkspaceWrite,
-                        auto_approve: false,
-                        resume: None,
-                        attachments: attachment_paths,
-                        worktree: run_worktree,
-                    },
-                    message_id: message_id.clone(),
+                        message_id: Some(message_id.clone()),
+                    }
+                } else {
+                    SessionCommandPayload::Run {
+                        request: RunRequest {
+                            mcp: None,
+                            prompt: content.clone(),
+                            harness: resolved.harness,
+                            model: resolved.model.clone(),
+                            reasoning: resolved.reasoning,
+                            model_options: resolved.model_options.clone(),
+                            cwd,
+                            sandbox: SandboxLevel::WorkspaceWrite,
+                            auto_approve: false,
+                            resume: None,
+                            attachments: attachment_paths,
+                            worktree: run_worktree,
+                        },
+                        message_id: message_id.clone(),
+                    }
                 };
                 let command = serde_json::to_value(&command)
                     .map_err(|e| format!("Send failed: {e}"))?;
@@ -10570,7 +10591,7 @@ impl Composer {
                 .tooltip(crate::settings::widgets::text_tooltip("Stop"))
                 .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
                 .into_any_element(),
-            SendButtonMode::Send | SendButtonMode::Queue => {
+            SendButtonMode::Send | SendButtonMode::Queue | SendButtonMode::Steer => {
                 // Share the submission guard with Enter, including pending
                 // edits and the new-session runnable-agent check.
                 let blocked = self.send_blocked(cx);
@@ -10578,13 +10599,11 @@ impl Composer {
                     .when(!blocked, |el| {
                         el.on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
-                    .tooltip(crate::settings::widgets::text_tooltip(
-                        if mode == SendButtonMode::Queue {
-                            "Queue message"
-                        } else {
-                            "Send message"
-                        },
-                    ))
+                    .tooltip(crate::settings::widgets::text_tooltip(match mode {
+                        SendButtonMode::Queue => "Queue message",
+                        SendButtonMode::Steer => "Steer message",
+                        _ => "Send message",
+                    }))
                     .into_any_element()
             }
         }
@@ -12539,6 +12558,95 @@ mod tests {
                 "Pending edits must still block submission"
             );
         });
+    }
+
+    #[gpui::test]
+    fn steer_mode_submits_directly_without_a_queue_action(cx: &mut gpui::TestAppContext) {
+        use crate::settings::{QueueSendMode, SavePolicy, UiSettings};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        for modified in [false, true] {
+            cx.update(|cx| crate::settings::init(UiSettings::default(), directory.path(), cx));
+            let (out, mut requests) = tokio::sync::mpsc::channel::<String>(64);
+            let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+            let state = cx.new(|_| AppState::new());
+            state.update(cx, |state, _| {
+                state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                    zeron_rpc::RpcClient::new(out, inbound),
+                ));
+                state.selected_chat = Some("busy-chat".into());
+            });
+            let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+            composer.update(cx, |composer, cx| {
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("change direction", cx));
+                assert_eq!(composer.button_mode(cx), SendButtonMode::Send);
+            });
+            state.update(cx, |state, _| {
+                state.begin_pending_send("busy-chat", "opening", chrono::Utc::now());
+            });
+            composer.update(cx, |composer, cx| {
+                assert_eq!(composer.button_mode(cx), SendButtonMode::Queue);
+            });
+            cx.update(|cx| {
+                crate::settings::update(SavePolicy::Immediate, cx, |settings| {
+                    settings.queue_send_mode = QueueSendMode::Steer;
+                })
+            });
+            state.update(cx, |state, _| {
+                state.queue_send_mode = Some(QueueSendMode::Queue)
+            });
+            composer.update(cx, |composer, cx| {
+                assert_eq!(composer.button_mode(cx), SendButtonMode::Queue);
+            });
+            state.update(cx, |state, _| {
+                state.queue_send_mode = Some(QueueSendMode::Steer)
+            });
+            composer.update(cx, |composer, cx| {
+                assert_eq!(composer.button_mode(cx), SendButtonMode::Steer);
+                composer.editing_queued = Some("edit".into());
+                assert_eq!(composer.button_mode(cx), SendButtonMode::Send);
+                composer.editing_queued = None;
+                if modified {
+                    composer.on_modified_submit(cx);
+                } else {
+                    composer.on_submit(cx);
+                }
+                assert!(composer.input.read(cx).text().is_empty());
+                assert_eq!(composer.button_mode(cx), SendButtonMode::Stop);
+            });
+            cx.run_until_parked();
+            let frames: Vec<zeron_rpc::ClientFrame> =
+                std::iter::from_fn(|| requests.try_recv().ok())
+                    .map(|frame| serde_json::from_str(&frame).unwrap())
+                    .collect();
+            let commands: Vec<_> = frames
+                .iter()
+                .filter(|frame| frame.method.as_deref() == Some(methods::QUEUE_COMMAND))
+                .collect();
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].params["chatId"], "busy-chat");
+            assert_eq!(commands[0].params["command"]["kind"], "steer");
+            assert_eq!(commands[0].params["command"]["prompt"], "change direction");
+            assert!(
+                commands[0].params["command"]["messageId"]
+                    .as_str()
+                    .is_some()
+            );
+            assert!(!frames.iter().any(|frame| matches!(
+                frame.method.as_deref(),
+                Some(
+                    methods::QUEUE_MESSAGE
+                        | methods::STEER_QUEUED_MESSAGE_NOW
+                        | methods::SEND_QUEUED_MESSAGE_NOW
+                )
+            )));
+        }
     }
 
     #[gpui::test]
@@ -14610,7 +14718,7 @@ mod tests {
                 })).unwrap()];
                 });
                 assert!(!composer.reference_delivery_supported(cx));
-                composer.send(draft.clone(), false, cx);
+                composer.send(draft.clone(), SendButtonMode::Send, cx);
                 assert!(
                     composer
                         .failure

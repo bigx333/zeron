@@ -550,3 +550,22 @@ fn sends_to_an_offline_host_park_as_queued_not_working() {
     assert_eq!(row.send_state, Some(zeron_client::SendState::Queued));
     assert_eq!(row.host_indicator, ChatIndicator::Idle);
 }
+
+#[test]
+fn queue_send_mode_changes_publish_workspace_updates() {
+    use zeron_proto::QueueSendMode::{Queue, Steer};
+    let (client, _directory) = demo(fast());
+    assert_eq!(client.queue_send_mode(), None);
+    let before = client.workspace().revision;
+    client.set_queue_send_mode(Steer).unwrap();
+    assert_eq!(client.queue_send_mode(), Some(Steer));
+    let after = client.workspace().revision;
+    assert!(
+        after > before,
+        "preference-only writes must notify mobile observers"
+    );
+    client.set_queue_send_mode(Queue).unwrap();
+    assert_eq!(client.queue_send_mode(), Some(Queue));
+    assert!(client.workspace().revision > after);
+    client.shutdown();
+}
