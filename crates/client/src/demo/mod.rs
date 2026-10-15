@@ -990,6 +990,87 @@ impl DemoHost {
         Ok(worktree)
     }
 
+    pub(crate) async fn github_repositories(
+        &self,
+        device_id: &str,
+        cursor: Option<String>,
+    ) -> Result<zeron_proto::GitHubRepositoryPage> {
+        if device_id == fixtures::VPS {
+            return Err(crate::ClientError::HostUnavailable(
+                "Demo server is offline".into(),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let (entries, next): (&[(&str, &str, bool)], Option<&str>) = match cursor.as_deref() {
+            None => (
+                &[
+                    ("alex/fieldnotes", "A workspace for notes and ideas", true),
+                    (
+                        "studio/mobile-app",
+                        "The companion app for iOS and Android",
+                        true,
+                    ),
+                ],
+                Some("more"),
+            ),
+            Some("more") => (
+                &[
+                    ("alex/website", "My personal website", false),
+                    ("studio/design-system", "Shared components and themes", true),
+                ],
+                None,
+            ),
+            _ => {
+                return Err(crate::ClientError::InvalidArgument(
+                    "Invalid repository page cursor".into(),
+                ));
+            }
+        };
+        Ok(zeron_proto::GitHubRepositoryPage {
+            login: if device_id == fixtures::STUDIO {
+                "studio"
+            } else {
+                "alex"
+            }
+            .into(),
+            repositories: entries
+                .iter()
+                .map(
+                    |(name, description, private)| zeron_proto::GitHubRepository {
+                        name_with_owner: (*name).into(),
+                        description: Some((*description).into()),
+                        is_private: *private,
+                    },
+                )
+                .collect(),
+            next_cursor: next.map(str::to_owned),
+        })
+    }
+
+    pub(crate) async fn clone_github_repository(
+        &self,
+        device_id: &str,
+        repository: &str,
+    ) -> Result<zeron_proto::Repo> {
+        let first = self.github_repositories(device_id, None).await?;
+        let second = self
+            .github_repositories(device_id, first.next_cursor.clone())
+            .await?;
+        if !first
+            .repositories
+            .iter()
+            .chain(second.repositories.iter())
+            .any(|repo| repo.name_with_owner == repository)
+        {
+            return Err(crate::ClientError::NotFound(repository.into()));
+        }
+        Ok(zeron_proto::Repo {
+            path: format!("/Users/dev/.zeron/repos/github.com/{repository}"),
+            name: repository.rsplit('/').next().unwrap_or(repository).into(),
+            default_branch: Some("main".into()),
+        })
+    }
+
     pub(crate) async fn list_folders(
         &self,
         device_id: &str,

@@ -17,8 +17,8 @@ use crate::pickers::{
 use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
 use zeron_proto::{
-    ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
-    HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
+    ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, GitHubRepository,
+    GitHubRepositoryPage, HomeFolderMatch, HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
 };
 
 /// Promote the user's ordered pins above the untouched activity projection.
@@ -2531,15 +2531,49 @@ pub(super) enum SpacesMenuRow {
     AddSpace,
 }
 
-/// New project navigates devices, locations, then folders on a command-palette surface.
+/// New project navigates devices, then folders or GitHub repositories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProjectStep {
     Devices,
     Locations,
     Folders,
+    GitHub,
+}
+
+#[derive(Clone)]
+enum ProjectLocation {
+    Folder(String, Option<String>),
+    GitHub,
+}
+
+impl ProjectLocation {
+    fn name(&self) -> &str {
+        match self {
+            Self::Folder(name, _) => name,
+            Self::GitHub => "Clone from GitHub",
+        }
+    }
+
+    fn glyph(&self) -> &'static str {
+        match self {
+            Self::Folder(_, None) => icons::HOME,
+            Self::Folder(_, Some(_)) => icons::HARD_DRIVE,
+            Self::GitHub => icons::GIT_BRANCH,
+        }
+    }
+}
+
+#[derive(Default)]
+struct GitHubProjects {
+    login: Option<String>,
+    repositories: Vec<GitHubRepository>,
+    next_cursor: Option<String>,
+    loading: bool,
+    error: Option<String>,
 }
 
 pub(super) struct AddSpaceFlow {
+    id: String,
     step: ProjectStep,
     location: Option<(String, Option<String>)>,
     /// The selected device.
@@ -2549,6 +2583,7 @@ pub(super) struct AddSpaceFlow {
     /// on a folder-naming query descends immediately.
     search: Entity<ComposerInput>,
     browser: Loadable<FolderListing>,
+    github: GitHubProjects,
     /// The selected device's mounted drives/volumes.
     /// Best-effort: an error just leaves the section at Home only.
     drives: Loadable<Vec<DriveEntry>>,
@@ -6469,11 +6504,13 @@ impl Shell {
             }
         });
         self.add_space = Some(AddSpaceFlow {
+            id: uuid::Uuid::new_v4().to_string(),
             step: ProjectStep::Devices,
             location: None,
             device: None,
             search,
             browser: Loadable::Idle,
+            github: GitHubProjects::default(),
             drives: Loadable::Idle,
             browser_path: None,
             home: None,
@@ -6597,6 +6634,9 @@ impl Shell {
         let Some(flow) = self.add_space.as_mut() else {
             return;
         };
+        if flow.submit_busy {
+            return;
+        }
         flow.focus_pending = true;
         flow.step = ProjectStep::Locations;
         flow.location = None;
@@ -6605,6 +6645,7 @@ impl Shell {
         flow.list_scroll.set_offset(gpui::Point::default());
         flow.device = Some(device);
         flow.browser = Loadable::Idle;
+        flow.github = GitHubProjects::default();
         flow.drives = Loadable::Idle;
         flow.browser_path = None;
         flow.home = None;
@@ -6626,6 +6667,9 @@ impl Shell {
         path: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if self.add_space.as_ref().is_some_and(|flow| flow.submit_busy) {
+            return;
+        }
         if path.is_some() {
             self.release_home_folder_search(cx);
         }
@@ -6647,6 +6691,9 @@ impl Shell {
     }
 
     fn add_space_back_to(&mut self, step: ProjectStep, cx: &mut Context<Self>) {
+        if self.add_space.as_ref().is_some_and(|flow| flow.submit_busy) {
+            return;
+        }
         self.release_home_folder_search(cx);
         let Some(flow) = self.add_space.as_mut() else {
             return;
@@ -6655,6 +6702,7 @@ impl Shell {
         flow.step = step;
         flow.load_task = None;
         flow.browser = Loadable::Idle;
+        flow.github = GitHubProjects::default();
         flow.browser_path = None;
         flow.location = None;
         flow.browser_repo = false;
@@ -6694,24 +6742,295 @@ impl Shell {
             .collect()
     }
 
-    fn add_space_locations(&self, cx: &App) -> Vec<(String, Option<String>)> {
+    fn add_space_locations(&self, cx: &App) -> Vec<ProjectLocation> {
         let Some(flow) = &self.add_space else {
             return Vec::new();
         };
-        let locations: Vec<_> = std::iter::once(("Home".to_string(), None))
-            .chain(
-                flow.drives
-                    .ready()
-                    .into_iter()
-                    .flatten()
-                    .map(|d| (d.name.clone(), Some(d.path.clone()))),
-            )
-            .collect();
-        let names: Vec<_> = locations.iter().map(|(name, _)| name.as_str()).collect();
+        let locations: Vec<_> = [
+            ProjectLocation::Folder("Home".into(), None),
+            ProjectLocation::GitHub,
+        ]
+        .into_iter()
+        .chain(
+            flow.drives
+                .ready()
+                .into_iter()
+                .flatten()
+                .map(|d| ProjectLocation::Folder(d.name.clone(), Some(d.path.clone()))),
+        )
+        .collect();
+        let names: Vec<_> = locations.iter().map(ProjectLocation::name).collect();
         popover::filter_indices(flow.search.read(cx).text(), &names)
             .into_iter()
             .map(|ix| locations[ix].clone())
             .collect()
+    }
+
+    fn add_space_pick_location(&mut self, location: ProjectLocation, cx: &mut Context<Self>) {
+        if self.add_space.as_ref().is_some_and(|flow| flow.submit_busy) {
+            return;
+        }
+        match location {
+            ProjectLocation::Folder(name, path) => self.add_space_goto_location(name, path, cx),
+            ProjectLocation::GitHub => {
+                self.release_home_folder_search(cx);
+                let Some(flow) = self.add_space.as_mut() else {
+                    return;
+                };
+                flow.step = ProjectStep::GitHub;
+                flow.location = None;
+                flow.browser = Loadable::Idle;
+                flow.github = GitHubProjects::default();
+                flow.active = 0;
+                flow.error = None;
+                flow.focus_pending = true;
+                flow.list_scroll.set_offset(gpui::Point::default());
+                let search = flow.search.clone();
+                search.update(cx, |input, cx| {
+                    input.set_placeholder("Search GitHub repositories…", cx);
+                    input.set_text("", cx);
+                });
+                self.load_github_projects(cx);
+            }
+        }
+    }
+
+    /// Load recent repositories first, then keep paging while they can already
+    /// be searched and selected. Search eventually covers the entire account.
+    fn load_github_projects(&mut self, cx: &mut Context<Self>) {
+        let engine = self.state.read(cx).engine().cloned();
+        let local = self.state.read(cx).local_device_id.clone();
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        if flow.github.loading || flow.step != ProjectStep::GitHub {
+            return;
+        }
+        let Some(engine) = engine else {
+            flow.github.error = Some("Device is not connected".into());
+            cx.notify();
+            return;
+        };
+        let flow_id = flow.id.clone();
+        let device_id = flow.device.as_ref().map(|device| device.id.clone());
+        let mut cursor = flow.github.next_cursor.clone();
+        flow.github.loading = true;
+        flow.github.error = None;
+        flow.load_task = Some(cx.spawn(async move |this, cx| {
+            let mut seen = HashSet::new();
+            loop {
+                let mut params = serde_json::Map::new();
+                add_space_target(&mut params, device_id.as_deref(), local.as_deref());
+                if let Some(cursor) = &cursor {
+                    params.insert("cursor".into(), cursor.clone().into());
+                }
+                let result = engine
+                    .client()
+                    .call_as::<GitHubRepositoryPage>(methods::LIST_GITHUB_REPOS, params.into())
+                    .await;
+                let next = this
+                    .update(cx, |shell, cx| {
+                        let flow = shell.add_space.as_mut().filter(|flow| {
+                            flow.id == flow_id && flow.step == ProjectStep::GitHub
+                        })?;
+                        match result {
+                            Ok(page) => {
+                                if flow
+                                    .github
+                                    .login
+                                    .as_ref()
+                                    .is_some_and(|login| *login != page.login)
+                                {
+                                    flow.github.repositories.clear();
+                                    flow.github.login = None;
+                                    flow.github.next_cursor = None;
+                                    flow.github.loading = false;
+                                    flow.github.error = Some(
+                                        "GitHub account changed. Retry to reload repositories."
+                                            .into(),
+                                    );
+                                    cx.notify();
+                                    return None;
+                                }
+                                flow.github.login = Some(page.login);
+                                for repo in page.repositories {
+                                    if !flow
+                                        .github
+                                        .repositories
+                                        .iter()
+                                        .any(|old| old.name_with_owner == repo.name_with_owner)
+                                    {
+                                        flow.github.repositories.push(repo);
+                                    }
+                                }
+                                let next =
+                                    page.next_cursor.filter(|next| seen.insert(next.clone()));
+                                flow.github.next_cursor = next.clone();
+                                flow.github.loading = next.is_some();
+                                cx.notify();
+                                next
+                            }
+                            Err(error) => {
+                                flow.github.loading = false;
+                                flow.github.error = Some(error.to_string());
+                                cx.notify();
+                                None
+                            }
+                        }
+                    })
+                    .ok()
+                    .flatten();
+                let Some(next) = next else { break };
+                cursor = Some(next);
+            }
+        }));
+        cx.notify();
+    }
+
+    fn add_space_github_repositories(&self, cx: &App) -> Vec<GitHubRepository> {
+        let Some(flow) = self.add_space.as_ref() else {
+            return Vec::new();
+        };
+        let names: Vec<_> = flow
+            .github
+            .repositories
+            .iter()
+            .map(|repo| repo.name_with_owner.as_str())
+            .collect();
+        popover::filter_indices(flow.search.read(cx).text(), &names)
+            .into_iter()
+            .take(100)
+            .map(|ix| flow.github.repositories[ix].clone())
+            .collect()
+    }
+
+    fn submit_github_project(&mut self, repository: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        let Some(flow) = self.add_space.as_mut() else {
+            return;
+        };
+        if flow.submit_busy || flow.step != ProjectStep::GitHub {
+            return;
+        }
+        let Some(device) = flow.device.clone() else {
+            return;
+        };
+        flow.submit_busy = true;
+        flow.error = None;
+        let flow_id = flow.id.clone();
+        // Finish creating the project even if the picker is dismissed while
+        // cloning. Only navigate on completion if this picker is still open.
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let mut params = serde_json::Map::new();
+                add_space_target(&mut params, Some(&device.id), local.as_deref());
+                params.insert("repository".into(), repository.into());
+                let repo: zeron_proto::Repo = engine
+                    .client()
+                    .call_as(methods::CLONE_GITHUB_REPO, params.into())
+                    .await?;
+                let existing = this
+                    .update(cx, |shell, cx| {
+                        let state = shell.state.read(cx);
+                        if state.engine().is_none_or(|current| !current.same_connection(&engine)) {
+                            return Err(zeron_rpc::RpcError::Closed);
+                        }
+                        Ok(state.spaces
+                            .iter()
+                            .find(|space| {
+                                space.device_id == device.id
+                                    && same_folder_path(&space.path, &repo.path)
+                            })
+                            .cloned())
+                    })
+                    .map_err(|_| zeron_rpc::RpcError::Closed)??;
+                if let Some(space) = existing {
+                    return Ok(space);
+                }
+                let space_id = zeron_proto::project_identity::github_project_space_id(&device.id, &repo.path);
+                let created = engine
+                        .client()
+                        .call(
+                            methods::MUTATE,
+                            serde_json::json!({
+                                "op": "createSpace", "spaceId": space_id, "deviceId": device.id,
+                                "path": repo.path, "gitDetected": true,
+                            }),
+                        )
+                        .await?;
+                // Another client can win the (device, path) race. The mutation
+                // returns that client's actual row rather than our proposed id.
+                let space: Space = if let Some(space) = created.get("space") {
+                    serde_json::from_value(space.clone())
+                        .map_err(|error| zeron_rpc::RpcError::Failed(error.to_string()))?
+                } else {
+                    // Older coordinator engines still return only {ok: true}.
+                    // Resolve their authoritative row through the existing watch.
+                    let mut spaces = engine.client().subscribe_scoped(methods::WATCH_SPACES, serde_json::Value::Null).await?;
+                    let receive = async {
+                        while let Some(value) = spaces.recv().await {
+                            let rows: Vec<Space> = serde_json::from_value(value)
+                                .map_err(|error| zeron_rpc::RpcError::Failed(error.to_string()))?;
+                            if let Some(space) = rows.into_iter().find(|space|
+                                space.device_id == device.id && same_folder_path(&space.path, &repo.path)) {
+                                return Ok(space);
+                            }
+                        }
+                        Err(zeron_rpc::RpcError::Closed)
+                    };
+                    let timeout = cx.background_executor().timer(Duration::from_secs(30));
+                    match futures::future::select(Box::pin(receive), Box::pin(timeout)).await {
+                        futures::future::Either::Left((result, _)) => result?,
+                        futures::future::Either::Right(_) => return Err(zeron_rpc::RpcError::Failed(
+                            "Project was created, but its details did not arrive. Reopen the project picker to retry.".into())),
+                    }
+                };
+                if space.device_id != device.id || !same_folder_path(&space.path, &repo.path) {
+                    return Err(zeron_rpc::RpcError::Failed("Project creation returned a different folder".into()));
+                }
+                Ok::<_, zeron_rpc::RpcError>(space)
+            }
+            .await;
+            this.update(cx, |shell, cx| {
+                if shell.state.read(cx).engine().is_none_or(|current| !current.same_connection(&engine)) {
+                    return;
+                }
+                match result {
+                    Ok(space) => {
+                        let space_id = space.id.clone();
+                        shell.state.update(cx, |state, cx| {
+                            if !state.spaces.iter().any(|space| space.id == space_id) {
+                                state.spaces.push(space);
+                                cx.notify();
+                            }
+                        });
+                        if shell
+                            .add_space
+                            .as_ref()
+                            .is_some_and(|flow| flow.id == flow_id)
+                        {
+                            shell.close_add_space(cx);
+                            shell.land_in_space(space_id, cx);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(flow) =
+                            shell.add_space.as_mut().filter(|flow| flow.id == flow_id)
+                        {
+                            flow.submit_busy = false;
+                            flow.error = Some(error.to_string().into());
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
     }
 
     /// ListDrives on the flow's device (relay-forwarded when remote).
@@ -6822,6 +7141,9 @@ impl Shell {
         let Some(flow) = self.add_space.as_ref() else {
             return;
         };
+        if flow.submit_busy {
+            return;
+        }
         match flow.step {
             ProjectStep::Devices => {
                 if let Some(device) = self.add_space_devices(cx).get(flow.active).cloned() {
@@ -6830,8 +7152,18 @@ impl Shell {
                 return;
             }
             ProjectStep::Locations => {
-                if let Some((name, path)) = self.add_space_locations(cx).get(flow.active).cloned() {
-                    self.add_space_goto_location(name, path, cx);
+                if let Some(location) = self.add_space_locations(cx).get(flow.active).cloned() {
+                    self.add_space_pick_location(location, cx);
+                }
+                return;
+            }
+            ProjectStep::GitHub => {
+                if let Some(repo) = self
+                    .add_space_github_repositories(cx)
+                    .get(flow.active)
+                    .cloned()
+                {
+                    self.submit_github_project(repo.name_with_owner, cx);
                 }
                 return;
             }
@@ -6941,6 +7273,9 @@ impl Shell {
     /// match is already complete.
     fn add_space_completion(&self, cx: &App) -> Option<(String, String)> {
         let flow = self.add_space.as_ref()?;
+        if flow.step != ProjectStep::Folders {
+            return None;
+        }
         let query = flow.search.read(cx).text().to_string();
         if query.is_empty() {
             return None;
@@ -7046,6 +7381,14 @@ impl Shell {
 
     /// Create the space for the browser's current folder.
     fn submit_add_space(&mut self, cx: &mut Context<Self>) {
+        if self
+            .add_space
+            .as_ref()
+            .is_some_and(|flow| flow.step == ProjectStep::GitHub)
+        {
+            self.add_space_open_active(cx);
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -7146,9 +7489,13 @@ impl Shell {
         let Some(flow) = &self.add_space else {
             return;
         };
+        if flow.submit_busy {
+            return;
+        }
         match flow.step {
             ProjectStep::Devices => return,
             ProjectStep::Locations => self.add_space_back_to(ProjectStep::Devices, cx),
+            ProjectStep::GitHub => self.add_space_back_to(ProjectStep::Locations, cx),
             ProjectStep::Folders => {
                 let listing = flow.browser.ready();
                 let root = flow
@@ -7179,7 +7526,13 @@ impl Shell {
         // navigator first; queries are short and edited with ⌫.
         match event.keystroke.key.as_str() {
             "right" => {
-                self.add_space_open_active(cx);
+                if self
+                    .add_space
+                    .as_ref()
+                    .is_some_and(|flow| flow.step != ProjectStep::GitHub)
+                {
+                    self.add_space_open_active(cx);
+                }
                 return;
             }
             "left" => {
@@ -7208,6 +7561,7 @@ impl Shell {
                 let count = match self.add_space.as_ref().map(|f| f.step) {
                     Some(ProjectStep::Devices) => self.add_space_devices(cx).len(),
                     Some(ProjectStep::Locations) => self.add_space_locations(cx).len(),
+                    Some(ProjectStep::GitHub) => self.add_space_github_repositories(cx).len(),
                     _ => self.add_space_folder_rows(cx).len(),
                 };
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
@@ -7313,6 +7667,9 @@ impl Shell {
         let home = flow.home.clone();
         let browser_path = flow.browser_path.clone();
         let load_error = flow.browser.error().map(str::to_string);
+        let github_login = flow.github.login.clone();
+        let github_loading = flow.github.loading;
+        let github_error = flow.github.error.clone();
         let error = flow.error.clone();
         let busy = flow.submit_busy;
         let active = flow.active;
@@ -7394,19 +7751,64 @@ impl Shell {
                 }
             }
             ProjectStep::Locations => {
-                for (ix, (name, path)) in self.add_space_locations(cx).into_iter().enumerate() {
-                    let glyph = if path.is_none() {
-                        icons::HOME
-                    } else {
-                        icons::HARD_DRIVE
-                    };
-                    let label = name.clone();
+                for (ix, location) in self.add_space_locations(cx).into_iter().enumerate() {
                     rows.push(
                         row(ix)
-                            .child(glyph_el(glyph))
-                            .child(label_el(label))
+                            .role(gpui::Role::Button)
+                            .aria_label(location.name().to_string())
+                            .child(glyph_el(location.glyph()))
+                            .child(label_el(location.name().to_string()))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.add_space_goto_location(name.clone(), path.clone(), cx)
+                                this.add_space_pick_location(location.clone(), cx)
+                            }))
+                            .into_any_element(),
+                    );
+                }
+            }
+            ProjectStep::GitHub => {
+                for (ix, repo) in self
+                    .add_space_github_repositories(cx)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let repository = repo.name_with_owner.clone();
+                    rows.push(
+                        row(ix)
+                            .role(gpui::Role::Button)
+                            .aria_label(format!("Clone {repository}"))
+                            .child(glyph_el(icons::GIT_BRANCH))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .child(label_el(repo.name_with_owner))
+                                    .when_some(
+                                        repo.description
+                                            .filter(|description| !description.is_empty()),
+                                        |el, description| {
+                                            el.child(
+                                                div()
+                                                    .truncate()
+                                                    .text_size(crate::typography::ui_rems(11.0))
+                                                    .text_color(theme.text_muted)
+                                                    .child(description),
+                                            )
+                                        },
+                                    ),
+                            )
+                            .when(repo.is_private, |el| {
+                                el.child(
+                                    div()
+                                        .text_size(crate::typography::ui_rems(10.0))
+                                        .text_color(theme.text_muted)
+                                        .child("Private"),
+                                )
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.submit_github_project(repository.clone(), cx)
                             }))
                             .into_any_element(),
                     );
@@ -7501,12 +7903,28 @@ impl Shell {
                         })),
                 ),
             );
-        } else if count == 0 && !(step == ProjectStep::Locations && drives_loading) {
+        } else if count == 0
+            && !(step == ProjectStep::Locations && drives_loading)
+            && !(step == ProjectStep::GitHub && github_error.is_some())
+        {
             let (title, hint) = match step {
                 ProjectStep::Devices => ("No devices found", "Try another device name.".into()),
-                ProjectStep::Locations => {
-                    ("No locations found", "Try Home or a drive name.".into())
-                }
+                ProjectStep::Locations => (
+                    "No locations found",
+                    "Try Home, GitHub, or a drive name.".into(),
+                ),
+                ProjectStep::GitHub if github_loading => (
+                    "Loading repositories…",
+                    "Reading repositories from your GitHub account.".into(),
+                ),
+                ProjectStep::GitHub if query.is_empty() => (
+                    "No repositories found",
+                    "Repositories you own or collaborate on will appear here.".into(),
+                ),
+                ProjectStep::GitHub => (
+                    "No repositories match",
+                    "Try another repository or owner name.".into(),
+                ),
                 ProjectStep::Folders if query.is_empty() => (
                     "No folders here",
                     format!(
@@ -7539,6 +7957,51 @@ impl Shell {
                     .child("Loading locations…"),
             );
         }
+        if step == ProjectStep::GitHub {
+            let account = github_login
+                .as_deref()
+                .map(|login| format!("Signed in as {login}. "))
+                .unwrap_or_default();
+            let host = device
+                .as_ref()
+                .map(|device| device.name.as_str())
+                .unwrap_or("this device");
+            let status = if busy {
+                "Cloning repository and adding project…".to_string()
+            } else if github_loading && count > 0 {
+                format!("{account}Loading more repositories…")
+            } else {
+                format!("{account}Clones are saved in Zeron’s projects folder on {host}.")
+            };
+            results = results.child(
+                div()
+                    .px(px(16.0))
+                    .py(px(8.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child(status),
+            );
+            if count == 100 {
+                results = results.child(
+                    div()
+                        .px(px(16.0))
+                        .pb(px(8.0))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child("Showing the first 100 matches. Search to narrow the list."),
+                );
+            }
+            if let Some(message) = github_error {
+                let needs_auth =
+                    message.contains("not installed") || message.contains("not authenticated");
+                results = results.child(popover::error_row(&theme, &message).p(px(16.0))
+                    .when(needs_auth, |el| el.child(div().text_size(crate::typography::ui_rems(11.0))
+                        .child(format!("Install GitHub CLI and run gh auth login on {host} to connect your account."))))
+                    .child(popover::btn_ghost(&theme, "Retry", "project-github-retry")
+                        .id("project-github-retry")
+                        .on_click(cx.listener(|this, _, _, cx| this.load_github_projects(cx)))));
+            }
+        }
         let results = command_palette::palette_results_fade(results, &scroll);
 
         // Breadcrumbs: one line that scrolls sideways under edge fades rather
@@ -7559,6 +8022,15 @@ impl Shell {
                 current: step == ProjectStep::Locations,
                 target: CrumbTarget::Locations,
             });
+        }
+        if step == ProjectStep::GitHub {
+            specs.push(Crumb {
+                name: "GitHub".into(),
+                glyph: Some(icons::GIT_BRANCH),
+                current: true,
+                target: CrumbTarget::Locations,
+            });
+            crumb_key.push_str("github");
         }
         let mut hidden: Vec<(String, String)> = Vec::new();
         if let Some((name, path)) = location {
@@ -7793,13 +8265,21 @@ impl Shell {
             let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
             crate::settings::badge_combo(if valid { combo } else { id.default_combo() })
         };
-        let can_add = !busy && listing.is_some();
+        let github = step == ProjectStep::GitHub;
+        let can_add = !busy
+            && if github {
+                !self.add_space_github_repositories(cx).is_empty()
+            } else {
+                listing.is_some()
+            };
         let footer = command_palette::palette_footer()
             .child(command_palette::command_key_hint(&theme, "↑ ↓", "Navigate"))
             .child(command_palette::command_key_hint(
                 &theme,
                 "↵",
-                if step == ProjectStep::Folders {
+                if github {
+                    "Clone"
+                } else if step == ProjectStep::Folders {
                     "Open"
                 } else {
                     "Select"
@@ -7809,7 +8289,7 @@ impl Shell {
                 el.child(command_palette::command_key_hint(&theme, "←", "Back"))
             })
             .child(command_palette::command_key_hint(&theme, "Esc", "Close"))
-            .when(step == ProjectStep::Folders, |el| {
+            .when(step == ProjectStep::Folders || github, |el| {
                 el.child(div().flex_1()).child(
                     div()
                         .id("project-add")
@@ -7826,7 +8306,11 @@ impl Shell {
                         .mr(px(-8.0))
                         .rounded(px(8.0))
                         .role(gpui::Role::Button)
-                        .aria_label("Add project")
+                        .aria_label(if github {
+                            "Clone and add project"
+                        } else {
+                            "Add project"
+                        })
                         .when(can_add, |el| {
                             el.cursor_pointer()
                                 .hover(|s| s.bg(crate::theme::card_selected_bg()))
@@ -7843,7 +8327,13 @@ impl Shell {
                                 .text_size(crate::typography::ui_rems(10.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child(if busy { "Adding…" } else { "Add project" }),
+                                .child(if github {
+                                    if busy { "Cloning…" } else { "Clone project" }
+                                } else if busy {
+                                    "Adding…"
+                                } else {
+                                    "Add project"
+                                }),
                         ),
                 )
             });
@@ -8248,6 +8738,43 @@ impl Shell {
             );
             cx.notify();
         }
+        if flow.step == ProjectStep::GitHub && flow.github.login.is_none() {
+            flow.github = GitHubProjects {
+                login: Some("alex".into()),
+                repositories: [
+                    (
+                        "alex/fieldnotes",
+                        "A calm workspace for notes and ideas",
+                        true,
+                    ),
+                    (
+                        "studio/mobile-app",
+                        "The companion app for iOS and Android",
+                        true,
+                    ),
+                    ("alex/website", "My personal website", false),
+                    (
+                        "alex/dotfiles",
+                        "Development environment and shell configuration",
+                        false,
+                    ),
+                    (
+                        "studio/design-system",
+                        "Shared components, themes, and typography",
+                        true,
+                    ),
+                ]
+                .into_iter()
+                .map(|(name, description, private)| GitHubRepository {
+                    name_with_owner: name.into(),
+                    description: Some(description.into()),
+                    is_private: private,
+                })
+                .collect(),
+                ..Default::default()
+            };
+            cx.notify();
+        }
     }
 }
 
@@ -8362,7 +8889,7 @@ mod project_flow_tests {
 }
 
 #[cfg(test)]
-mod home_folder_search_tests {
+mod project_picker_tests {
     use super::*;
     use gpui::TestAppContext;
 
@@ -8445,6 +8972,14 @@ mod home_folder_search_tests {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
+            let settings = crate::settings::UiSettings::default();
+            crate::history::init(
+                settings.git_history_columns,
+                settings.git_history_column_widths,
+                settings.git_history_column_order,
+                settings.git_history_author_display,
+                cx,
+            );
         });
         let data_dir = dir.path().to_path_buf();
         let window = cx.add_window(|_, cx| {
@@ -8491,6 +9026,275 @@ mod home_folder_search_tests {
         window
             .update(cx, |shell, _, cx| {
                 shell.add_space_goto_location("Home".into(), None, cx)
+            })
+            .unwrap();
+    }
+
+    fn go_github(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) {
+        window
+            .update(cx, |shell, _, cx| {
+                shell.add_space_pick_location(ProjectLocation::GitHub, cx)
+            })
+            .unwrap();
+    }
+
+    fn github_page(repository: &str, cursor: Option<&str>) -> serde_json::Value {
+        serde_json::json!({"login": "octocat", "repositories": [{
+            "nameWithOwner": repository, "description": "A private project", "isPrivate": true
+        }], "nextCursor": cursor})
+    }
+
+    fn created_project(request: &serde_json::Value, id: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "deviceId": request["params"]["deviceId"],
+            "path": request["params"]["path"], "gitDetected": true, "createdAt": "2026-10-15T00:00:00Z"})
+    }
+
+    #[gpui::test]
+    fn github_projects_page_and_search_on_the_selected_device(cx: &mut TestAppContext) {
+        for device in ["local", "remote"] {
+            let (window, _dir, mut engine) = picker(cx, device);
+            go_github(window, cx);
+            let first = engine.take(methods::LIST_GITHUB_REPOS, cx);
+            assert_eq!(first.len(), 1);
+            if device == "local" {
+                assert!(first[0]["params"].get("targetDeviceId").is_none());
+            } else {
+                assert_eq!(first[0]["params"]["targetDeviceId"], device);
+            }
+            engine.reply(&first[0], github_page("octocat/website", Some("next-page")));
+            let next = engine.take(methods::LIST_GITHUB_REPOS, cx);
+            assert_eq!(next.len(), 1);
+            assert_eq!(next[0]["params"]["cursor"], "next-page");
+            engine.reply(&next[0], github_page("organization/mobile", None));
+            cx.run_until_parked();
+            type_query(window, "mobile", cx);
+            window
+                .update(cx, |shell, _, cx| {
+                    let repos = shell.add_space_github_repositories(cx);
+                    assert_eq!(repos.len(), 1);
+                    assert_eq!(repos[0].name_with_owner, "organization/mobile");
+                    assert!(!shell.add_space.as_ref().unwrap().github.loading);
+                    shell.add_space_go_up(cx);
+                    let flow = shell.add_space.as_ref().unwrap();
+                    assert_eq!(flow.step, ProjectStep::Locations);
+                    assert!(flow.search.read(cx).is_empty());
+                    assert!(flow.github.repositories.is_empty());
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn github_projects_retry_failed_clone_then_create_and_select_project(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = picker(cx, "remote");
+        go_github(window, cx);
+        let list = engine.take(methods::LIST_GITHUB_REPOS, cx);
+        engine.reply(&list[0], github_page("octocat/website", None));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| shell.add_space_open_active(cx))
+            .unwrap();
+        let clone = engine.take(methods::CLONE_GITHUB_REPO, cx);
+        assert_eq!(clone.len(), 1);
+        assert_eq!(clone[0]["params"]["repository"], "octocat/website");
+        assert_eq!(clone[0]["params"]["targetDeviceId"], "remote");
+        // Duplicate activation and back navigation cannot start another clone.
+        window
+            .update(cx, |shell, _, cx| {
+                shell.add_space_open_active(cx);
+                shell.add_space_go_up(cx);
+                assert_eq!(shell.add_space.as_ref().unwrap().step, ProjectStep::GitHub);
+            })
+            .unwrap();
+        assert!(engine.take(methods::CLONE_GITHUB_REPO, cx).is_empty());
+        engine.fail(&clone[0], "GitHub request failed");
+        cx.run_until_parked();
+        assert!(engine.take(methods::MUTATE, cx).is_empty());
+        window
+            .update(cx, |shell, _, cx| {
+                let flow = shell.add_space.as_ref().unwrap();
+                assert!(!flow.submit_busy);
+                assert!(flow.error.is_some());
+                shell.submit_add_space(cx);
+            })
+            .unwrap();
+        let retry = engine.take(methods::CLONE_GITHUB_REPO, cx);
+        engine.reply(&retry[0], serde_json::json!({
+            "path": "/managed/github.com/octocat/website", "name": "website", "defaultBranch": "main"
+        }));
+        let create = engine.take(methods::MUTATE, cx);
+        assert_eq!(create.len(), 1);
+        assert_eq!(create[0]["params"]["op"], "createSpace");
+        assert_eq!(create[0]["params"]["deviceId"], "remote");
+        assert_eq!(
+            create[0]["params"]["spaceId"],
+            zeron_proto::project_identity::github_project_space_id(
+                "remote",
+                "/managed/github.com/octocat/website"
+            )
+        );
+        assert_eq!(
+            create[0]["params"]["path"],
+            "/managed/github.com/octocat/website"
+        );
+        engine.reply(&create[0], serde_json::json!({"ok": true,
+            "space": created_project(&create[0], create[0]["params"]["spaceId"].as_str().unwrap())}));
+        cx.run_until_parked();
+        window
+            .read_with(cx, |shell, cx| {
+                assert!(shell.add_space.is_none());
+                let state = shell.state.read(cx);
+                assert_eq!(state.spaces.len(), 1);
+                assert_eq!(
+                    state.selected_space.as_deref(),
+                    create[0]["params"]["spaceId"].as_str()
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn github_projects_finish_after_dismissal_without_changing_the_new_picker(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, _dir, mut engine) = picker(cx, "local");
+        go_github(window, cx);
+        let list = engine.take(methods::LIST_GITHUB_REPOS, cx);
+        engine.reply(&list[0], github_page("octocat/website", None));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| shell.add_space_open_active(cx))
+            .unwrap();
+        let clone = engine.take(methods::CLONE_GITHUB_REPO, cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.close_add_space(cx);
+                shell.open_add_space(cx);
+            })
+            .unwrap();
+        engine.reply(&clone[0], serde_json::json!({"path": "/managed/website", "name": "website", "defaultBranch": "main"}));
+        let create = engine.take(methods::MUTATE, cx);
+        assert_eq!(create.len(), 1);
+        engine.reply(&create[0], serde_json::json!({"ok": true,
+            "space": created_project(&create[0], create[0]["params"]["spaceId"].as_str().unwrap())}));
+        cx.run_until_parked();
+        window
+            .read_with(cx, |shell, cx| {
+                assert_eq!(shell.add_space.as_ref().unwrap().step, ProjectStep::Devices);
+                assert_eq!(shell.state.read(cx).spaces.len(), 1);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn github_projects_resume_listing_after_an_error(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = picker(cx, "remote");
+        go_github(window, cx);
+        let first = engine.take(methods::LIST_GITHUB_REPOS, cx);
+        engine.reply(&first[0], github_page("octocat/website", Some("next-page")));
+        let next = engine.take(methods::LIST_GITHUB_REPOS, cx);
+        engine.fail(&next[0], "GitHub request timed out");
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.add_space_github_repositories(cx).len(), 1);
+                assert!(shell.add_space.as_ref().unwrap().github.error.is_some());
+                shell.load_github_projects(cx);
+            })
+            .unwrap();
+        let retry = engine.take(methods::LIST_GITHUB_REPOS, cx);
+        assert_eq!(retry[0]["params"]["cursor"], "next-page");
+        engine.reply(&retry[0], github_page("organization/mobile", None));
+        cx.run_until_parked();
+        window
+            .read_with(cx, |shell, cx| {
+                assert_eq!(shell.add_space_github_repositories(cx).len(), 2);
+                assert!(shell.add_space.as_ref().unwrap().github.error.is_none());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn github_projects_reconcile_a_concurrent_creator_on_current_and_older_engines(cx: &mut TestAppContext) {
+        for legacy in [false, true] {
+            let (window, _dir, mut engine) = picker(cx, "local");
+            go_github(window, cx);
+            let list = engine.take(methods::LIST_GITHUB_REPOS, cx);
+            engine.reply(&list[0], github_page("octocat/website", None));
+            cx.run_until_parked();
+            window.update(cx, |shell, _, cx| shell.add_space_open_active(cx)).unwrap();
+            let clone = engine.take(methods::CLONE_GITHUB_REPO, cx);
+            engine.reply(&clone[0], serde_json::json!({"path":"/managed/website", "name":"website", "defaultBranch":"main"}));
+            let create = engine.take(methods::MUTATE, cx);
+            let winner = created_project(&create[0], "concurrent-winner");
+            if legacy {
+                engine.reply(&create[0], serde_json::json!({"ok": true}));
+                let watch = engine.take(methods::WATCH_SPACES, cx);
+                assert_eq!(watch.len(), 1);
+                // The watch may initially hold a snapshot from before creation.
+                engine.send(serde_json::json!({"id": watch[0]["id"], "item": []}));
+                engine.send(serde_json::json!({"id": watch[0]["id"], "item": [winner]}));
+            } else {
+                engine.reply(&create[0], serde_json::json!({"ok": true, "space": winner}));
+            }
+            cx.run_until_parked();
+            window.read_with(cx, |shell, cx| {
+                let state = shell.state.read(cx);
+                assert_eq!(state.spaces.len(), 1);
+                assert_eq!(state.spaces[0].id, "concurrent-winner");
+                assert_eq!(state.selected_space.as_deref(), Some("concurrent-winner"));
+                assert_ne!(state.spaces[0].id, create[0]["params"]["spaceId"].as_str().unwrap());
+            }).unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn github_projects_do_not_restore_rows_after_the_workspace_runtime_changes(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = picker(cx, "local");
+        go_github(window, cx);
+        let list = engine.take(methods::LIST_GITHUB_REPOS, cx);
+        engine.reply(&list[0], github_page("octocat/website", None));
+        cx.run_until_parked();
+        window.update(cx, |shell, _, cx| shell.add_space_open_active(cx)).unwrap();
+        let clone = engine.take(methods::CLONE_GITHUB_REPO, cx);
+        engine.reply(&clone[0], serde_json::json!({"path":"/managed/website", "name":"website", "defaultBranch":"main"}));
+        let create = engine.take(methods::MUTATE, cx);
+        window.update(cx, |shell, _, cx| shell.state.update(cx, |state, cx| state.prepare_runtime_replacement(cx))).unwrap();
+        engine.reply(&create[0], serde_json::json!({"ok": true, "space": created_project(&create[0], "old-workspace")}));
+        cx.run_until_parked();
+        window.read_with(cx, |shell, cx| {
+            assert!(shell.state.read(cx).spaces.is_empty());
+            assert!(shell.state.read(cx).selected_space.is_none());
+        }).unwrap();
+    }
+
+    #[gpui::test]
+    fn github_projects_select_existing_project_without_creating_a_duplicate(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, _dir, mut engine) = picker(cx, "local");
+        go_github(window, cx);
+        let list = engine.take(methods::LIST_GITHUB_REPOS, cx);
+        engine.reply(&list[0], github_page("octocat/website", None));
+        cx.run_until_parked();
+        window.update(cx, |shell, _, cx| {
+            shell.state.update(cx, |state, _| state.spaces.push(serde_json::from_value(
+                serde_json::json!({"id":"existing", "deviceId":"local", "path":"/managed/website", "createdAt":"2026-10-15T00:00:00Z"})
+            ).unwrap()));
+            shell.add_space_open_active(cx);
+        }).unwrap();
+        let clone = engine.take(methods::CLONE_GITHUB_REPO, cx);
+        engine.reply(&clone[0], serde_json::json!({"path":"/managed/website", "name":"website", "defaultBranch":"main"}));
+        cx.run_until_parked();
+        assert!(engine.take(methods::MUTATE, cx).is_empty());
+        window
+            .read_with(cx, |shell, cx| {
+                assert!(shell.add_space.is_none());
+                assert_eq!(shell.state.read(cx).spaces.len(), 1);
+                assert_eq!(
+                    shell.state.read(cx).selected_space.as_deref(),
+                    Some("existing")
+                );
             })
             .unwrap();
     }

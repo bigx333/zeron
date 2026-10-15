@@ -17,6 +17,7 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
         let window = app
             .keyWindow()
             .or_else(|| app.mainWindow())
+            .or_else(|| app.windows().into_iter().find(|window| window.isVisible()))
             .ok_or_else(|| anyhow::anyhow!("fixture window is not available"))?;
         std::process::Command::new("/usr/sbin/screencapture")
             .args(["-x", "-o", "-l", &window.windowNumber().to_string()])
@@ -131,10 +132,16 @@ fn main() -> anyhow::Result<()> {
     core.workspace
         .rename_chat("preview-fixture", "Build the Fieldnotes workspace")?;
     let root = project.clone();
-    runtime.block_on(
-        core.previews
-            .start(Arc::new(move || vec![root.clone()]), None),
-    );
+    let proxy_port = std::env::var("ZERON_FIXTURE_PREVIEW_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .unwrap_or(zeron_proto::PREVIEW_PROXY_PORT);
+    runtime.block_on(core.previews.start_on_port(
+        Arc::new(move || vec![root.clone()]),
+        None,
+        proxy_port,
+    ));
     let ipc_port = port();
     let _ipc = runtime.block_on(zeron_engine::serve_ipc(ipc_port, core.rpc_service()))?;
     let data = temp.path().join("ui");

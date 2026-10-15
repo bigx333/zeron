@@ -64,10 +64,17 @@ it("drains 300 queued wakes through a bounded acknowledgment window", async () =
     await state.storage.setAlarm(Date.now()+5000);
   });
   await runDurableObjectAlarm(room);
-  await expect.poll(() => seen.size, {timeout:5000}).toBe(300);
-  await expect.poll(() => runInDurableObject(room, (_i, state) => pendingNudges(state.storage.sql).length)).toBe(0);
-  ws.close();
-});
+  try {
+    // Receiving the last frame does not mean its ACK has reached durable storage.
+    // Give the complete receive/ACK drain one budget, including on busy CI runners.
+    await expect.poll(async () => ({
+      received: seen.size,
+      pending: await runInDurableObject(room, (_i, state) => pendingNudges(state.storage.sql).length)
+    }), { timeout: 10_000 }).toEqual({ received: 300, pending: 0 });
+  } finally {
+    ws.close();
+  }
+}, 15_000);
 
 it("keeps legacy hosts usable without acknowledgment support", async () => {
   const room = env.DEVICE_ROOMS.get(env.DEVICE_ROOMS.idFromName(crypto.randomUUID()));

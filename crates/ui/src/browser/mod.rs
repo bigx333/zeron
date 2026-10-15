@@ -757,6 +757,19 @@ impl BrowserSurface {
     }
 }
 
+// Native fixtures use a separate loopback proxy while the desktop app is open.
+fn preview_proxy_port() -> u16 {
+    #[cfg(feature = "browser-fixture")]
+    if let Some(port) = std::env::var("ZERON_FIXTURE_PREVIEW_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+    {
+        return port;
+    }
+    zeron_proto::PREVIEW_PROXY_PORT
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

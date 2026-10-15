@@ -154,6 +154,17 @@ impl PreviewService {
         self.0.callback_tunnels.close(login_id);
     }
     pub async fn start(&self, projects: Projects, signaling: Option<signaling::Config>) {
+        self.start_on_port(projects, signaling, zeron_proto::PREVIEW_PROXY_PORT)
+            .await;
+    }
+    /// Start an isolated proxy, for embedders and native integration fixtures.
+    /// A zero port asks the OS to allocate an available loopback port.
+    pub async fn start_on_port(
+        &self,
+        projects: Projects,
+        signaling: Option<signaling::Config>,
+        proxy_port: u16,
+    ) {
         if self.0.started.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -179,7 +190,7 @@ impl PreviewService {
             loop {
                 let binding = tokio::select! {
                     _ = proxy_stop.cancelled() => break,
-                    binding = proxy::serve(router.clone(), zeron_proto::PREVIEW_PROXY_PORT, proxy_stop.child_token()) => binding,
+                    binding = proxy::serve(router.clone(), proxy_port, proxy_stop.child_token()) => binding,
                 };
                 match binding {
                     Ok((port, tasks)) => {
@@ -190,9 +201,9 @@ impl PreviewService {
                         break;
                     }
                     Err(error) => proxy_catalog.set_proxy_status(
-                        zeron_proto::PREVIEW_PROXY_PORT,
+                        proxy_port,
                         Some(format!(
-                            "Local previews could not listen on port 7331: {error}"
+                            "Local previews could not listen on port {proxy_port}: {error}"
                         )),
                     ),
                 }

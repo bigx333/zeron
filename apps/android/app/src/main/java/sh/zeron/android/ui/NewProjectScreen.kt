@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ButtonGroupDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.ListItemDefaults
@@ -25,10 +27,12 @@ import androidx.compose.material3.SegmentedListItem
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.ToggleButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,14 +55,14 @@ import uniffi.zeron_core.DeviceView
 import uniffi.zeron_core.FolderListing
 
 /**
- * Create a project (a device + folder pair): pick a host, browse its folders
- * over the device relay (git repos badged), and use the current folder.
+ * Create a project on an execution host, from a folder or its GitHub account.
  * [onCreated] gets the new project's id (the new-session page selects it).
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun NewProjectScreen(model: AppModel, onDismiss: () -> Unit, onCreated: (String) -> Unit) {
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+    var cloneBusy by remember { mutableStateOf(false) }
+    Dialog(onDismissRequest = { if (!cloneBusy) onDismiss() }, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         DialogSystemBars()
         val workspace by model.workspace.collectAsState()
         val client by model.client.collectAsState()
@@ -75,6 +79,7 @@ fun NewProjectScreen(model: AppModel, onDismiss: () -> Unit, onCreated: (String)
         var creating by remember { mutableStateOf(false) }
         var generation by remember { mutableIntStateOf(0) }
         var hostMenu by remember { mutableStateOf(false) }
+        var github by remember { mutableStateOf(false) }
 
         fun load(at: String?) {
             val d = device ?: return
@@ -97,7 +102,7 @@ fun NewProjectScreen(model: AppModel, onDismiss: () -> Unit, onCreated: (String)
                 status = result.path
             }
         }
-        LaunchedEffect(device?.id) { if (device != null) load(null) }
+        LaunchedEffect(device?.id, github) { if (device != null && !github) load(null) }
 
         fun create() {
             val d = device ?: return
@@ -122,17 +127,17 @@ fun NewProjectScreen(model: AppModel, onDismiss: () -> Unit, onCreated: (String)
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = { Text(name.ifEmpty { "New project" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    navigationIcon = { TonalCircleButton(ZIcons.Close, "Close", onClick = onDismiss, modifier = Modifier.padding(start = 8.dp), size = 44.dp) },
+                    title = { Text(if (github) "Clone from GitHub" else name.ifEmpty { "New project" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    navigationIcon = { TonalCircleButton(ZIcons.Close, "Close", onClick = { if (!cloneBusy) onDismiss() }, modifier = Modifier.padding(start = 8.dp), size = 44.dp) },
                     actions = {
                         Box(Modifier.padding(end = 8.dp)) {
                             ContextChip(
                                 device?.name ?: "No hosts",
                                 leading = { ZIcon(ZIcons.Laptop, null, Modifier.size(16.dp)) },
-                                onClick = { hostMenu = true },
+                                onClick = { if (!cloneBusy) hostMenu = true },
                             ) {
                                 ChoiceMenu(hostMenu, { hostMenu = false }, listOf(MenuSection("Device", hosts.map { h ->
-                                    MenuChoice(h.name, h.id == device?.id, if (h.online) "Online" else "Offline") { device = h }
+                                    MenuChoice(h.name, h.id == device?.id, if (h.online) "Online" else "Offline") { if (!cloneBusy) device = h }
                                 })))
                             }
                         }
@@ -142,58 +147,79 @@ fun NewProjectScreen(model: AppModel, onDismiss: () -> Unit, onCreated: (String)
             },
             containerColor = MaterialTheme.colorScheme.background,
         ) { padding ->
-            Box(Modifier.fillMaxSize().padding(padding)) {
-                if (hosts.isEmpty()) {
-                    Text(
-                        "No desktop devices yet — open Zeron on a computer to add one.",
-                        textAlign = TextAlign.Center,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.align(Alignment.Center).padding(32.dp),
-                    )
-                    return@Box
-                }
-                val parent = current?.path?.let(::parentOf)
-                val folders = current?.entries.orEmpty().filter { it.isDir }
-                val count = folders.size + if (parent != null) 1 else 0
-                LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 160.dp)) {
-                    if (parent != null) {
-                        item("..") {
-                            FolderRow(0, count, "Parent folder", ZIcons.Back, false, enabled = !loading) { load(parent) }
-                        }
-                    }
-                    itemsIndexed(folders, key = { _, e -> e.name }) { i, entry ->
-                        val index = i + if (parent != null) 1 else 0
-                        FolderRow(index, count, entry.name, if (entry.isRepo) ZIcons.Branch else ZIcons.Folder, entry.isRepo, enabled = !loading) {
-                            load(current!!.path.trimEnd('/') + "/" + entry.name)
-                        }
+            Column(Modifier.fillMaxSize().padding(padding)) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween)) {
+                    listOf(false to "Folder", true to "GitHub").forEach { (source, label) ->
+                        ToggleButton(checked = github == source, onCheckedChange = { github = source },
+                            enabled = !cloneBusy && !creating, modifier = Modifier.weight(1f)
+                                .testTag(if (source) "project-source-github" else "project-source-folder"),
+                            shapes = if (source) ButtonGroupDefaults.connectedTrailingButtonShapes() else ButtonGroupDefaults.connectedLeadingButtonShapes(),
+                        ) { Text(label) }
                     }
                 }
-                if (loading && current == null) LoadingIndicator(Modifier.align(Alignment.Center))
-                Column(
-                    Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    status?.let {
-                        Text(
-                            it,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = if (it == current?.path) GeistMono else null,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            textAlign = TextAlign.Center,
-                        )
+                if (github && device != null) {
+                    key(device?.id, client) {
+                        GitHubProjectPicker(model, device!!, onBusyChanged = { cloneBusy = it }) { id ->
+                            onCreated(id)
+                            onDismiss()
+                        }
                     }
-                    Button(
-                        onClick = ::create,
-                        enabled = !loading && !creating && current != null && listingDevice == device?.id,
-                        shapes = ButtonDefaults.shapes(),
-                        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp),
-                        modifier = Modifier.fillMaxWidth().testTag("use-folder"),
-                    ) {
-                        if (creating) LoadingIndicator(Modifier.size(20.dp)) else Text("Use “${name.ifEmpty { current?.path ?: "folder" }}”")
+                } else {
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        if (hosts.isEmpty()) {
+                            Text(
+                                "No desktop devices yet — open Zeron on a computer to add one.",
+                                textAlign = TextAlign.Center,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.align(Alignment.Center).padding(32.dp),
+                            )
+                            return@Box
+                        }
+                        val parent = current?.path?.let(::parentOf)
+                        val folders = current?.entries.orEmpty().filter { it.isDir }
+                        val count = folders.size + if (parent != null) 1 else 0
+                        LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 160.dp)) {
+                            if (parent != null) {
+                                item("..") {
+                                    FolderRow(0, count, "Parent folder", ZIcons.Back, false, enabled = !loading) { load(parent) }
+                                }
+                            }
+                            itemsIndexed(folders, key = { _, e -> e.name }) { i, entry ->
+                                val index = i + if (parent != null) 1 else 0
+                                FolderRow(index, count, entry.name, if (entry.isRepo) ZIcons.Branch else ZIcons.Folder, entry.isRepo, enabled = !loading) {
+                                    load(current!!.path.trimEnd('/') + "/" + entry.name)
+                                }
+                            }
+                        }
+                        if (loading && current == null) LoadingIndicator(Modifier.align(Alignment.Center))
+                        Column(
+                            Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            status?.let {
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = if (it == current?.path) GeistMono else null,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center,
+                                )
+                            }
+                            Button(
+                                onClick = ::create,
+                                enabled = !loading && !creating && current != null && listingDevice == device?.id,
+                                shapes = ButtonDefaults.shapes(),
+                                contentPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp),
+                                modifier = Modifier.fillMaxWidth().testTag("use-folder"),
+                            ) {
+                                if (creating) LoadingIndicator(Modifier.size(20.dp)) else Text("Use “${name.ifEmpty { current?.path ?: "folder" }}”")
+                            }
+                        }
                     }
                 }
             }

@@ -774,3 +774,62 @@ fn queue_send_mode_changes_publish_workspace_updates() {
     assert!(client.workspace().revision > after);
     client.shutdown();
 }
+
+#[tokio::test]
+async fn github_projects_paginate_clone_on_a_host_and_create_a_usable_project() {
+    let (client, _dir) = demo(fast());
+    zeron_client::runtime::run(async move {
+        let first = client.list_github_repositories("dev-mac", None).await?;
+        assert_eq!(first.login, "alex");
+        assert!(first.repositories[0].is_private);
+        let last = client
+            .list_github_repositories("dev-mac", first.next_cursor)
+            .await?;
+        assert!(last.next_cursor.is_none());
+        let repository = &last.repositories[0].name_with_owner;
+        let id = client.clone_github_project("dev-mac", repository).await?;
+        assert_eq!(
+            client.clone_github_project("dev-mac", repository).await?,
+            id
+        );
+        let workspace = client.workspace();
+        let project = workspace.project(&id).unwrap();
+        assert_eq!(project.device_id, "dev-mac");
+        assert!(project.path.ends_with(repository));
+        client.create_session(zeron_client::NewSession {
+            target: zeron_client::SessionTarget::Project { space_id: id },
+            config: None,
+            branch: None,
+            cwd: None,
+            title: None,
+        })?;
+        let count = client.workspace().projects.len();
+        assert!(
+            client
+                .list_github_repositories("dev-vps", None)
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .clone_github_project("dev-vps", repository)
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .clone_github_project("dev-mac", "missing/repository")
+                .await
+                .is_err()
+        );
+        assert_eq!(client.workspace().projects.len(), count);
+        client.shutdown();
+        assert!(matches!(
+            client.clone_github_project("dev-mac", repository).await,
+            Err(zeron_client::ClientError::Closed)
+        ));
+        Ok(())
+    })
+    .await
+    .unwrap();
+}

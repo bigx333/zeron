@@ -56,6 +56,7 @@ struct Inner {
     changed: Arc<Notify>,
     stop: CancellationToken,
     ice_servers: Vec<RTCIceServer>,
+    udp_addrs: Vec<String>,
 }
 const PAIR_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Clone)]
@@ -76,6 +77,7 @@ impl Peers {
                 output,
                 changed: Arc::new(Notify::new()),
                 stop,
+                udp_addrs: vec!["0.0.0.0:0".into()],
                 ice_servers: vec![RTCIceServer {
                     urls: vec![
                         "stun:stun.l.google.com:19302".into(),
@@ -99,6 +101,15 @@ impl Peers {
                 ..Default::default()
             }]
         };
+        Ok(())
+    }
+    /// Override UDP bind addresses before sharing this handle. Local integration
+    /// tests use loopback so VPN and LAN interfaces cannot affect their route.
+    pub fn set_udp_addrs(&mut self, addrs: Vec<String>) -> anyhow::Result<()> {
+        anyhow::ensure!(!addrs.is_empty(), "preview peers need a UDP bind address");
+        Arc::get_mut(&mut self.0)
+            .context("preview peers already shared")?
+            .udp_addrs = addrs;
         Ok(())
     }
     async fn send(&self, to: &str, signal: Signal) -> anyhow::Result<()> {
@@ -133,7 +144,7 @@ impl Peers {
                         .build(),
                 )
                 .with_handler(handler.clone())
-                .with_udp_addrs(vec!["0.0.0.0:0"])
+                .with_udp_addrs(self.0.udp_addrs.clone())
                 .with_data_channel_send_buffer_limit(256 * 1024)
                 .with_sctp_receive_buffer_size(512 * 1024)
                 .build()
