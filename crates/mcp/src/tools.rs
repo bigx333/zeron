@@ -1121,6 +1121,7 @@ impl Tools {
                 branch: args.branch.clone(),
                 checkout_id: None,
                 source_context: None,
+                snoozed_until: None,
                 config: Some(config),
                 last_message_preview: None,
                 last_message_at: None,

@@ -526,8 +526,9 @@ struct ReadAttachmentChunkParams {
 const _: () = assert!(zeron_proto::VISUAL_MAX_BYTES == zeron_visual::MAX_SCRIPT_BYTES);
 const _: () = assert!(zeron_proto::VISUAL_MAX_ASSETS == zeron_visual::assets::MAX_ASSETS);
 const _: () = assert!(zeron_proto::VISUAL_MAX_ASSET_BYTES == zeron_visual::assets::MAX_ASSET_BYTES);
-const _: () =
-    assert!(zeron_proto::VISUAL_MAX_TOTAL_ASSET_BYTES == zeron_visual::assets::MAX_TOTAL_ASSET_BYTES);
+const _: () = assert!(
+    zeron_proto::VISUAL_MAX_TOTAL_ASSET_BYTES == zeron_visual::assets::MAX_TOTAL_ASSET_BYTES
+);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -542,7 +543,8 @@ struct PublishVisualParams {
 
 fn no_turn_for_visual() -> RpcError {
     RpcError::Failed(
-        "This chat has no running turn on this device; show_visual only works from inside a turn.".into(),
+        "This chat has no running turn on this device; show_visual only works from inside a turn."
+            .into(),
     )
 }
 
@@ -678,6 +680,12 @@ enum MutateParams {
     /// Set the account-wide composer delivery policy.
     #[serde(rename_all = "camelCase")]
     SetQueueSendMode { mode: zeron_proto::QueueSendMode },
+    /// Timed sidebar parking; None wakes early.
+    #[serde(rename_all = "camelCase")]
+    SetChatSnoozedUntil {
+        chat_id: String,
+        until: Option<chrono::DateTime<chrono::Utc>>,
+    },
     /// Change one pin without replacing another device's edits.
     #[serde(rename_all = "camelCase")]
     ChangeSidebarPin {
@@ -1339,6 +1347,17 @@ impl EngineRpc {
                 .map(drop),
             MutateParams::SetQueueSendMode { mode } => {
                 self.workspace.set_queue_send_mode(mode).map_err(failed)
+            }
+            MutateParams::SetChatSnoozedUntil { chat_id, until } => {
+                if until.is_some_and(|until| until <= chrono::Utc::now()) {
+                    return Err(RpcError::Failed(
+                        "Choose a snooze time in the future".into(),
+                    ));
+                }
+                self.workspace
+                    .set_chat_snoozed_until(&chat_id, until)
+                    .map_err(failed)
+                    .map(drop)
             }
             MutateParams::ChangeSidebarPin { change } => {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)

@@ -45,6 +45,7 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.SidebarMode
 import sh.zeron.android.design.ThemeMode
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
@@ -57,6 +58,7 @@ fun SettingsScreen(model: AppModel, onArchived: () -> Unit, onOpenVoiceSettings:
     val appearance by model.appearance.collectAsState()
     val groupByProject by model.groupByProject.collectAsState()
     val steerMode by model.steerMode.collectAsState()
+    val sidebarMode by model.sidebarMode.collectAsState()
     var confirmSignOut by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     val workspace by model.workspace.collectAsState()
     val devices = workspace?.devices.orEmpty()
@@ -138,8 +140,18 @@ fun SettingsScreen(model: AppModel, onArchived: () -> Unit, onOpenVoiceSettings:
         item {
             Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                 SegmentedListItem(
+                    onClick = { model.setSidebarMode(if (sidebarMode.isT3) SidebarMode.Default else SidebarMode.T3) },
+                    shapes = segmentedShapes(0, 3),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    leadingContent = { IconTile(ZIcons.Inbox) },
+                    supportingContent = { Text("Attention-first inbox with Working, Snoozed and Settled shelves") },
+                    trailingContent = {
+                        Switch(sidebarMode.isT3, { model.setSidebarMode(if (it) SidebarMode.T3 else SidebarMode.Default) })
+                    },
+                ) { Text("T3 Mode") }
+                SegmentedListItem(
                     onClick = { model.setGroupByProject(!groupByProject) },
-                    shapes = segmentedShapes(0, 2),
+                    shapes = segmentedShapes(1, 3),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Project) },
                     supportingContent = { Text("Recent sessions grouped by repository") },
@@ -147,12 +159,12 @@ fun SettingsScreen(model: AppModel, onArchived: () -> Unit, onOpenVoiceSettings:
                 ) { Text("Group by project") }
                 SegmentedListItem(
                     onClick = onArchived,
-                    shapes = segmentedShapes(1, 2),
+                    shapes = segmentedShapes(2, 3),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Archive) },
                     supportingContent = { (workspace?.archived?.size ?: 0).takeIf { it > 0 }?.let { Text("$it sessions") } },
                     trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline) },
-                ) { Text("Archived sessions") }
+                ) { Text("${sidebarMode.settled} sessions") }
             }
         }
         section("Messages")
