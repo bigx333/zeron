@@ -4,12 +4,16 @@ Native captures from the isolated demo workspace. These show the actual app, inc
 
 Snoozing moves a thread to the Snoozed shelf, collapsed by default. Opening or reading leaves it snoozed; sending a message clears the snooze. There is no separate Wake action.
 
+Current choices are 15 minutes, 1 hour, 4 hours, 1 day, and Custom (minutes, hours, or days). Earlier captures may still show the replaced 1 Week preset.
+
 Some captures show “in 60m”; the current code displays “in 1h” after the rounding fix.
 
 ## Android
 
 | Screen | Dark | Light |
 | --- | --- | --- |
+| Four presets and Custom | — | [Open](android-t3-light-custom-menu.png) |
+| Custom duration | — | [Open](android-t3-light-custom-duration.png) |
 | Working, Snoozed and Settled folded | [Open](android-t3-dark-shelves-folded.png) | — |
 | Snooze presets and Settle button | [Open](android-t3-dark-actions.png) | [Open](android-t3-light-actions.png) |
 | Snoozed row | [Open](android-t3-dark-snoozed.png) | [Open](android-t3-light-snoozed.png) |
@@ -19,7 +23,7 @@ Some captures show “in 60m”; the current code displays “in 1h” after the
 | T3 Mode toggle | — | [Open](android-t3-light-mode-menu.png) |
 | Default mode | — | [Open](android-default-light.png) |
 
-![Android T3 touch actions](android-t3-dark-actions.png)
+![Android T3 touch actions](android-t3-light-custom-menu.png)
 
 ## iOS
 
