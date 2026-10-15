@@ -61,6 +61,7 @@ fn controls(
     let token = CancellationToken::new();
     let controls = RunControls {
         realtime: None,
+        account_pool: None,
         execution_lease: None,
         request_input: Box::new(move |questions| {
             let (tx, rx) = oneshot::channel();
@@ -294,6 +295,7 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
     let seen = asked.clone();
     let controls = RunControls {
         realtime: None,
+        account_pool: None,
         execution_lease: None,
         request_input: Box::new(move |questions| {
             seen.lock().unwrap().extend(questions.iter().cloned());

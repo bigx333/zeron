@@ -15,6 +15,7 @@ async fn live_run(cancel: bool) {
     let interrupt = CancellationToken::new();
     let controls = RunControls {
         realtime: None,
+        account_pool: None,
         execution_lease: None,
         steering,
         interrupt: interrupt.clone(),

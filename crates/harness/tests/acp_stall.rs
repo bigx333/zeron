@@ -38,6 +38,7 @@ async fn silent_agent_errors_via_the_prompt_stall_watchdog() {
     let token = CancellationToken::new();
     let controls = RunControls {
         realtime: None,
+        account_pool: None,
         execution_lease: None,
         request_input: Box::new(move |_| {
             let (tx, rx) = oneshot::channel();
