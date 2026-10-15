@@ -601,6 +601,9 @@ impl ClaudeHarness {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
         let mut cmd = self.build_command(&exe, &request);
+        if let Some(route) = &controls.account_pool {
+            route.apply_claude(&mut cmd);
+        }
         if title_only {
             cmd.args([
                 "--system-prompt",
@@ -850,6 +853,7 @@ async fn run_session(session: Session) {
     } = session;
     let RunControls {
         realtime: _,
+        account_pool: _,
         execution_lease: _execution_lease,
         request_input,
         mut steering,

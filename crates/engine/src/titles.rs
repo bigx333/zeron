@@ -277,6 +277,7 @@ async fn collect_text(
     let interrupt = CancellationToken::new();
     let _cancel_on_drop = interrupt.clone().drop_guard();
     let controls = RunControls {
+        account_pool: None,
         realtime: None,
         execution_lease,
         request_input: Box::new(|_questions: Vec<UserInputQuestion>| {

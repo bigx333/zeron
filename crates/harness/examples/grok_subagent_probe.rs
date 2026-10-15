@@ -18,6 +18,7 @@ async fn main() {
     let (_steer_tx, steering) = mpsc::channel(8);
     let controls = RunControls {
         realtime: None,
+        account_pool: None,
         execution_lease: None,
         request_input: Box::new(move |questions| {
             let (tx, rx) = oneshot::channel();

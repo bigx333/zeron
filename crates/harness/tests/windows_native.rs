@@ -227,6 +227,7 @@ async fn exercise(prompt: &str, resume: Option<&str>) {
     let interrupt = CancellationToken::new();
     let controls = RunControls {
         realtime: None,
+        account_pool: None,
         execution_lease: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
@@ -323,6 +324,7 @@ async fn exercise_tree(prompt: &str, drop_stream: bool) {
     let interrupt = CancellationToken::new();
     let controls = RunControls {
         realtime: None,
+        account_pool: None,
         execution_lease: None,
         request_input: Box::new(|_| {
             let (_, rx) = oneshot::channel();
@@ -484,6 +486,7 @@ async fn batch_overrides_launch_through_cmd() {
         let (_steer, steering) = mpsc::channel(1);
         let controls = RunControls {
             realtime: None,
+            account_pool: None,
             execution_lease: None,
             request_input: Box::new(|_| {
                 let (tx, rx) = oneshot::channel();

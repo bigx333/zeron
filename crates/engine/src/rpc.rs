@@ -450,6 +450,28 @@ struct AgentAccountParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ConfigureAccountPoolParams {
+    harness: HarnessId,
+    config: zeron_proto::AccountPoolProviderConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountPoolBypassParams {
+    chat_id: String,
+    bypassed: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddAccountPoolApiKeyParams {
+    harness: HarnessId,
+    api_key: String,
+    label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StartAgentLoginParams {
     harness: HarnessId,
     /// Stamped by the requesting engine when it forwards the start: the
@@ -1579,6 +1601,10 @@ fn forwardable(method: &str) -> bool {
             // Agent accounts are per-device CLI logins (the device switcher
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
+            | methods::CONFIGURE_ACCOUNT_POOL
+            | methods::GET_ACCOUNT_POOL
+            | methods::ADD_ACCOUNT_POOL_API_KEY
+            | methods::SET_ACCOUNT_POOL_BYPASS
             | methods::ACTIVATE_AGENT_ACCOUNT
             | methods::FORGET_AGENT_ACCOUNT
             | methods::START_AGENT_LOGIN
@@ -3686,6 +3712,34 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&snapshot)
+            }
+            methods::CONFIGURE_ACCOUNT_POOL => {
+                let p: ConfigureAccountPoolParams = parse_params(params)?;
+                let snapshot = self
+                    .agent_accounts
+                    .configure_pool(p.harness, p.config)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&snapshot)
+            }
+            methods::GET_ACCOUNT_POOL => RpcReply::value(&self.agent_accounts.pool_snapshot()),
+            methods::ADD_ACCOUNT_POOL_API_KEY => {
+                let p: AddAccountPoolApiKeyParams = parse_params(params)?;
+                RpcReply::value(
+                    &self
+                        .agent_accounts
+                        .add_pool_api_key(p.harness, &p.api_key, p.label.as_deref())
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?,
+                )
+            }
+            methods::SET_ACCOUNT_POOL_BYPASS => {
+                let p: AccountPoolBypassParams = parse_params(params)?;
+                self.agent_accounts
+                    .set_pool_bypass(&p.chat_id, p.bypassed)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&self.agent_accounts.pool_snapshot())
             }
             methods::ACTIVATE_AGENT_ACCOUNT => {
                 self.voice.retire();

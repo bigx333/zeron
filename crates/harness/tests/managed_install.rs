@@ -30,6 +30,7 @@ async fn managed_install_reaches_session_started() {
     let interrupt = CancellationToken::new();
     let controls = RunControls {
         realtime: None,
+        account_pool: None,
         execution_lease: None,
         request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
         steering,
