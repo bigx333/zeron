@@ -15,9 +15,9 @@
 //! - Notifications map to [`AgentEvent`]s: agentMessage/reasoning deltas (both
 //!   `delta`/`textDelta` spellings), item lifecycles → typed ToolCall/ToolResult,
 //!   `thread/tokenUsage/updated` → Usage, turn/completed|failed|aborted → Done.
-//! - Approvals + sandbox: yolo mode. The wire policy is always `"never"` and
-//!   the sandbox is forced to `danger-full-access` — parity with the Claude
-//!   adapter's auto-approve-everything (unattended runs). Stray
+//! - Approvals + sandbox: unattended by default (`"never"`, full access).
+//!   `ZERON_APPROVAL_MODE=prompt` preserves the requested sandbox and uses
+//!   `"on-request"` for runs without `auto_approve`. Stray
 //!   `item/commandExecution/requestApproval` +
 //!   `item/fileChange/requestApproval` still round-trip through
 //!   [`RunControls::request_input`] as a synthesized yes/no question.
@@ -779,6 +779,8 @@ impl CodexHarness {
         // kills every command.
         request.sandbox = if title_only {
             zeron_proto::SandboxLevel::ReadOnly
+        } else if crate::prompt_for_approvals() && !request.auto_approve {
+            request.sandbox
         } else {
             zeron_proto::SandboxLevel::DangerFullAccess
         };
@@ -1088,14 +1090,13 @@ async fn run_session(session: Session) {
     let request_input = Arc::new(request_input);
 
     // ---- wire params ------------------------------------------------------
-    // Parity with the Claude adapter, which auto-approves every `can_use_tool`
-    // regardless of `auto_approve` (zeron sessions run unattended; combined
-    // with the danger-full-access override above this is codex's yolo mode):
-    // never surface wire approvals. "on-request" turned
-    // every command into a yes/no question (user report: "asking me for
-    // approval at every step"). The approval-as-input plumbing below stays for
-    // stray requests and a future explicit permission-mode setting.
-    let approval_policy = "never";
+    // Native approvals use the engine's ordinary pending-input bridge when
+    // explicitly enabled; title-only and auto-approved runs stay unattended.
+    let approval_policy = if crate::prompt_for_approvals() && !request.auto_approve && !title_only {
+        "on-request"
+    } else {
+        "never"
+    };
     let start_tier = service_tier(&request);
 
     let start_params = {
@@ -1382,10 +1383,18 @@ async fn run_session(session: Session) {
     #[cfg_attr(not(unix), allow(unused_mut))]
     let mut torn_down: Vec<i32> = Vec::new();
 
+    let mut input_tasks = crate::input_tasks::InputTasks::default();
+
     'main: loop {
         tokio::select! {
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
+                if method == "serverRequest/resolved" {
+                    if let Some(id) = params.get("requestId").filter(|id| id.is_string() || id.is_number()) {
+                        input_tasks.cancel(&id.to_string());
+                    }
+                    continue;
+                }
                 // Foreign-thread traffic FIRST: a child thread's turn/thread
                 // bookkeeping must never reach the parent turn router below
                 // (a child's turn/completed would settle the PARENT turn).
@@ -1779,6 +1788,7 @@ async fn run_session(session: Session) {
                         &params,
                         request.auto_approve,
                         &request_input,
+                        &mut input_tasks,
                     );
                 }
 
@@ -1945,6 +1955,8 @@ async fn run_session(session: Session) {
         }
     }
 
+    drop(input_tasks);
+
     // Terminal bookkeeping: never end the stream without a Done unless the
     // consumer already hung up.
     if !event_tx.is_closed() {
@@ -2081,6 +2093,7 @@ fn handle_server_request(
     params: &Value,
     auto_approve: bool,
     request_input: &Arc<RequestInputFn>,
+    input_tasks: &mut crate::input_tasks::InputTasks,
 ) {
     // A tool's user-input request (EXPERIMENTAL, codex 0.146.x) is a CONTENT
     // question, never auto-approvable — route it to the input bridge and
@@ -2093,7 +2106,7 @@ fn handle_server_request(
         }
         let client = client.clone();
         let request_input = Arc::clone(request_input);
-        tokio::spawn(async move {
+        input_tasks.spawn(id.to_string(), async move {
             let asked: Vec<UserInputQuestion> = questions.iter().map(|(_, q)| q.clone()).collect();
             let answers = (request_input)(asked).await.unwrap_or_default();
             let mut by_id = serde_json::Map::new();
@@ -2129,7 +2142,7 @@ fn handle_server_request(
     let question = approval_question(method, params);
     let client = client.clone();
     let request_input = Arc::clone(request_input);
-    tokio::spawn(async move {
+    input_tasks.spawn(id.to_string(), async move {
         // The engine's input bridge owns the `InputRequested`/`InputResolved`
         // lifecycle (it mints the request id the resolver is parked under);
         // emitting our own copy here doubled the doc's input part with an id

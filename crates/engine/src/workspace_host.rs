@@ -198,6 +198,7 @@ struct WorkspaceHostInner {
     /// wired to `LinkCache::reset_cooldown` so a peer that comes back is dialed
     /// immediately instead of waiting out the failure backoff.
     peer_alive: Mutex<Option<PeerAliveHook>>,
+    notifier: std::sync::OnceLock<crate::notify::Notifier>,
     /// Deaf-socket tripwire state — see `check_presence_deafness`.
     presence_watch: Mutex<PresenceWatch>,
     /// Epoch ms of the registry room's most recent (re)join — the dial gate's
@@ -341,6 +342,7 @@ impl WorkspaceHost {
                 changed_tx,
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
                 peer_alive: Mutex::new(None),
+                notifier: std::sync::OnceLock::new(),
                 presence_watch: Mutex::new(PresenceWatch::default()),
                 room_joined_at: std::sync::atomic::AtomicI64::new(0),
             }),
@@ -936,6 +938,10 @@ impl WorkspaceHost {
 
     // ── Mutate surface (LWW writes accepted from any device) ────────────────
 
+    pub(crate) fn set_notifier(&self, notifier: crate::notify::Notifier) {
+        let _ = self.inner.notifier.set(notifier);
+    }
+
     /// Create a chat, usually *in a project*: the project fixes the host device
     /// and base cwd (`cwd` override = an isolated-worktree path). With no
     /// `space_id` the chat is project-less: `device_id` picks the host and the
@@ -1019,6 +1025,15 @@ impl WorkspaceHost {
                 parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
             })
         })?;
+        if let Some(notifier) = self.inner.notifier.get().filter(|n| n.enabled())
+            && let Some(chat) = self.read(|doc| doc.chat(chat_id))?
+        {
+            if let Err(error) =
+                notifier.emit("chat.created", &chat, "idle", None, serde_json::json!({}))
+            {
+                tracing::warn!(%error, "chat creation webhook could not be queued");
+            }
+        }
         Ok(())
     }
 

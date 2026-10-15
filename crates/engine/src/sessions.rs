@@ -238,6 +238,7 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    notifier: OnceLock<crate::notify::Notifier>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -279,8 +280,34 @@ impl SessionsEngine {
                 generated_images: OnceLock::new(),
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                notifier: OnceLock::new(),
             }),
         }
+    }
+
+    pub(crate) fn set_notifier(&self, notifier: crate::notify::Notifier) {
+        let _ = self.inner.notifier.set(notifier);
+    }
+
+    pub(crate) fn notify_controller(
+        &self,
+        chat_id: &str,
+        kind: &str,
+        message: &str,
+    ) -> anyhow::Result<String> {
+        anyhow::ensure!(
+            ["question", "done", "blocked", "info"].contains(&kind),
+            "unknown notification kind"
+        );
+        anyhow::ensure!(
+            !message.trim().is_empty() && message.len() <= 65536,
+            "message must contain 1–65536 bytes"
+        );
+        self.inner.emit_notification(
+            chat_id,
+            "agent.notification",
+            serde_json::json!({"kind":kind,"message":message}),
+        )
     }
 
     pub(crate) fn voice_manager(&self) -> crate::voice::VoiceManager {
@@ -1393,6 +1420,68 @@ impl Inner {
             .collect()
     }
 
+    fn emit_notification(
+        &self,
+        chat_id: &str,
+        event_type: &str,
+        data: serde_json::Value,
+    ) -> anyhow::Result<String> {
+        use anyhow::Context;
+        let notifier = self
+            .notifier
+            .get()
+            .filter(|n| n.enabled())
+            .context("controller webhook is not configured")?;
+        let workspace = self.workspace().context("workspace is unavailable")?;
+        let chat = workspace
+            .read_chats()?
+            .into_iter()
+            .find(|c| c.id == chat_id)
+            .context("no such chat")?;
+        let status = lock(&self.statuses)
+            .get(chat_id)
+            .map(|s| s.status)
+            .unwrap_or(SessionStatus::Idle);
+        let status = match status {
+            SessionStatus::Working => "working",
+            SessionStatus::AwaitingInput => "awaitingInput",
+            SessionStatus::Idle => "idle",
+            SessionStatus::Errored => "errored",
+        };
+        let last_reply = self
+            .doc_host()
+            .and_then(|host| host.open(chat_id).ok())
+            .and_then(|handle| {
+                handle
+                    .watch_messages()
+                    .borrow()
+                    .entries
+                    .iter()
+                    .rev()
+                    .filter(|entry| entry.role == MessageRole::Assistant)
+                    .find_map(|entry| {
+                        let text = entry
+                            .parts
+                            .iter()
+                            .filter_map(|part| match part {
+                                MessagePart::Text { text, .. } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<String>();
+                        (!text.is_empty()).then_some(text)
+                    })
+            });
+        notifier.emit(event_type, &chat, status, last_reply, data)
+    }
+
+    fn notify_best_effort(&self, chat_id: &str, event_type: &str, data: serde_json::Value) {
+        if self.notifier.get().is_some_and(|n| n.enabled()) {
+            if let Err(error) = self.emit_notification(chat_id, event_type, data) {
+                tracing::warn!(%error, "controller event could not be queued");
+            }
+        }
+    }
+
     fn publish(&self, chat_id: &str, event: &AgentEvent) -> u64 {
         let seq = match self.journal.append(chat_id, event) {
             Ok(seq) => seq,
@@ -1488,6 +1577,10 @@ impl Inner {
         fresh_start: bool,
         completed_turn: Option<String>,
     ) {
+        let completion_event = completed_turn.clone();
+        let was_errored = lock(&self.statuses)
+            .get(chat_id)
+            .is_some_and(|s| s.status == SessionStatus::Errored);
         let now = Utc::now();
         let session = {
             let mut statuses = lock(&self.statuses);
@@ -1538,6 +1631,15 @@ impl Inner {
         // remote devices' sidebars show this run (staleness-checked client-side).
         if let Some(ws) = self.workspace() {
             ws.record_session(&session);
+        }
+        if let Some(turn_id) = completion_event {
+            self.notify_best_effort(
+                chat_id,
+                "turn.completed",
+                serde_json::json!({"turnId":turn_id}),
+            );
+        } else if status == SessionStatus::Errored && !was_errored {
+            self.notify_best_effort(chat_id, "turn.errored", serde_json::json!({}));
         }
     }
 
@@ -3190,12 +3292,34 @@ async fn drive_run(
                 inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
             }
             AgentEvent::InputResolved { .. } => {
-                inner.set_status(&chat_id, SessionStatus::Working, false);
+                let still_pending = lock(&inner.runs)
+                    .get(&chat_id)
+                    .is_some_and(|run| !lock(&run.pending_inputs).is_empty());
+                inner.set_status(
+                    &chat_id,
+                    if still_pending {
+                        SessionStatus::AwaitingInput
+                    } else {
+                        SessionStatus::Working
+                    },
+                    false,
+                );
             }
             _ => {}
         }
 
         inner.publish(&chat_id, &event);
+        if let AgentEvent::InputRequested {
+            request_id,
+            questions,
+        } = &event
+        {
+            inner.notify_best_effort(
+                &chat_id,
+                "input.requested",
+                serde_json::json!({"requestId":request_id,"questions":questions}),
+            );
+        }
 
         // Defensive rule from zeron: a mid-run SessionStarted re-emission (Claude SDK
         // background re-invocations) must not wipe the segment being written.

@@ -17,6 +17,7 @@ zeron-update.workspace = true
 zeron-mcp.workspace = true
 tokio.workspace = true
 clap.workspace = true
+dotenvy = "0.15"
 anyhow.workspace = true
 libc.workspace = true
 serde_json.workspace = true
