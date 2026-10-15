@@ -125,6 +125,7 @@ impl Shell {
             || self.rename_space_dialog.is_some()
             || self.discard_working_tree.is_some()
             || self.chat_menu.get().is_some()
+            || self.row_snooze_menu.get().is_some()
             || self.pull_request_pane.menu.get().is_some()
             || self.space_menu.get().is_some()
             || self.user_menu.get().is_some()

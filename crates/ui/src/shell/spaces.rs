@@ -8,6 +8,7 @@
 //! management (add via the palette; rename/delete via row context menus).
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
 
+use super::t3_sidebar::{T3Lane, T3Shelf, t3_attention_first, t3_lane, t3_wake_label};
 use super::*;
 use crate::pickers::{
     breadcrumbs, browser_rows, completion_prefix_len, folder_path_key, parent_path,
@@ -924,6 +925,213 @@ mod pinned_session_tests {
         cx.run_until_parked();
     }
 
+    /// T3 shelves lift a pinned working session and a snoozed section member
+    /// out of place without touching membership, and return each on its own
+    /// trigger; Default mode and each mode's Settled/Archived state survive a
+    /// round trip. Rows render through a drawn host so every element built
+    /// by `render_active_rows` goes through a real frame.
+    #[gpui::test]
+    fn t3_shelves_lift_and_return_pinned_and_section_sessions(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        use std::{cell::RefCell, rc::Rc};
+
+        /// (pinned_count, shelf_count, keys) from the latest drawn frame.
+        type Drawn = Rc<RefCell<(usize, usize, Vec<String>)>>;
+        struct T3Host(Entity<Shell>, Drawn);
+        impl Render for T3Host {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let drawn = self.1.clone();
+                self.0.update(cx, |shell, cx| {
+                    let theme = Theme::of(cx).clone();
+                    let rows = shell.render_active_rows(&theme, cx);
+                    *drawn.borrow_mut() = (
+                        rows.pinned_count,
+                        rows.shelf_count,
+                        rows.rows.iter().map(|(key, _, _)| key.clone()).collect(),
+                    );
+                    div()
+                        .w(px(280.0))
+                        .flex()
+                        .flex_col()
+                        .children(rows.rows.into_iter().map(|(_, _, row)| row))
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let now = Utc::now();
+        let drawn: Drawn = Rc::default();
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            T3Host(
+                cx.new(|cx| {
+                    let state = cx.new(|_| AppState::new());
+                    let mut shell = Shell::new(
+                        state,
+                        EngineBootConfig {
+                            data_dir: dir.path().into(),
+                            ipc_port: 0,
+                            edge_url: "http://127.0.0.1:1".into(),
+                            edge_token: None,
+                            org_id: None,
+                            workos_client_id: None,
+                            default_harness: zeron_proto::HarnessId::Mock,
+                        },
+                        cx,
+                    );
+                    shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                    shell.state.update(cx, |state, _| {
+                        state.workspace_scope = Some(WorkspaceScope::Local);
+                        state.chats = ["pin-work", "pin-idle", "sec-snooze", "sec-idle", "plain"]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(ix, id)| {
+                                let mut chat = pin_test_chat(id);
+                                chat.created_at = now - chrono::Duration::minutes(ix as i64);
+                                chat
+                            })
+                            .collect();
+                        state.chats[2].snoozed_until = Some(now + chrono::Duration::hours(1));
+                        state.sessions = vec![
+                            serde_json::from_value(serde_json::json!({
+                                "chatId": "pin-work", "deviceId": "local", "status": "working",
+                                "startedAt": now, "updatedAt": now,
+                            }))
+                            .unwrap(),
+                        ];
+                    });
+                    shell
+                }),
+                drawn.clone(),
+            )
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        let section = crate::settings::SidebarSection {
+            id: "s".into(),
+            name: "Section".into(),
+            session_ids: ids(&["sec-snooze", "sec-idle"]),
+            collapsed: false,
+        };
+        let membership = |shell: &Shell, cx: &App| {
+            (
+                shell.active_sidebar_pins(cx),
+                shell.active_sidebar_sections(cx),
+            )
+        };
+        let before = shell.update(cx, |shell, cx| {
+            let profile = shell.active_sidebar_pin_profile_key(cx).unwrap();
+            shell
+                .settings
+                .sidebar_pins_mut(profile.clone())
+                .extend(ids(&["pin-work", "pin-idle"]));
+            shell
+                .settings
+                .sidebar_sections_by_profile
+                .insert(profile, vec![section.clone()]);
+            cx.notify();
+            membership(shell, cx)
+        });
+        assert_eq!(before.0, ids(&["pin-work", "pin-idle"]));
+        assert_eq!(before.1, vec![section.clone()]);
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            drawn.borrow().clone()
+        };
+        let all_in_place = ids(&["pin-work", "pin-idle", "sec-snooze", "sec-idle", "plain"]);
+
+        // Default: snoozes and runs stay in place.
+        assert_eq!(
+            shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx)),
+            all_in_place
+        );
+        assert_eq!(draw(cx).1, 0);
+
+        // T3, shelves folded: both leave their places and the jump order.
+        let order = shell.update(cx, |shell, cx| {
+            shell.settings.sidebar_mode = SidebarMode::T3;
+            cx.notify();
+            shell.sidebar_visible_order(cx)
+        });
+        assert_eq!(order, ids(&["pin-idle", "sec-idle", "plain"]));
+        let (pinned, shelves, keys) = draw(cx);
+        assert_eq!((pinned, shelves), (1, 2));
+        assert_eq!(keys[keys.len() - 2..], ["s:t3-working", "s:t3-snoozed"]);
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| membership(shell, cx)),
+            before
+        );
+
+        // Open shelves append their rows after the list, Working first.
+        let order = shell.update(cx, |shell, cx| {
+            shell.t3_working_open = true;
+            shell.t3_snoozed_open = true;
+            cx.notify();
+            shell.sidebar_visible_order(cx)
+        });
+        assert_eq!(
+            order,
+            ids(&["pin-idle", "sec-idle", "plain", "pin-work", "sec-snooze"])
+        );
+        assert_eq!(draw(cx).1, 2);
+
+        // Completion returns the working session to its pin slot.
+        let order = shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| state.sessions.clear());
+            cx.notify();
+            shell.sidebar_visible_order(cx)
+        });
+        assert_eq!(
+            order,
+            ids(&["pin-work", "pin-idle", "sec-idle", "plain", "sec-snooze"])
+        );
+        assert_eq!(draw(cx).1, 1);
+
+        // The deadline returns the snoozed session to its section slot.
+        let order = shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats[2].snoozed_until = Some(now - chrono::Duration::seconds(1));
+            });
+            cx.notify();
+            shell.sidebar_visible_order(cx)
+        });
+        assert_eq!(order, all_in_place);
+        let (pinned, shelves, _) = draw(cx);
+        assert_eq!((pinned, shelves), (2, 0));
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| membership(shell, cx)),
+            before
+        );
+
+        // Each mode keeps its own Archived / Settled disclosure.
+        shell.update(cx, |shell, _| {
+            shell.archived_open = true;
+            shell.t3_settled_open = false;
+            assert!(!shell.archived_shelf_open());
+            shell.set_archived_shelf_open(true);
+            shell.settings.sidebar_mode = SidebarMode::Default;
+            assert!(shell.archived_shelf_open());
+            shell.set_archived_shelf_open(false);
+            shell.settings.sidebar_mode = SidebarMode::T3;
+            assert!(shell.archived_shelf_open());
+            assert!(!shell.archived_open);
+        });
+        cx.run_until_parked();
+    }
+
     #[gpui::test]
     fn sidebar_projects_sharing_a_repository_group_only_by_project(cx: &mut gpui::TestAppContext) {
         use super::*;
@@ -1351,7 +1559,10 @@ mod pinned_session_tests {
             // The globe/archive slot is always reserved, so hovering swaps its
             // glyph in place: the title keeps its width and the status and time
             // columns never move.
-            assert_eq!(cx.debug_bounds("chat-title-older").unwrap().size.width, title.size.width);
+            assert_eq!(
+                cx.debug_bounds("chat-title-older").unwrap().size.width,
+                title.size.width
+            );
             assert_eq!(cx.debug_bounds("chat-status-older").unwrap(), status);
             assert_eq!(cx.debug_bounds("chat-time-older").unwrap(), time);
         }
@@ -2135,6 +2346,8 @@ impl Render for SidebarViewOptionsTooltip {
 
 #[derive(Clone, Copy)]
 enum SidebarViewRow {
+    DefaultMode,
+    T3Mode,
     ByProject,
     Compact,
     ShowProjectIcon,
@@ -2156,15 +2369,27 @@ impl SidebarViewRow {
     fn closes_submenu(self) -> bool {
         matches!(
             self,
-            Self::ByProject | Self::ByDevice | Self::InOneList | Self::LastUpdated | Self::Created
+            Self::DefaultMode
+                | Self::T3Mode
+                | Self::ByProject
+                | Self::ByDevice
+                | Self::InOneList
+                | Self::LastUpdated
+                | Self::Created
         )
     }
 }
 
-const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 3] =
-    [("Organize", 0..3), ("Sort", 3..5), ("Show", 5..12)];
+const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 4] = [
+    ("Mode", 0..2),
+    ("Organize", 2..5),
+    ("Sort", 5..7),
+    ("Show", 7..14),
+];
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 12] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 14] = [
+    SidebarViewRow::DefaultMode,
+    SidebarViewRow::T3Mode,
     SidebarViewRow::ByDevice,
     SidebarViewRow::ByProject,
     SidebarViewRow::InOneList,
@@ -2182,10 +2407,10 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 12] = [
 // list items stay tightly related at 2px, while section boundaries use 12px
 // (well over 2x the intra-list gap). Disclosure content gets a small 4px
 // handoff from its header without leaving dead space while collapsed.
-const SIDEBAR_SECTION_GAP: f32 = 12.0;
+pub(super) const SIDEBAR_SECTION_GAP: f32 = 12.0;
 pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
 pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
-const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
+pub(super) const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
     SIDEBAR_SECTION_GAP + SIDEBAR_DISCLOSURE_HEADER_HEIGHT;
 /// The Archived shelf shows this many rows, then "Show more" pages by
 /// [`ARCHIVED_PAGE_ROWS`].
@@ -2280,7 +2505,7 @@ pub(super) fn sidebar_header_glyph(theme: &Theme) -> gpui::Hsla {
 
 /// A collapsed section's session count, cut like the sidebar's pull-request
 /// badge (16pt tall, 4pt radius, monospace digits) in a muted tone.
-fn sidebar_count_badge(theme: &Theme, count: usize) -> gpui::Div {
+pub(super) fn sidebar_count_badge(theme: &Theme, count: usize) -> gpui::Div {
     div()
         .flex_none()
         .h(px(16.0))
@@ -3399,7 +3624,10 @@ impl Shell {
                     index -= 1;
                 }
                 let shown: Vec<&String> = shown.into_iter().filter(|m| *m != chat).collect();
-                let after = index.checked_sub(1).and_then(|i| shown.get(i)).map(|m| (*m).clone());
+                let after = index
+                    .checked_sub(1)
+                    .and_then(|i| shown.get(i))
+                    .map(|m| (*m).clone());
                 let before = shown.get(index).map(|m| (*m).clone());
                 if after.is_none() && before.is_none() {
                     (others.last().cloned(), None)
@@ -3655,7 +3883,12 @@ impl Shell {
         let projects = state.projects();
         let names: Vec<String> = projects
             .iter()
-            .map(|members| state.representative_space(members[0]).display_name().to_string())
+            .map(|members| {
+                state
+                    .representative_space(members[0])
+                    .display_name()
+                    .to_string()
+            })
             .collect();
         let mut rows: Vec<SpacesMenuRow> = Vec::new();
         if query.trim().is_empty() {
@@ -3826,6 +4059,8 @@ impl Shell {
         self.cancel_sidebar_session_transfer(cx);
         self.cancel_pinned_session_drag(cx);
         match row {
+            SidebarViewRow::DefaultMode => self.settings.sidebar_mode = SidebarMode::Default,
+            SidebarViewRow::T3Mode => self.settings.sidebar_mode = SidebarMode::T3,
             SidebarViewRow::ByProject => {
                 self.settings.sidebar_organization = SidebarOrganization::ByProject
             }
@@ -4028,7 +4263,10 @@ impl Shell {
         let show_branch = self.settings.sidebar_show_branch;
         let show_pr = self.settings.sidebar_show_pull_request;
 
+        let mode = self.settings.sidebar_mode;
         let labels = [
+            "Default",
+            "T3 Mode",
             "By device",
             "By project",
             "None",
@@ -4040,9 +4278,15 @@ impl Shell {
             "Project icon",
             "Location",
             "Project filter",
-            "Archived",
+            if mode == SidebarMode::T3 {
+                "Settled"
+            } else {
+                "Archived"
+            },
         ];
         let icons = [
+            icons::LIST,
+            icons::CHECKLIST,
             icons::LAPTOP,
             icons::FOLDER,
             icons::LIST,
@@ -4058,6 +4302,8 @@ impl Shell {
             icons::ARCHIVE_MINIMALISTIC,
         ];
         let selected = [
+            mode == SidebarMode::Default,
+            mode == SidebarMode::T3,
             organization == SidebarOrganization::ByDevice,
             organization == SidebarOrganization::ByProject,
             organization == SidebarOrganization::InOneList,
@@ -4072,12 +4318,14 @@ impl Shell {
             self.settings.sidebar_show_archived,
         ];
         let values = [
-            labels[selected[..3].iter().position(|v| *v).unwrap_or(0)].to_string(),
-            labels[3 + selected[3..5].iter().position(|v| *v).unwrap_or(0)].to_string(),
+            labels[selected[..2].iter().position(|v| *v).unwrap_or(0)].to_string(),
+            labels[2 + selected[2..5].iter().position(|v| *v).unwrap_or(0)].to_string(),
+            labels[5 + selected[5..7].iter().position(|v| *v).unwrap_or(0)].to_string(),
         ];
         let mut groups: Vec<AnyElement> = Vec::new();
         for (group, (label, range)) in SIDEBAR_VIEW_GROUPS.iter().enumerate() {
-            if group == 2 {
+            // Mode reshapes the whole list; Show only decorates rows.
+            if group == 1 || group == 3 {
                 groups.push(popover::menu_separator().into_any_element());
             }
             let open = submenu == Some(group);
@@ -4814,12 +5062,42 @@ impl Shell {
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
-        let mut chats: Vec<zeron_proto::Chat> = state
-            .sidebar_chats(Utc::now(), filter.as_deref())
+        let now = Utc::now();
+        let mut chats: Vec<(ChatIndicator, zeron_proto::Chat)> = state
+            .sidebar_chats(now, filter.as_deref())
             .into_iter()
-            .map(|(_, chat)| chat.clone())
+            .map(|(status, chat)| (status, chat.clone()))
             .collect();
-        chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
+        chats.sort_by(|left, right| {
+            compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1)
+        });
+        // Mirror render_active_rows' T3 lanes: shelved ids follow the list,
+        // and only while their shelf is open.
+        let mut shelved: Vec<String> = Vec::new();
+        if self.t3_mode() {
+            let mut working = Vec::new();
+            let mut snoozed = Vec::new();
+            chats.retain(|(status, chat)| match t3_lane(*status, chat, now) {
+                T3Lane::Inbox => true,
+                T3Lane::Working => {
+                    working.push(chat.id.clone());
+                    false
+                }
+                T3Lane::Snoozed => {
+                    snoozed.push((chat.snoozed_until, chat.id.clone()));
+                    false
+                }
+            });
+            t3_attention_first(&mut chats, |(status, _)| *status);
+            snoozed.sort();
+            if self.t3_shelf_open(T3Shelf::Working) {
+                shelved.extend(working);
+            }
+            if self.t3_shelf_open(T3Shelf::Snoozed) {
+                shelved.extend(snoozed.into_iter().map(|(_, id)| id));
+            }
+        }
+        let chats: Vec<zeron_proto::Chat> = chats.into_iter().map(|(_, chat)| chat).collect();
         let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
             .into_iter()
             .partition(|chat| pinned_order.contains(&chat.id));
@@ -4889,6 +5167,7 @@ impl Shell {
             let pins: HashSet<&str> = pinned_order.iter().map(String::as_str).collect();
             visible.retain(|id| !pins.contains(id.as_str()));
         }
+        visible.extend(shelved);
         visible
     }
 
@@ -4958,11 +5237,12 @@ impl Shell {
     pub(super) fn reveal_sidebar_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) -> bool {
         let (active, archived) = {
             let state = self.state.read(cx);
+            let now = Utc::now();
             let active = state
-                .sidebar_chats(Utc::now(), self.settings.space_filter.as_deref())
+                .sidebar_chats(now, self.settings.space_filter.as_deref())
                 .into_iter()
                 .find(|(_, chat)| chat.id == chat_id)
-                .map(|(_, chat)| chat.clone());
+                .map(|(status, chat)| (t3_lane(status, chat, now), chat.clone()));
             let archived = self
                 .archived_sidebar_chats(cx)
                 .iter()
@@ -4970,11 +5250,19 @@ impl Shell {
             (active, archived)
         };
         if active.is_none() && archived.is_none() {
-            self.show_notice(crate::toast::ToastKind::Error, "Clear the project filter to rename this session", cx);
+            self.show_notice(
+                crate::toast::ToastKind::Error,
+                "Clear the project filter to rename this session",
+                cx,
+            );
             return false;
         }
-        if let Some(chat) = &active {
-            if self.active_sidebar_pins(cx).contains(&chat.id) {
+        if let Some((lane, chat)) = &active {
+            // A shelved T3 row sits on its shelf, whatever pin or section
+            // it will return to.
+            if let Some(shelf) = T3Shelf::of(*lane).filter(|_| self.t3_mode()) {
+                self.reveal_t3_shelf(shelf);
+            } else if self.active_sidebar_pins(cx).contains(&chat.id) {
                 if !self.pinned_open {
                     self.pinned_open = true;
                     self.queue_sidebar_reveal("pinned");
@@ -5010,8 +5298,8 @@ impl Shell {
                 self.settings.sidebar_show_archived = true;
                 self.schedule_save(cx);
             }
-            if !self.archived_open {
-                self.archived_open = true;
+            if !self.archived_shelf_open() {
+                self.set_archived_shelf_open(true);
                 self.archived_shown = ARCHIVED_INITIAL_ROWS;
                 self.queue_sidebar_reveal("archived");
             }
@@ -5132,6 +5420,29 @@ impl Shell {
                 .map(|(status, chat)| self.sidebar_chat_data(status, chat, state))
                 .collect()
         };
+        // T3 Mode lifts shelved sessions out before pins and sections are
+        // counted, so their membership waits untouched for their return.
+        let t3 = self.t3_mode();
+        let mut working_rows = Vec::new();
+        let mut snoozed_rows = Vec::new();
+        if t3 {
+            let mut inbox = Vec::with_capacity(rows.len());
+            for row in rows {
+                match t3_lane(row.status, &row.chat, now) {
+                    T3Lane::Inbox => inbox.push(row),
+                    T3Lane::Working => working_rows.push(row),
+                    T3Lane::Snoozed => snoozed_rows.push(row),
+                }
+            }
+            t3_attention_first(&mut inbox, |row| row.status);
+            snoozed_rows.sort_by(|left: &ActiveChatRow, right: &ActiveChatRow| {
+                left.chat
+                    .snoozed_until
+                    .cmp(&right.chat.snoozed_until)
+                    .then_with(|| left.chat.id.cmp(&right.chat.id))
+            });
+            rows = inbox;
+        }
         let pinned_order = frozen_pinned
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
@@ -5213,12 +5524,7 @@ impl Shell {
         }
         // Sections keep their placed order, as Pinned does, not activity order.
         for ((_, rows), section) in custom_groups.iter_mut().zip(&custom_sections) {
-            rows.sort_by_key(|row| {
-                section
-                    .session_ids
-                    .iter()
-                    .position(|id| id == &row.chat.id)
-            });
+            rows.sort_by_key(|row| section.session_ids.iter().position(|id| id == &row.chat.id));
         }
         if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
             let local_device_id = self.state.read(cx).local_device_id.clone();
@@ -5607,7 +5913,9 @@ impl Shell {
                         .spaces
                         .iter()
                         .find(|space| zeron_proto::view::project_key(space) == key)
-                        .and_then(|space| state.project_members(space).first().map(|m| m.id.clone()))
+                        .and_then(|space| {
+                            state.project_members(space).first().map(|m| m.id.clone())
+                        })
                 })
                 .flatten();
             let new_chat_button = group_space.map(|project| {
@@ -5641,31 +5949,30 @@ impl Shell {
                     )
                     .into_any_element()
             });
-            let header =
-                sidebar_disclosure_header(
-                    theme,
-                    group_icon,
-                    visible_label,
-                    collapsed.then_some(row_count),
-                    new_chat_button,
-                    chevron,
-                )
-                    .group(group_name)
-                .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
-                    this.begin_sidebar_disclosure_motion(
-                        &toggle_motion_key,
-                        if was_open { body_height } else { 0.0 },
-                        if was_open { 0.0 } else { body_height },
-                    );
-                    if was_open {
-                        this.sidebar_collapsed_groups.insert(toggle_key.clone());
-                    } else {
-                        this.sidebar_collapsed_groups.remove(&toggle_key);
-                    }
-                    cx.notify();
-                }));
+            let header = sidebar_disclosure_header(
+                theme,
+                group_icon,
+                visible_label,
+                collapsed.then_some(row_count),
+                new_chat_button,
+                chevron,
+            )
+            .group(group_name)
+            .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
+                this.begin_sidebar_disclosure_motion(
+                    &toggle_motion_key,
+                    if was_open { body_height } else { 0.0 },
+                    if was_open { 0.0 } else { body_height },
+                );
+                if was_open {
+                    this.sidebar_collapsed_groups.insert(toggle_key.clone());
+                } else {
+                    this.sidebar_collapsed_groups.remove(&toggle_key);
+                }
+                cx.notify();
+            }));
             let body = self.render_sidebar_disclosure_body(
                 &motion_key,
                 !collapsed,
@@ -5684,7 +5991,92 @@ impl Shell {
                 .into_any_element();
             rendered.push((format!("g:{collapse_key}"), height, element));
         }
+        // Shelves trail the list as keyed rows, so the resort glide carries a
+        // shelf as a session moves onto or off it.
+        let mut shelf_count = 0;
+        for (shelf, rows) in [
+            (T3Shelf::Working, working_rows),
+            (T3Shelf::Snoozed, snoozed_rows),
+        ] {
+            if rows.is_empty() {
+                continue;
+            }
+            let items = rows
+                .into_iter()
+                .map(|row| {
+                    let ActiveChatRow {
+                        status,
+                        chat,
+                        folder,
+                        branch,
+                        change_request,
+                        group: _,
+                    } = row;
+                    // A snoozed row's story is when it comes back.
+                    let time: SharedString = match chat.snoozed_until {
+                        Some(until) if shelf == T3Shelf::Snoozed => t3_wake_label(until, now),
+                        _ => format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now),
+                    }
+                    .into();
+                    let harness = self
+                        .settings
+                        .sidebar_show_harness
+                        .then(|| chat.config.as_ref().map(|c| c.harness))
+                        .flatten();
+                    let height = sidebar_row_height(
+                        self.settings.sidebar_compact,
+                        self.settings.sidebar_show_project_label,
+                        branch.is_some(),
+                        change_request.is_some(),
+                    );
+                    let jump_label: Option<SharedString> = if jump_hints
+                        && let Some(slot) = visible_slots.get(&chat.id).copied()
+                    {
+                        let combo = keymap.get(ShortcutId::JumpSession(slot));
+                        (slot < JUMP_SLOTS && !combo.is_empty()).then(|| badge_combo(combo).into())
+                    } else {
+                        None
+                    };
+                    let element = self.render_chat_row(
+                        chat.id.clone(),
+                        transcript::single_line(
+                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                        )
+                        .into(),
+                        time,
+                        folder.into(),
+                        branch.map(SharedString::from),
+                        change_request,
+                        harness,
+                        status,
+                        selected.as_deref() == Some(chat.id.as_str()),
+                        false,
+                        false,
+                        None,
+                        jump_label,
+                        self.settings.sidebar_show_project_icon,
+                        None,
+                        theme,
+                        cx,
+                    );
+                    let element = div()
+                        .id(SharedString::from(format!("session-slot-{}", chat.id)))
+                        .debug_selector({
+                            let id = chat.id.clone();
+                            move || format!("session-slot-{id}")
+                        })
+                        .h(px(height))
+                        .flex_none()
+                        .child(element)
+                        .into_any_element();
+                    (format!("c:{}", chat.id), height, element)
+                })
+                .collect();
+            rendered.push(self.render_t3_shelf(shelf, items, theme, cx));
+            shelf_count += 1;
+        }
         SidebarSessionRows {
+            shelf_count,
             custom_count,
             regular_count: base_ids
                 .len()
@@ -5785,49 +6177,49 @@ impl Shell {
         let header = sidebar_disclosure_header(
             theme,
             None,
-            "Sessions".into(),
+            if self.t3_mode() { "Inbox" } else { "Sessions" }.into(),
             (!open).then_some(count),
             None,
             chevron,
         )
-            .id("sessions-toggle")
-            .debug_selector(|| "sessions-toggle".into())
-            .on_drag_move::<SidebarSessionDrag>(cx.listener(
-                |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, _| {
-                    if event.bounds.contains(&event.event.position) {
-                        let top = f32::from(
-                            event.bounds.bottom()
-                                - this.sidebar_scroll.bounds().top()
-                                - this.sidebar_scroll.offset().y,
-                        ) + SIDEBAR_DISCLOSURE_BODY_INSET;
-                        if let Some(drag) = this.sidebar_session_transfer.as_mut() {
-                            drag.preview = Some(SidebarSessionGap {
-                                group: "regular".into(),
-                                index: 0,
-                                pinned: false,
-                                top,
-                            });
-                        }
+        .id("sessions-toggle")
+        .debug_selector(|| "sessions-toggle".into())
+        .on_drag_move::<SidebarSessionDrag>(cx.listener(
+            |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, _| {
+                if event.bounds.contains(&event.event.position) {
+                    let top = f32::from(
+                        event.bounds.bottom()
+                            - this.sidebar_scroll.bounds().top()
+                            - this.sidebar_scroll.offset().y,
+                    ) + SIDEBAR_DISCLOSURE_BODY_INSET;
+                    if let Some(drag) = this.sidebar_session_transfer.as_mut() {
+                        drag.preview = Some(SidebarSessionGap {
+                            group: "regular".into(),
+                            index: 0,
+                            pinned: false,
+                            top,
+                        });
                     }
-                },
-            ))
-            .on_drop::<SidebarSessionDrag>(cx.listener(|this, payload, _, cx| {
-                this.finish_sidebar_session_transfer(payload, SidebarSessionDrop::Regular, cx);
-            }))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.cancel_sidebar_session_transfer(cx);
-                let was_open = this.sessions_open;
-                this.begin_sidebar_disclosure_motion(
-                    "sessions",
-                    if was_open { body_height } else { 0.0 },
-                    if was_open { 0.0 } else { body_height },
-                );
-                this.sessions_open = !was_open;
-                this.sidebar_prev_order.clear();
-                this.sidebar_resort.clear();
-                this.sidebar_new_keys.clear();
-                cx.notify();
-            }));
+                }
+            },
+        ))
+        .on_drop::<SidebarSessionDrag>(cx.listener(|this, payload, _, cx| {
+            this.finish_sidebar_session_transfer(payload, SidebarSessionDrop::Regular, cx);
+        }))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.cancel_sidebar_session_transfer(cx);
+            let was_open = this.sessions_open;
+            this.begin_sidebar_disclosure_motion(
+                "sessions",
+                if was_open { body_height } else { 0.0 },
+                if was_open { 0.0 } else { body_height },
+            );
+            this.sessions_open = !was_open;
+            this.sidebar_prev_order.clear();
+            this.sidebar_resort.clear();
+            this.sidebar_new_keys.clear();
+            cx.notify();
+        }));
         let content = div()
             .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
             .child(content)
@@ -5891,7 +6283,7 @@ impl Shell {
                 .collect()
         };
         let total = rows.len();
-        let open = self.archived_open;
+        let open = self.archived_shelf_open();
         let shown = self.archived_shown.max(INITIAL);
         let visible_count = total.min(shown);
         let has_more = total > shown;
@@ -5925,27 +6317,33 @@ impl Shell {
         // Match Pinned: a muted label with a right-aligned disclosure chevron.
         // The count only shows while collapsed.
         let chevron = self.sidebar_disclosure_chevron("archived", open, theme);
+        // T3 Mode reads archiving as settling: same shelf, its own name.
+        let label = if self.t3_mode() {
+            "Settled"
+        } else {
+            "Archived"
+        };
         let header = sidebar_disclosure_header(
             theme,
             None,
-            "Archived".into(),
+            label.into(),
             (!open).then_some(total),
             None,
             chevron,
         )
-            .id("archived-toggle")
-            .debug_selector(|| "archived-toggle".into())
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let was_open = this.archived_open;
-                this.begin_sidebar_disclosure_motion(
-                    "archived",
-                    if was_open { body_height } else { 0.0 },
-                    if was_open { 0.0 } else { body_height },
-                );
-                this.archived_open = !was_open;
-                this.archived_shown = INITIAL;
-                cx.notify();
-            }));
+        .id("archived-toggle")
+        .debug_selector(|| "archived-toggle".into())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let was_open = this.archived_shelf_open();
+            this.begin_sidebar_disclosure_motion(
+                "archived",
+                if was_open { body_height } else { 0.0 },
+                if was_open { 0.0 } else { body_height },
+            );
+            this.set_archived_shelf_open(!was_open);
+            this.archived_shown = INITIAL;
+            cx.notify();
+        }));
         let section = div().flex().flex_col().child(header);
         let body = {
             let selected = self.state.read(cx).selected_chat.clone();
@@ -7774,6 +8172,24 @@ mod tests {
 /// Synthetic responses for the isolated native screenshot fixture only.
 #[cfg(feature = "project-palette-fixture")]
 impl Shell {
+    /// Open the sidebar view menu, optionally with its Mode submenu out;
+    /// `None` closes it.
+    pub fn fixture_sidebar_view_menu(
+        &mut self,
+        mode_submenu: Option<bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mode_submenu) = mode_submenu else {
+            self.close_sidebar_view_menu(cx);
+            return;
+        };
+        self.open_sidebar_view_menu(window, cx);
+        if mode_submenu {
+            self.open_sidebar_view_submenu(0, true, cx);
+        }
+    }
+
     pub fn fixture_project_responses(&mut self, cx: &mut Context<Self>) {
         if std::env::var_os("ZERON_FIXTURE_BACKGROUND").is_some() {
             self.composer

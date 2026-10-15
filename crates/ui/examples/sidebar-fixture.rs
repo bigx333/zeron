@@ -1,5 +1,9 @@
 //! Isolated native sidebar review fixture. ZERON_SIDEBAR_COMPACT / ZERON_SIDEBAR_HIDE_LABEL select layout;
 //! ZERON_SIDEBAR_BY_PROJECT groups by project, with a remote clone of the local repository.
+//! ZERON_SIDEBAR_T3 switches to T3 Mode with working, waiting, failed and snoozed sessions;
+//! ZERON_SIDEBAR_T3_OPEN also opens its Working, Snoozed and Settled shelves.
+//! ZERON_SIDEBAR_CAPTURE=<dir> (with the appshots-fixture feature) saves native captures —
+//! shelves folded and open, hover actions, quick Snooze, the Mode menu, then light/opaque — and quits.
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use zeron_ui::*;
 
@@ -13,11 +17,16 @@ fn main() -> anyhow::Result<()> {
         gpui_tokio::init(cx); gpui_base::init(cx);
         let mut settings = settings::UiSettings::default();
         settings.sidebar_show_branch = true;
-        settings.sidebar_compact = std::env::var_os("ZERON_SIDEBAR_COMPACT").is_some();
+        let compact = std::env::var_os("ZERON_SIDEBAR_COMPACT").is_some();
+        settings.sidebar_compact = compact;
         settings.sidebar_show_project_label = std::env::var_os("ZERON_SIDEBAR_HIDE_LABEL").is_none();
         let by_project = std::env::var_os("ZERON_SIDEBAR_BY_PROJECT").is_some();
         settings.sidebar_organization = if by_project { settings::SidebarOrganization::ByProject } else { settings::SidebarOrganization::InOneList };
         settings.sidebar_width = 310.0;
+        let t3 = std::env::var_os("ZERON_SIDEBAR_T3").is_some();
+        if t3 {
+            settings.sidebar_mode = settings::SidebarMode::T3;
+        }
         settings.sidebar_pins_mut("local".into()).extend(["chat-0".into(), "chat-1".into()]);
         let project_path = data.join("fieldnotes");
         std::fs::create_dir_all(project_path.join("public")).unwrap();
@@ -86,10 +95,27 @@ fn main() -> anyhow::Result<()> {
             }
             s.chats[4].last_message_at = Some(chrono::Utc::now());
             s.chats[8].archived = true;
+            if t3 {
+                let now = chrono::Utc::now();
+                // Live rows are stamped ahead so the fixture outlasts the
+                // 45s staleness window while it is being captured.
+                for (chat, status) in [("chat-2", "working"), ("chat-5", "working"), ("chat-3", "awaitingInput"), ("chat-6", "errored")] {
+                    let device = s.chats.iter().find(|c| c.id == chat).unwrap().device_id.clone();
+                    s.sessions.push(serde_json::from_value(serde_json::json!({"chatId":chat,"deviceId":device,"status":status,"startedAt":now - chrono::Duration::minutes(4),"updatedAt":now + chrono::Duration::hours(1)})).unwrap());
+                }
+                let chat = |s: &state::AppState, id: &str| s.chats.iter().position(|c| c.id == id).unwrap();
+                let errored = chat(&s, "chat-6");
+                s.chats[errored].last_message_at = Some(now);
+                // A pinned session snoozes off Pinned and returns there on waking.
+                let pinned = chat(&s, "chat-1");
+                s.chats[pinned].snoozed_until = Some(now + chrono::Duration::minutes(165));
+                let later = chat(&s, "chat-4");
+                s.chats[later].snoozed_until = Some(now + chrono::Duration::days(1));
+            }
             s
         });
         let boot = EngineBootConfig { data_dir: data, ipc_port: 0, edge_url: String::new(), edge_token: None, org_id: None, workos_client_id: None, default_harness: HarnessId::ClaudeCode };
-        let _window = cx.open_window(WindowOptions {
+        let window = cx.open_window(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(gpui::point(px(12.),px(30.)), size(px(1100.),px(800.))))),
             titlebar: Some(gpui::TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(gpui::point(px(14.),px(14.))) }),
             app_owns_titlebar_drag: true,
@@ -97,6 +123,118 @@ fn main() -> anyhow::Result<()> {
             window_background: theme::Theme::of(cx).window_background_appearance(),
             ..Default::default()
         }, |_, cx| cx.new(|cx| shell::Shell::new(state.clone(), boot, cx))).unwrap();
+        if t3 && std::env::var_os("ZERON_SIDEBAR_T3_OPEN").is_some() {
+            window.update(cx, |shell, _, cx| shell.fixture_t3_shelves(true, cx)).unwrap();
+        }
+        #[cfg(feature = "appshots-fixture")]
+        if let Some(directory) = std::env::var_os("ZERON_SIDEBAR_CAPTURE").map(std::path::PathBuf::from) {
+            cx.spawn(async move |cx| {
+                let run: anyhow::Result<()> = async {
+                    std::fs::create_dir_all(&directory)?;
+                    let prefix = if t3 { "t3" } else { "default" };
+                    let shot = async |cx: &mut gpui::AsyncApp, name: &str, ms: u64| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(ms)).await;
+                        // Untyped, as in appshots-fixture: a typed update holds the
+                        // Shell lease that draw() needs to render it.
+                        let capture_window: gpui::AnyWindowHandle = window.into();
+                        capture_window.update(cx, |_, w, cx| {
+                            w.draw(cx).clear();
+                            w.render_to_image()?.save(directory.join(format!("{prefix}-{name}.png")))?;
+                            anyhow::Ok(())
+                        })?
+                    };
+                    // A step that lands while the window is mid-update (an appearance
+                    // switch can re-enter the platform's frame callback) gets one retry
+                    // after a beat instead of ending the whole tour.
+                    let step = async |cx: &mut gpui::AsyncApp, f: &dyn Fn(&mut shell::Shell, &mut gpui::Window, &mut gpui::Context<shell::Shell>)| -> anyhow::Result<()> {
+                        for attempt in 0..3 {
+                            match window.update(cx, |s, w, cx| f(s, w, cx)) {
+                                Ok(()) => return Ok(()),
+                                Err(error) if attempt < 2 => {
+                                    eprintln!("sidebar capture: retrying a step ({error:#})");
+                                    cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        Ok(())
+                    };
+                    let escape = |cx: &mut gpui::AsyncApp| -> anyhow::Result<()> {
+                        let capture_window: gpui::AnyWindowHandle = window.into();
+                        capture_window.update(cx, |_, w, cx| {
+                            let keystroke = gpui::Keystroke::parse("escape").unwrap();
+                            w.dispatch_event(gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                                keystroke: keystroke.clone(),
+                                is_held: false,
+                                prefer_character_input: false,
+                            }), cx);
+                            w.dispatch_event(gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }), cx);
+                        })
+                    };
+                    let shelves = async |cx: &mut gpui::AsyncApp, open: bool| step(cx, &|s, _, cx| s.fixture_t3_shelves(open, cx)).await;
+                    for (look, light) in [("dark", false), ("light-opaque", true)] {
+                        if light {
+                            cx.update(|cx| {
+                                appearance::set_mode(appearance::AppearanceMode::Light, cx);
+                                appearance::set_surface(zeron_theme::SurfacePreference::Opaque, cx);
+                                appearance::reapply_window_background(cx);
+                            });
+                        }
+                        // Let the appearance switch settle before driving the window.
+                        cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+                        shelves(cx, false).await?;
+                        shot(cx, &format!("folded-{look}"), 900).await?;
+                        if t3 {
+                            step(cx, &|s, _, cx| s.fixture_sidebar_row_hover(Some("chat-3"), cx)).await?;
+                            shot(cx, &format!("hover-actions-{look}"), 350).await?;
+                            step(cx, &|s, _, cx| {
+                                s.fixture_sidebar_row_snooze("chat-3", gpui::point(px(256.0), px(260.0)), cx);
+                            }).await?;
+                            shot(cx, &format!("quick-snooze-{look}"), 400).await?;
+                            escape(cx)?;
+                            // The same card with "Custom…" opened into its editor: just
+                            // opened (empty), mistyped, then a readable duration.
+                            for (state, text) in [("empty", ""), ("invalid", "3x"), ("typed", "1h30m")] {
+                                step(cx, &|s, _, cx| {
+                                    s.fixture_custom_snooze("chat-3", gpui::point(px(256.0), px(260.0)), text, cx);
+                                }).await?;
+                                shot(cx, &format!("custom-snooze-{state}-{look}"), 450).await?;
+                                // First Escape leaves the field, the second closes the card.
+                                escape(cx)?;
+                                escape(cx)?;
+                            }
+                            cx.update(|cx| {
+                                settings::update(settings::SavePolicy::Debounced, cx, |s| s.sidebar_compact = !compact);
+                            });
+                            step(cx, &|s, _, cx| s.fixture_sidebar_row_hover(Some("chat-3"), cx)).await?;
+                            shot(cx, &format!("hover-actions-alternate-{look}"), 350).await?;
+                            cx.update(|cx| {
+                                settings::update(settings::SavePolicy::Debounced, cx, |s| s.sidebar_compact = compact);
+                            });
+                            step(cx, &|s, _, cx| s.fixture_sidebar_row_hover(None, cx)).await?;
+                            shelves(cx, true).await?;
+                            // Well past the 180ms disclosure motion.
+                            shot(cx, &format!("open-{look}"), 600).await?;
+                        }
+                        step(cx, &|s, w, cx| s.fixture_sidebar_view_menu(Some(true), w, cx)).await?;
+                        shot(cx, &format!("mode-menu-{look}"), 400).await?;
+                        step(cx, &|s, w, cx| s.fixture_sidebar_view_menu(None, w, cx)).await?;
+                        if t3 {
+                            step(cx, &|s, _, cx| s.fixture_snooze_menu(true, cx)).await?;
+                            shot(cx, &format!("snooze-menu-{look}"), 500).await?;
+                            step(cx, &|s, _, cx| s.fixture_snooze_menu(false, cx)).await?;
+                        }
+                    }
+                    Ok(())
+                }
+                .await;
+                if let Err(error) = run {
+                    eprintln!("sidebar capture failed: {error:#}");
+                }
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        }
         appearance::reapply_window_background(cx);
         state.update(cx, |_, cx| cx.notify());
         cx.activate(true);
