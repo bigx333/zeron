@@ -12,6 +12,10 @@ final class AppModel {
         var sectionSessions: [String: [SessionRowVM]] = [:]
         /// `sessions` grouped by repository project, groups in recency order.
         var projectGroups: [ProjectGroupVM] = []
+        /// T3 Mode shelves (empty in Default): running and snoozed sessions,
+        /// lifted out of pins/sections/recent without changing membership.
+        var working: [SessionRowVM] = []
+        var snoozed: [SessionRowVM] = []
     }
 
     struct ProjectGroupVM: Equatable {
@@ -31,6 +35,22 @@ final class AppModel {
             observers.values.forEach { $0() }
         }
     }
+
+    /// T3 Mode: the front page becomes an inbox (attention first) with
+    /// Working / Snoozed / Settled shelves. Local to this phone; the demo
+    /// keeps it in memory (seeded by `-t3`) so runs never leak into each other.
+    var t3Mode: Bool {
+        get { Self.persistsNewSession ? UserDefaults.standard.bool(forKey: "t3Mode") : volatileT3Mode }
+        set {
+            guard newValue != t3Mode else { return }
+            if Self.persistsNewSession { UserDefaults.standard.set(newValue, forKey: "t3Mode") } else { volatileT3Mode = newValue }
+            refreshWorkspace()
+        }
+    }
+    private var volatileT3Mode = ProcessInfo.processInfo.arguments.contains("-t3")
+
+    /// Archive, as T3 Mode names it.
+    var archiveWord: String { t3Mode ? "Settle" : "Archive" }
 
     /// Stored in the shared registry, including while this device is offline.
     var steerMode: Bool {
@@ -61,6 +81,7 @@ final class AppModel {
     private var rawProjects: [ProjectView] = []
     private var lastHosts: [HostOption] = []
     private var lastSteerMode = false
+    private var lastT3Mode = false
     private var workspaceRevision: UInt64 = 0
     private var observers: [UUID: () -> Void] = [:]
     private var sessionObservers: [String: [UUID: () -> Void]] = [:]
@@ -388,18 +409,21 @@ final class AppModel {
             return Self.vm(r)
         }
         var page = FrontPage()
-        let pinned = ws.front.pinned.map(vm)
+        let front = t3Mode ? ws.t3Front : ws.front
+        let pinned = front.pinned.map(vm)
         if !pinned.isEmpty {
             page.folders.append(FolderRowVM(id: "pinned", name: "Pinned", count: pinned.count, symbol: "pin"))
         }
         page.sectionSessions["pinned"] = pinned
-        for s in ws.front.sections {
+        for s in front.sections {
             let list = s.sessions.map(vm)
             page.folders.append(FolderRowVM(id: s.id, name: s.name, count: list.count, symbol: "folder"))
             page.sectionSessions[s.id] = list
         }
-        page.sessions = ws.front.recent.map(vm)
-        page.projectGroups = Self.projectGroups(ws.front.recent, page.sessions, projects: ws.projects)
+        page.sessions = front.recent.map(vm)
+        page.projectGroups = Self.projectGroups(front.recent, page.sessions, projects: ws.projects)
+        page.working = front.working.map(vm)
+        page.snoozed = front.snoozed.map(vm)
         rawProjects = ws.projects
         // Sessions reachable only through their project still resolve by id.
         for p in ws.projects {
@@ -408,15 +432,16 @@ final class AppModel {
         let archivedVMs = ws.archived.map(vm)
         var counts = LiveCounts()
         var seen = Set<String>()
-        for row in page.sessions + page.sectionSessions.values.flatMap({ $0 }) where seen.insert(row.id).inserted {
+        for row in page.sessions + page.working + page.sectionSessions.values.flatMap({ $0 }) where seen.insert(row.id).inserted {
             if row.status == .working { counts.working += 1 }
             if row.status == .awaiting { counts.awaiting += 1 }
         }
         rows = all
         // Devices coming and going (Settings, host pickers) count as changes.
         let hosts = hostOptions
-        let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts || steerMode != lastSteerMode
+        let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts || steerMode != lastSteerMode || t3Mode != lastT3Mode
         lastHosts = hosts
+        lastT3Mode = t3Mode
         lastSteerMode = steerMode
         live = counts
         frontPage = page
@@ -484,7 +509,10 @@ final class AppModel {
             timeLabel: r.timeLabel,
             unseen: r.unseen,
             pinned: r.pinned,
-            sendFailed: r.sendState == .failed
+            sendFailed: r.sendState == .failed,
+            snoozed: r.snoozed,
+            snoozeLabel: r.snoozeLabel,
+            archived: r.archived
         )
     }
 
@@ -497,7 +525,12 @@ final class AppModel {
     }
 
     func sessions(inFolder id: String) -> [SessionRowVM] {
-        id == "archived" ? archived : frontPage.sectionSessions[id] ?? []
+        switch id {
+        case "archived": archived
+        case "t3-working": frontPage.working
+        case "t3-snoozed": frontPage.snoozed
+        default: frontPage.sectionSessions[id] ?? []
+        }
     }
 
     func search(_ query: String) -> [SessionRowVM] {
@@ -509,29 +542,70 @@ final class AppModel {
 
     // MARK: Writes
 
-    private func attempt(_ what: String, _ body: () throws -> Void) {
-        do { try body() } catch { NSLog("\(what) failed: \(error)") }
+    /// Run a write; false when signed out or the core rejected it, so
+    /// callers only confirm (toast, navigate) what actually happened.
+    @discardableResult
+    private func attempt(_ what: String, _ body: (CoreClient) throws -> Void) -> Bool {
+        guard let client else { return false }
+        do {
+            try body(client)
+            return true
+        } catch {
+            NSLog("\(what) failed: \(error)")
+            return false
+        }
     }
 
     func setPinned(_ id: String, _ pinned: Bool) {
-        attempt("pin") { pinned ? try client?.pinSession(chatId: id) : try client?.unpinSession(chatId: id) }
+        attempt("pin") { pinned ? try $0.pinSession(chatId: id) : try $0.unpinSession(chatId: id) }
     }
 
-    func archive(_ id: String) {
-        attempt("archive") { try client?.archiveSession(chatId: id) }
-        let window = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
-        Toast.show("Archived", action: "Undo", in: window) { [weak self] in self?.unarchive(id) }
+    private var keyWindow: UIWindow? {
+        UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
     }
-    func unarchive(_ id: String) { attempt("unarchive") { try client?.unarchiveSession(chatId: id) } }
-    func move(_ id: String, toSection section: String?) { attempt("assign") { try client?.assignSection(chatId: id, sectionId: section) } }
+
+    /// Archive in Default, Settle in T3 Mode: the same durable write.
+    @discardableResult
+    func archive(_ id: String) -> Bool {
+        guard attempt("archive", { try $0.archiveSession(chatId: id) }) else { return false }
+        Toast.show(t3Mode ? "Settled" : "Archived", action: "Undo", in: keyWindow) { [weak self] in self?.unarchive(id) }
+        return true
+    }
+    @discardableResult
+    func unarchive(_ id: String) -> Bool { attempt("unarchive") { try $0.unarchiveSession(chatId: id) } }
+
+    /// The snooze presets every snooze menu offers.
+    static let snoozePresets: [(title: String, seconds: UInt32)] = [
+        ("15 Minutes", 15 * 60),
+        ("1 Hour", 60 * 60),
+        ("4 Hours", 4 * 60 * 60),
+        ("1 Day", 24 * 60 * 60),
+        ("1 Week", 7 * 24 * 60 * 60),
+    ]
+
+    @discardableResult
+    func snooze(_ id: String, seconds: UInt32, title: String) -> Bool {
+        guard attempt("snooze", { try $0.snoozeSession(chatId: id, durationSecs: seconds) }) else { return false }
+        refreshWorkspace()
+        Toast.show("Snoozed for \(title.lowercased())", action: "Undo", in: keyWindow) { [weak self] in self?.wake(id) }
+        return true
+    }
+
+    @discardableResult
+    func wake(_ id: String) -> Bool {
+        guard attempt("wake", { try $0.wakeSession(chatId: id) }) else { return false }
+        refreshWorkspace()
+        return true
+    }
+    func move(_ id: String, toSection section: String?) { attempt("assign") { try $0.assignSection(chatId: id, sectionId: section) } }
     func movePin(_ id: String, after: String?, before: String?) {
-        attempt("move pin") { try client?.movePin(chatId: id, after: after, before: before) }
+        attempt("move pin") { try $0.movePin(chatId: id, after: after, before: before) }
     }
-    func renameSection(_ id: String, _ name: String) { attempt("rename section") { try client?.renameSection(sectionId: id, name: name) } }
-    func deleteSection(_ id: String) { attempt("delete section") { try client?.deleteSection(sectionId: id) } }
-    func createSection(_ name: String) { attempt("section") { _ = try client?.createSection(name: name) } }
-    func rename(_ id: String, _ title: String) { attempt("rename") { try client?.renameSession(chatId: id, title: title) } }
-    func markSeen(_ id: String) { attempt("seen") { try client?.markSeen(chatId: id) } }
+    func renameSection(_ id: String, _ name: String) { attempt("rename section") { try $0.renameSection(sectionId: id, name: name) } }
+    func deleteSection(_ id: String) { attempt("delete section") { try $0.deleteSection(sectionId: id) } }
+    func createSection(_ name: String) { attempt("section") { _ = try $0.createSection(name: name) } }
+    func rename(_ id: String, _ title: String) { attempt("rename") { try $0.renameSession(chatId: id, title: title) } }
+    func markSeen(_ id: String) { attempt("seen") { try $0.markSeen(chatId: id) } }
 
     // MARK: Sessions
 
