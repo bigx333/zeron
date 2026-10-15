@@ -116,6 +116,7 @@ fn controls(
     let token = CancellationToken::new();
     let controls = RunControls {
         realtime: None,
+        account_pool: None,
         execution_lease: None,
         request_input: Box::new(move |questions| {
             let (tx, rx) = oneshot::channel();
@@ -609,6 +610,7 @@ async fn approvals_round_trip_as_input_requests() {
     let seen = asked.clone();
     let controls = RunControls {
         realtime: None,
+        account_pool: None,
         execution_lease: None,
         request_input: Box::new(move |questions| {
             seen.lock().unwrap().extend(questions.iter().cloned());
@@ -785,6 +787,24 @@ async fn resume_falls_back_to_fresh_thread() {
             session_id: Some("th-fresh".into()),
         })
     );
+}
+
+#[tokio::test]
+async fn disabling_pooling_resumes_the_existing_history_with_the_users_provider() {
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("scenario:resumed");
+    req.resume = Some("resume-after-pool-off".into());
+    let mut stream = harness().run(req, controls).await.unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        let event = event.unwrap();
+        let done = matches!(event, AgentEvent::Done { .. });
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::SessionStarted { session_id, .. } if session_id == "th-resumed")));
 }
 
 #[tokio::test]

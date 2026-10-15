@@ -784,6 +784,9 @@ impl CodexHarness {
         };
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
+        if let Some(route) = &controls.account_pool {
+            route.apply_codex(&mut cmd);
+        }
         crate::compose_child_path(&mut cmd, &exe);
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
@@ -1079,6 +1082,7 @@ async fn run_session(session: Session) {
     } = session;
     let RunControls {
         realtime,
+        account_pool,
         execution_lease: _execution_lease,
         request_input,
         mut steering,
@@ -1100,6 +1104,9 @@ async fn run_session(session: Session) {
 
     let start_params = {
         let mut p = serde_json::Map::new();
+        if account_pool.is_some() {
+            p.insert("modelProvider".into(), "zeron-pool".into());
+        }
         if title_only {
             p.insert("baseInstructions".into(), crate::TITLE_INSTRUCTIONS.into());
             p.insert(
@@ -1199,7 +1206,30 @@ async fn run_session(session: Session) {
         let thread = if let Some(resume) = &request.resume {
             let mut p = start_params.clone();
             p.insert("threadId".into(), Value::String(resume.clone()));
-            match client.request("thread/resume", Value::Object(p)).await {
+            let mut resumed = client
+                .request("thread/resume", Value::Object(p.clone()))
+                .await;
+            // Rollouts remember their model provider. When pooling is turned
+            // off, resume that same history with the user's configured provider
+            // instead of treating the missing temporary provider as a lost chat.
+            if account_pool.is_none()
+                && resumed
+                    .as_ref()
+                    .is_err_and(|e| e.to_string().contains("zeron-pool"))
+                && let Ok(config) = client
+                    .request(
+                        "config/read",
+                        json!({"includeLayers": false, "cwd": request.cwd}),
+                    )
+                    .await
+            {
+                let provider = config["config"]["model_provider"]
+                    .as_str()
+                    .unwrap_or("openai");
+                p.insert("modelProvider".into(), provider.into());
+                resumed = client.request("thread/resume", Value::Object(p)).await;
+            }
+            match resumed {
                 Ok(thread) => thread,
                 // A missing/foreign rollout falls back to a fresh thread.
                 Err(e) => {

@@ -125,6 +125,8 @@ pub fn same_model_options(
 
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
+    /// Host-only routing capability. Never serialized into chat documents or RPCs.
+    pub account_pool: Option<AccountPoolRoute>,
     pub realtime: Option<codex::realtime::RealtimeControls>,
     /// Shared execution gate held until the harness has shut down and reaped
     /// its subprocess, including when the host drops the event stream. Each
@@ -143,6 +145,62 @@ pub struct RunControls {
     pub interrupt: CancellationToken,
     /// Turn-level stop and background-work reporting (see [`TurnControl`]).
     pub turn: TurnControl,
+}
+
+/// A capability for the engine's loopback hub. Debug output must never expose it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AccountPoolRoute {
+    pub base_url: String,
+    pub token: String,
+}
+
+impl std::fmt::Debug for AccountPoolRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountPoolRoute").finish_non_exhaustive()
+    }
+}
+
+impl AccountPoolRoute {
+    pub(crate) fn apply_claude(&self, command: &mut crate::process::Command) {
+        command
+            .env("ZERON_ACCOUNT_POOL_ACTIVE", "claude")
+            .env("ANTHROPIC_BASE_URL", &self.base_url)
+            .env("ANTHROPIC_AUTH_TOKEN", &self.token)
+            .env("ENABLE_TOOL_SEARCH", "true")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("CLAUDE_CODE_OAUTH_TOKEN");
+        self.bypass_proxy(command);
+    }
+
+    pub(crate) fn apply_codex(&self, command: &mut crate::process::Command) {
+        command
+            .env("ZERON_ACCOUNT_POOL_ACTIVE", "codex")
+            .env("ZERON_POOL_TOKEN", &self.token);
+        for setting in [
+            "model_provider=\"zeron-pool\"".to_owned(),
+            "model_providers.zeron-pool.name=\"Zeron account pool\"".into(),
+            format!(
+                "model_providers.zeron-pool.base_url={}",
+                serde_json::to_string(&self.base_url).unwrap()
+            ),
+            "model_providers.zeron-pool.env_key=\"ZERON_POOL_TOKEN\"".into(),
+            "model_providers.zeron-pool.wire_api=\"responses\"".into(),
+            "model_providers.zeron-pool.requires_openai_auth=false".into(),
+            "model_providers.zeron-pool.supports_websockets=false".into(),
+            "model_providers.zeron-pool.request_max_retries=2".into(),
+            "model_providers.zeron-pool.stream_max_retries=2".into(),
+        ] {
+            command.args(["-c", &setting]);
+        }
+        self.bypass_proxy(command);
+    }
+
+    fn bypass_proxy(&self, command: &mut crate::process::Command) {
+        for key in ["NO_PROXY", "no_proxy"] {
+            let previous = std::env::var(key).unwrap_or_default();
+            command.env(key, format!("{previous},127.0.0.1,localhost"));
+        }
+    }
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
@@ -331,6 +389,20 @@ fn compose_path<'a>(
     cmd: &mut std::process::Command,
     executable_dir: impl IntoIterator<Item = &'a std::path::Path>,
 ) {
+    // Nested engines do not inherit another engine's routing capability.
+    // An explicitly injected capability wins; ordinary custom endpoints stay.
+    if std::env::var_os("ZERON_ACCOUNT_POOL_ACTIVE").is_some()
+        && !cmd
+            .get_envs()
+            .any(|(key, value)| key == "ZERON_ACCOUNT_POOL_ACTIVE" && value.is_some())
+    {
+        cmd.env_remove("ZERON_ACCOUNT_POOL_ACTIVE")
+            .env_remove("ZERON_POOL_TOKEN");
+        if std::env::var("ZERON_ACCOUNT_POOL_ACTIVE").as_deref() == Ok("claude") {
+            cmd.env_remove("ANTHROPIC_BASE_URL")
+                .env_remove("ANTHROPIC_AUTH_TOKEN");
+        }
+    }
     let mut paths: Vec<std::path::PathBuf> = Vec::new();
     for dir in executable_dir {
         paths.push(dir.to_path_buf());
@@ -617,6 +689,56 @@ pub fn supports_titles(id: HarnessId) -> bool {
 
 #[cfg(test)]
 mod stderr_tests {
+    #[cfg(not(windows))]
+    #[test]
+    fn pool_routing_keeps_the_capability_in_env_and_removes_conflicting_claude_auth() {
+        let route = super::AccountPoolRoute {
+            base_url: "http://127.0.0.1:1234/claude".into(),
+            token: "secret-capability".into(),
+        };
+        let mut claude = super::process::Command::new("claude");
+        route.apply_claude(&mut claude);
+        let env: std::collections::HashMap<_, _> = claude.as_std().get_envs().collect();
+        assert_eq!(
+            env[std::ffi::OsStr::new("ANTHROPIC_AUTH_TOKEN")],
+            Some(std::ffi::OsStr::new("secret-capability"))
+        );
+        assert_eq!(
+            env[std::ffi::OsStr::new("ANTHROPIC_BASE_URL")],
+            Some(std::ffi::OsStr::new("http://127.0.0.1:1234/claude"))
+        );
+        assert_eq!(
+            env[std::ffi::OsStr::new("ENABLE_TOOL_SEARCH")],
+            Some(std::ffi::OsStr::new("true"))
+        );
+        assert_eq!(env[std::ffi::OsStr::new("ANTHROPIC_API_KEY")], None);
+        assert_eq!(env[std::ffi::OsStr::new("CLAUDE_CODE_OAUTH_TOKEN")], None);
+        assert!(!format!("{route:?}").contains("secret-capability"));
+
+        let mut codex = super::process::Command::new("codex");
+        route.apply_codex(&mut codex);
+        let args: Vec<_> = codex
+            .as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy())
+            .collect();
+        assert!(args.iter().any(|s| s.contains("supports_websockets=false")));
+        assert!(
+            args.iter()
+                .any(|s| s.contains("requires_openai_auth=false"))
+        );
+        assert!(args.iter().all(|s| !s.contains("secret-capability")));
+        assert_eq!(
+            codex
+                .as_std()
+                .get_envs()
+                .find(|(k, _)| *k == "ZERON_POOL_TOKEN")
+                .unwrap()
+                .1,
+            Some(std::ffi::OsStr::new("secret-capability"))
+        );
+    }
+
     #[test]
     fn stderr_tail_truncates_at_utf8_boundaries() {
         let tail = super::StderrTail::default();

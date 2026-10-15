@@ -33,6 +33,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
     (
         RunControls {
             realtime: None,
+            account_pool: None,
             execution_lease: None,
             steering: rx,
             interrupt: token.clone(),

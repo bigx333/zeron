@@ -1283,6 +1283,8 @@ pub enum AgentAuthKind {
 pub struct AgentAccountsSnapshot {
     pub accounts: Vec<AgentAccount>,
     pub warnings: Vec<AgentAccountWarning>,
+    #[serde(default, skip_serializing_if = "crate::AccountPoolSnapshot::is_empty")]
+    pub pool: crate::AccountPoolSnapshot,
 }
 
 /// A per-harness detection warning (e.g. Keychain denied reading the live login).

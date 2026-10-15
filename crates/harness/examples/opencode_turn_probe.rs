@@ -64,6 +64,7 @@ async fn main() {
             request,
             RunControls {
                 realtime: None,
+                account_pool: None,
                 execution_lease: None,
                 request_input: Box::new(move |questions| {
                     assert!(

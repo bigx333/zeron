@@ -95,6 +95,7 @@ use crate::repos::home_dir;
 use crate::{EngineError, new_id, now_ms};
 
 mod oauth;
+mod pool;
 #[cfg(test)]
 mod provider_tests;
 mod stores;
@@ -711,6 +712,7 @@ struct CachedClaudeCredentials {
 }
 
 struct Inner {
+    pool: pool::PoolState,
     config: AgentAccountsConfig,
     http: reqwest::Client,
     endpoints: ProbeEndpoints,
@@ -817,6 +819,7 @@ impl AgentAccounts {
             .unwrap_or_default();
         Self {
             inner: Arc::new(Inner {
+                pool: pool::PoolState::new(&root),
                 config,
                 http,
                 endpoints,
@@ -1056,7 +1059,16 @@ impl AgentAccounts {
         if let Some(login) = antigravity {
             accounts.push(login.account());
         }
-        Ok(AgentAccountsSnapshot { accounts, warnings })
+        self.order_pool_accounts(&mut accounts);
+        // Live request headers can be newer than the last usage probe.
+        self.apply_pool_usage(&mut accounts);
+        let mut snapshot = AgentAccountsSnapshot {
+            accounts,
+            warnings,
+            pool: self.pool_snapshot(),
+        };
+        Self::include_unsaved_pool_statuses(&mut snapshot);
+        Ok(snapshot)
     }
 
     // ── swap ────────────────────────────────────────────────────────────────
@@ -1095,6 +1107,9 @@ impl AgentAccounts {
                     "That saved login no longer exists — refresh and try again.".into(),
                 )
             })?;
+        if harness == HarnessId::ClaudeCode && slot.profile.auth_kind == AgentAuthKind::ApiKey {
+            return Err(EngineError::Other("API-key accounts are used through the account pool and cannot replace the CLI login".into()));
+        }
         match harness {
             HarnessId::ClaudeCode => self.activate_claude(&slot).await?,
             HarnessId::Codex => self.activate_codex(&slot)?,
@@ -1385,6 +1400,7 @@ impl AgentAccounts {
         if file.exists() {
             std::fs::remove_file(&file)?;
         }
+        self.forget_pending_pool_slot(account_id);
         self.list_locked(false).await
     }
 
@@ -2264,6 +2280,9 @@ impl AgentAccounts {
     /// Engine shutdown: kill any in-flight login child so an orphan `codex login`
     /// can't survive the restart and brick the next attempt.
     pub fn shutdown(&self) {
+        self.retry_pool_credential_saves();
+        self.flush_pool();
+        self.inner.pool.shutdown();
         let ids: Vec<String> = lock(&self.inner.flows).keys().cloned().collect();
         for id in ids {
             self.cancel_login(&id);
@@ -2412,6 +2431,9 @@ impl AgentAccounts {
 
     /// One saved slot by id (`None` when missing or unparseable).
     fn read_slot(&self, harness: HarnessId, id: &str) -> Option<Slot> {
+        if let Some(slot) = self.pending_pool_slot(harness, id) {
+            return Some(slot);
+        }
         let file = self.slots_dir(harness).ok()?.join(format!("{id}.json"));
         serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()
     }
@@ -2526,6 +2548,7 @@ impl AgentAccounts {
                 slots.push(slot);
             }
         }
+        self.merge_pending_pool_slots(harness, &mut slots);
         // Creation order — stable across switches (saved_at churns on every
         // auto-snapshot; created_at never does). Slot id breaks creation-time
         // ties: two logins saved in the same millisecond otherwise land in
@@ -2567,7 +2590,11 @@ impl AgentAccounts {
             .map_err(|e| EngineError::Other(format!("serialize slot: {e}")))?;
         // Atomic + 0600 from birth: tokens must never be world-readable, and a
         // crash mid-write must never leave torn JSON.
-        write_file_atomic(&file, json.as_bytes(), true)
+        let result = write_file_atomic(&file, json.as_bytes(), true);
+        if result.is_ok() {
+            self.forget_pending_pool_slot(&slot.id);
+        }
+        result
     }
 
     // ── remaining usage ─────────────────────────────────────────────────────
@@ -2577,6 +2604,15 @@ impl AgentAccounts {
     /// moment ago, or already being probed by an overlapping list are left
     /// alone — they keep serving their last known usage.
     async fn refresh_usage(&self, targets: &[(HarnessId, &Slot, bool)]) {
+        self.refresh_usage_scoped(targets, true).await;
+    }
+
+    /// Pool probes retain other providers' cached usage and use read-only targets.
+    async fn refresh_usage_scoped(
+        &self,
+        targets: &[(HarnessId, &Slot, bool)],
+        full_snapshot: bool,
+    ) {
         let now = now_ms();
         let mut probes = Vec::new();
         let mut claimed = Vec::new();
@@ -2628,7 +2664,9 @@ impl AgentAccounts {
             .iter()
             .map(|(harness, slot, _)| usage_key(*harness, &slot.account_key))
             .collect();
-        usage.retain(|key, _| live.contains(key));
+        if full_snapshot {
+            usage.retain(|key, _| live.contains(key));
+        }
         // Persist under the lock: overlapping lists must not interleave
         // writes of the same file.
         let file = UsageCacheFile {
@@ -2687,6 +2725,11 @@ impl AgentAccounts {
         slot: &Slot,
         is_active: bool,
     ) -> Result<UsageSnapshot, ProbeError> {
+        if slot.profile.auth_kind == AgentAuthKind::ApiKey {
+            return Err(ProbeError::NoCredentials {
+                why: NoCredentials::ApiKey,
+            });
+        }
         let missing = ProbeError::NoCredentials {
             why: NoCredentials::Missing,
         };
@@ -2760,7 +2803,11 @@ impl AgentAccounts {
                 ),
         )
         .await?;
-        codex_usage_snapshot(&body).ok_or_else(|| schema_error("codex", &body))
+        let labels = self.codex_pool_labels(slot);
+        let snapshot = codex_usage_snapshot_labeled(&body, &labels)
+            .ok_or_else(|| schema_error("codex", &body))?;
+        self.record_codex_pool_labels(slot, &body, &labels);
+        Ok(snapshot)
     }
 
     async fn cursor_usage(&self, slot: &Slot) -> Result<UsageSnapshot, ProbeError> {
@@ -2879,9 +2926,7 @@ impl AgentAccounts {
         // would have nothing to merge if live credentials were also empty.
         refreshed.credentials = with_claude_ai_oauth(&slot.credentials, updated);
         refreshed.saved_at = now_ms();
-        if let Err(err) = self.write_slot(&refreshed) {
-            tracing::warn!(slot = %slot.id, error = %err, "refreshed slot write failed");
-        }
+        self.save_refreshed_pool_slot(&refreshed);
         Ok(access_token)
     }
 }
@@ -3582,18 +3627,32 @@ fn short_duration(ms: i64) -> String {
 
 /// Codex `/wham/usage`: primary/secondary windows + the live plan.
 fn codex_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
+    codex_usage_snapshot_labeled(body, &HashMap::new())
+}
+
+fn codex_usage_snapshot_labeled(
+    body: &serde_json::Value,
+    labels: &HashMap<String, String>,
+) -> Option<UsageSnapshot> {
     let rl = body.get("rate_limit")?;
     let mut windows = Vec::new();
-    for key in ["primary_window", "secondary_window"] {
+    for (key, bucket, fallback) in [
+        ("primary_window", "primary", "Primary"),
+        ("secondary_window", "secondary", "Secondary"),
+    ] {
         if let Some(w) = rl.get(key)
             && let Some(used) = w.get("used_percent").and_then(|v| v.as_f64())
         {
             let span = w
                 .get("limit_window_seconds")
                 .and_then(|v| v.as_i64())
-                .unwrap_or(0);
+                .filter(|span| *span > 0);
             windows.push(AgentUsageWindow {
-                label: codex_window_label(span).to_string(),
+                label: span
+                    .map(codex_window_label)
+                    .map(str::to_owned)
+                    .or_else(|| labels.get(bucket).cloned())
+                    .unwrap_or_else(|| fallback.into()),
                 used_fraction: (used / 100.0) as f32,
                 resets_at: parse_when(w.get("reset_at")),
             });
@@ -3616,21 +3675,96 @@ fn codex_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
 /// buckets, each a 0-100 `utilization` with an RFC3339 `resets_at`.
 fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
     let mut windows = Vec::new();
-    for (key, label) in [("five_hour", "Session"), ("seven_day", "Week")] {
-        if let Some(w) = body.get(key)
-            && let Some(utilization) = w.get("utilization").and_then(|v| v.as_f64())
-        {
+    for (key, label) in [
+        ("five_hour", "Session"),
+        ("seven_day", "Week"),
+        ("seven_day_opus", "Week (opus)"),
+        ("seven_day_sonnet", "Week (sonnet)"),
+        ("seven_day_fable", "Week (fable)"),
+        ("seven_day_haiku", "Week (haiku)"),
+    ] {
+        if let Some(w) = body.get(key) {
+            let utilization = ["used_percentage", "utilization", "usedPercentage"]
+                .into_iter()
+                .find_map(|key| w.get(key).and_then(quota_number));
+            if utilization.is_none() && w["status"] != "rejected" {
+                continue;
+            }
             windows.push(AgentUsageWindow {
                 label: label.to_string(),
-                used_fraction: (utilization / 100.0) as f32,
-                resets_at: parse_when(w.get("resets_at")),
+                used_fraction: if w["status"] == "rejected" {
+                    1.0
+                } else {
+                    (utilization.unwrap() / 100.0).clamp(0.0, 1.0) as f32
+                },
+                resets_at: parse_quota_reset(
+                    w.get("resets_at")
+                        .or_else(|| w.get("reset_at"))
+                        .or_else(|| w.get("resetAt")),
+                ),
             });
+        }
+    }
+    for limit in body["limits"].as_array().into_iter().flatten() {
+        if limit["kind"] != "weekly_scoped" && limit["group"] != "weekly" {
+            continue;
+        }
+        let Some(model) = limit
+            .pointer("/scope/model/display_name")
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        let family = pool::model_family(model);
+        if family == "other" {
+            continue;
+        }
+        let used = limit.get("percent").and_then(quota_number);
+        if used.is_none() && limit["status"] != "rejected" {
+            continue;
+        }
+        let window = AgentUsageWindow {
+            label: format!("Week ({family})"),
+            used_fraction: if limit["status"] == "rejected" {
+                1.0
+            } else {
+                (used.unwrap() / 100.0).clamp(0.0, 1.0) as f32
+            },
+            resets_at: parse_quota_reset(limit.get("resets_at")),
+        };
+        if let Some(previous) = windows.iter_mut().find(|w| w.label == window.label) {
+            if window.used_fraction > previous.used_fraction {
+                *previous = window;
+            }
+        } else {
+            windows.push(window);
         }
     }
     (!windows.is_empty()).then_some(UsageSnapshot {
         windows,
         plan_label: None,
     })
+}
+
+fn quota_number(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse().ok())
+        .filter(|v| v.is_finite())
+}
+
+fn parse_quota_reset(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
+    let value = value?;
+    if let Some(number) = quota_number(value) {
+        let ms = if number < 1_000_000_000_000.0 {
+            number * 1000.0
+        } else {
+            number
+        };
+        DateTime::from_timestamp_millis(ms as i64)
+    } else {
+        parse_when(Some(value))
+    }
 }
 
 /// The billing-cycle window from Cursor's `GetCurrentPeriodUsage`. The blended
