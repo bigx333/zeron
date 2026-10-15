@@ -591,6 +591,8 @@ final class AppModel {
         return true
     }
 
+    /// Clears a snooze. Not a user-facing control: only a snooze's Undo uses
+    /// it. Sending a message clears a snooze in the core.
     @discardableResult
     func wake(_ id: String) -> Bool {
         guard attempt("wake", { try $0.wakeSession(chatId: id) }) else { return false }
