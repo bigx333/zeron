@@ -634,7 +634,8 @@ mod tests {
     }
 
     fn write(root: &Path, relative: &str, body: &str) -> PathBuf {
-        let path = root.join(relative);
+        // Match read_dir's native separators even when fixtures use `/` on Windows.
+        let path: PathBuf = root.join(relative).components().collect();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, body).unwrap();
         path
