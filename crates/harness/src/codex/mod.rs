@@ -1383,10 +1383,18 @@ async fn run_session(session: Session) {
     #[cfg_attr(not(unix), allow(unused_mut))]
     let mut torn_down: Vec<i32> = Vec::new();
 
+    let mut input_tasks = crate::input_tasks::InputTasks::default();
+
     'main: loop {
         tokio::select! {
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
+                if method == "serverRequest/resolved" {
+                    if let Some(id) = params.get("requestId").filter(|id| id.is_string() || id.is_number()) {
+                        input_tasks.cancel(&id.to_string());
+                    }
+                    continue;
+                }
                 // Foreign-thread traffic FIRST: a child thread's turn/thread
                 // bookkeeping must never reach the parent turn router below
                 // (a child's turn/completed would settle the PARENT turn).
@@ -1780,6 +1788,7 @@ async fn run_session(session: Session) {
                         &params,
                         request.auto_approve,
                         &request_input,
+                        &mut input_tasks,
                     );
                 }
 
@@ -1946,6 +1955,8 @@ async fn run_session(session: Session) {
         }
     }
 
+    drop(input_tasks);
+
     // Terminal bookkeeping: never end the stream without a Done unless the
     // consumer already hung up.
     if !event_tx.is_closed() {
@@ -2082,6 +2093,7 @@ fn handle_server_request(
     params: &Value,
     auto_approve: bool,
     request_input: &Arc<RequestInputFn>,
+    input_tasks: &mut crate::input_tasks::InputTasks,
 ) {
     // A tool's user-input request (EXPERIMENTAL, codex 0.146.x) is a CONTENT
     // question, never auto-approvable — route it to the input bridge and
@@ -2094,7 +2106,7 @@ fn handle_server_request(
         }
         let client = client.clone();
         let request_input = Arc::clone(request_input);
-        tokio::spawn(async move {
+        input_tasks.spawn(id.to_string(), async move {
             let asked: Vec<UserInputQuestion> = questions.iter().map(|(_, q)| q.clone()).collect();
             let answers = (request_input)(asked).await.unwrap_or_default();
             let mut by_id = serde_json::Map::new();
@@ -2130,7 +2142,7 @@ fn handle_server_request(
     let question = approval_question(method, params);
     let client = client.clone();
     let request_input = Arc::clone(request_input);
-    tokio::spawn(async move {
+    input_tasks.spawn(id.to_string(), async move {
         // The engine's input bridge owns the `InputRequested`/`InputResolved`
         // lifecycle (it mints the request id the resolver is parked under);
         // emitting our own copy here doubled the doc's input part with an id

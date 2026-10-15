@@ -904,6 +904,8 @@ async fn run_session(session: Session) {
     #[cfg_attr(not(unix), allow(unused_mut))]
     let mut torn_down: Vec<i32> = Vec::new();
 
+    let mut input_tasks = crate::input_tasks::InputTasks::default();
+
     'main: loop {
         tokio::select! {
             line = stdout_lines.next_line() => match line {
@@ -933,6 +935,10 @@ async fn run_session(session: Session) {
                     {
                         turn.set_background(system.tasks.as_ref().map_or(0, Vec::len));
                     }
+                    if let Frame::ControlCancelRequest(id) = &frame {
+                        input_tasks.cancel(id);
+                        continue;
+                    }
                     if let Frame::ControlRequest(req) = frame {
                         if title_only {
                             let line = control_response_line(&req.request_id, serde_json::json!({
@@ -940,7 +946,7 @@ async fn run_session(session: Session) {
                             }));
                             let _ = stdin_tx.send(StdinMsg::Line(line));
                         } else {
-                            handle_control_request(req, &request_input, &stdin_tx, crate::prompt_for_approvals() && !config.auto_approve);
+                            handle_control_request(req, &request_input, &stdin_tx, crate::prompt_for_approvals() && !config.auto_approve, &mut input_tasks);
                         }
                         continue;
                     }
@@ -1219,6 +1225,8 @@ async fn run_session(session: Session) {
         any_done = true;
     }
 
+    drop(input_tasks);
+
     // Terminal bookkeeping: never end the stream without a Done unless the
     // consumer already hung up.
     if !event_tx.is_closed() {
@@ -1347,15 +1355,15 @@ type RequestInputFn = Box<
 
 /// Serve one `can_use_tool` request. Tool approvals optionally use the input
 /// bridge; unattended mode retains auto-approval. `AskUserQuestion` always
-/// surface the questions through the engine's input bridge (which owns the
-/// `InputRequested`/`InputResolved` lifecycle), wait for the user's answers
-/// (in a subtask so the frame loop keeps flowing), and hand them back keyed
-/// by question text, as the tool expects.
+/// uses the engine's input bridge (which owns the input lifecycle), waits for
+/// answers without blocking the frame loop, and returns them keyed by question
+/// text. Provider withdrawals drop the corresponding input receiver.
 fn handle_control_request(
     req: ControlRequestFrame,
     request_input: &Arc<RequestInputFn>,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
     prompt_approval: bool,
+    input_tasks: &mut crate::input_tasks::InputTasks,
 ) {
     if req.request.subtype != "can_use_tool" {
         tracing::debug!(
@@ -1367,7 +1375,7 @@ fn handle_control_request(
     if req.request.tool_name != "AskUserQuestion" && prompt_approval {
         let request_input = Arc::clone(request_input);
         let stdin_tx = stdin_tx.clone();
-        tokio::spawn(async move {
+        input_tasks.spawn(req.request_id.clone(), async move {
             let question = UserInputQuestion {
                 id: uuid::Uuid::new_v4().to_string(),
                 header: "Approve tool".into(),
@@ -1406,7 +1414,7 @@ fn handle_control_request(
     }
     let request_input = Arc::clone(request_input);
     let stdin_tx = stdin_tx.clone();
-    tokio::spawn(async move {
+    input_tasks.spawn(req.request_id.clone(), async move {
         let request_id = req.request_id;
         let input = req.request.input;
         let questions = parse_questions(&input);
@@ -1593,7 +1601,8 @@ mod controller_approval_tests {
                 "request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"echo hello"}}
             })).unwrap();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            handle_control_request(req, &request_input, &tx, true);
+            let mut tasks = crate::input_tasks::InputTasks::default();
+            handle_control_request(req, &request_input, &tx, true, &mut tasks);
             let StdinMsg::Line(line) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
                 .await
                 .unwrap()

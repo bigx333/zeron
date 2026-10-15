@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parallel_permissions_remain_discoverable_until_both_are_answered() {
+    async fn parallel_permissions_remain_discoverable_after_answers_or_withdrawal() {
         use futures::StreamExt;
         use std::sync::Arc;
         use zeron_harness::{Harness, HarnessError, RunControls};
@@ -333,7 +333,9 @@ mod tests {
             AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
             SessionStatus, SteeringMode, UserInputQuestion,
         };
-        struct Asking;
+        struct Asking {
+            withdraw: Option<Arc<tokio::sync::Notify>>,
+        }
         #[async_trait::async_trait]
         impl Harness for Asking {
             fn id(&self) -> HarnessId {
@@ -375,8 +377,14 @@ mod tests {
                 };
                 let first = ask("q1");
                 let second = ask("q2");
+                let withdraw = self.withdraw.clone();
                 Ok(futures::stream::once(async move {
-                    let _ = first.await;
+                    if let Some(withdraw) = withdraw {
+                        withdraw.notified().await;
+                        drop(first);
+                    } else {
+                        let _ = first.await;
+                    }
                     let _ = second.await;
                     Ok(AgentEvent::Done {
                         status: DoneStatus::Completed,
@@ -388,97 +396,118 @@ mod tests {
                 .boxed())
             }
         }
-        let dir = tempfile::tempdir().unwrap();
-        let registry = Arc::new(crate::HarnessRegistry::new());
-        registry.register(Arc::new(Asking));
-        let core =
-            crate::EngineCore::assemble(dir.path(), registry, HarnessId::Mock, None).unwrap();
-        let (tx, mut events) = mpsc::channel(16);
-        core.sessions.set_notifier(Notifier { tx: Some(tx) });
-        core.workspace
-            .create_chat(
-                "asking",
-                None,
-                Some(&core.device_id),
-                None,
-                Some(dir.path().to_string_lossy().into()),
-            )
-            .unwrap();
-        let tools = zeron_mcp::Tools::new(Arc::new(zeron_mcp::Zeron::with_client(
-            zeron_rpc::memory_client(core.rpc_service()),
-            zeron_mcp::Origin::default(),
-        )));
-        core.sessions
-            .dispatch(
-                "asking",
-                HarnessId::Mock,
-                RunRequest {
-                    prompt: "ask".into(),
-                    cwd: dir.path().to_string_lossy().into(),
-                    harness: None,
-                    model: None,
-                    reasoning: None,
-                    model_options: Default::default(),
-                    sandbox: SandboxLevel::WorkspaceWrite,
-                    auto_approve: false,
-                    attachments: vec![],
-                    worktree: None,
-                    resume: None,
-                    mcp: None,
-                },
-                None,
-            )
-            .await
-            .unwrap();
-        for _ in 0..2 {
-            let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
-                .await
-                .unwrap()
+        for cancel_first in [false, true] {
+            let withdraw = cancel_first.then(|| Arc::new(tokio::sync::Notify::new()));
+            let dir = tempfile::tempdir().unwrap();
+            let registry = Arc::new(crate::HarnessRegistry::new());
+            registry.register(Arc::new(Asking {
+                withdraw: withdraw.clone(),
+            }));
+            let core =
+                crate::EngineCore::assemble(dir.path(), registry, HarnessId::Mock, None).unwrap();
+            let (tx, mut events) = mpsc::channel(16);
+            core.sessions.set_notifier(Notifier { tx: Some(tx) });
+            core.workspace
+                .create_chat(
+                    "asking",
+                    None,
+                    Some(&core.device_id),
+                    None,
+                    Some(dir.path().to_string_lossy().into()),
+                )
                 .unwrap();
-            assert_eq!(event["type"], "input.requested");
-            assert_eq!(event["data"]["questions"][0]["options"][0], "Yes");
-        }
-        async fn wait_inputs(tools: &zeron_mcp::Tools, count: usize) -> Value {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    let value = tools.call("list_pending_inputs", json!({})).await.unwrap();
-                    if value["inputs"][0]["pendingInputs"]
-                        .as_array()
-                        .is_some_and(|a| a.len() == count)
-                    {
-                        return value;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap()
-        }
-        let pending = wait_inputs(&tools, 2).await;
-        let inputs = pending["inputs"][0]["pendingInputs"].as_array().unwrap();
-        for (index, input) in inputs.iter().enumerate() {
-            tools
-                .call(
-                    "respond_to_input",
-                    json!({"chat":"asking","request_id":input["requestId"],
-                        "answers":[{"question_id":input["questions"][0]["id"],"labels":["Yes"]}]
-                    }),
+            let tools = zeron_mcp::Tools::new(Arc::new(zeron_mcp::Zeron::with_client(
+                zeron_rpc::memory_client(core.rpc_service()),
+                zeron_mcp::Origin::default(),
+            )));
+            core.sessions
+                .dispatch(
+                    "asking",
+                    HarnessId::Mock,
+                    RunRequest {
+                        prompt: "ask".into(),
+                        cwd: dir.path().to_string_lossy().into(),
+                        harness: None,
+                        model: None,
+                        reasoning: None,
+                        model_options: Default::default(),
+                        sandbox: SandboxLevel::WorkspaceWrite,
+                        auto_approve: false,
+                        attachments: vec![],
+                        worktree: None,
+                        resume: None,
+                        mcp: None,
+                    },
+                    None,
                 )
                 .await
                 .unwrap();
-            if index == 0 {
-                wait_inputs(&tools, 1).await;
+            for _ in 0..2 {
+                let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(event["type"], "input.requested");
+                assert_eq!(event["data"]["questions"][0]["options"][0], "Yes");
+            }
+            async fn wait_inputs(tools: &zeron_mcp::Tools, count: usize) -> Value {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let value = tools.call("list_pending_inputs", json!({})).await.unwrap();
+                        if value["inputs"][0]["pendingInputs"]
+                            .as_array()
+                            .is_some_and(|a| a.len() == count)
+                        {
+                            return value;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap()
+            }
+            let pending = wait_inputs(&tools, 2).await;
+            let mut inputs = pending["inputs"][0]["pendingInputs"]
+                .as_array()
+                .unwrap()
+                .clone();
+            if let Some(withdraw) = withdraw {
+                withdraw.notify_one();
+                let remaining = wait_inputs(&tools, 1).await;
+                inputs = remaining["inputs"][0]["pendingInputs"]
+                    .as_array()
+                    .unwrap()
+                    .clone();
+                assert_eq!(inputs[0]["questions"][0]["id"], "q2");
                 assert_eq!(
                     core.sessions.session_status("asking").unwrap().status,
                     SessionStatus::AwaitingInput
                 );
             }
+            for (index, input) in inputs.iter().enumerate() {
+                tools
+                    .call(
+                        "respond_to_input",
+                        json!({"chat":"asking","request_id":input["requestId"],
+                            "answers":[{"question_id":input["questions"][0]["id"],"labels":["Yes"]}]
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                if index == 0 && inputs.len() > 1 {
+                    wait_inputs(&tools, 1).await;
+                    assert_eq!(
+                        core.sessions.session_status("asking").unwrap().status,
+                        SessionStatus::AwaitingInput
+                    );
+                }
+            }
+            let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event["type"], "turn.completed");
+            core.shutdown().await;
         }
-        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(event["type"], "turn.completed");
-        core.shutdown().await;
     }
 }

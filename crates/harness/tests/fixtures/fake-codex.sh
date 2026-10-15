@@ -420,6 +420,24 @@ case "$turnline" in
   fi
   ;;
 
+*scenario:withdraw-approval*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"id":101,"method":"item/commandExecution/requestApproval","params":{"threadId":"th-1","itemId":"c1","command":"first"}}'
+  emit '{"id":102,"method":"item/commandExecution/requestApproval","params":{"threadId":"th-1","itemId":"c2","command":"second"}}'
+  read -r signal || exit 1
+  sid=$(rid "$signal")
+  emit "{\"id\":$sid,\"result\":{}}"
+  emit '{"method":"serverRequest/resolved","params":{"threadId":"th-1","requestId":101}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"answer","delta":"withdrawn"}}'
+  read -r answer || exit 1
+  if has "$answer" '"id":102' && has "$answer" '"decision":"accept"'; then
+    emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  else
+    emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"unexpected approval response"}}}}'
+  fi
+  ;;
+
 *scenario:approve*)
   # Wire policy is always "never" (unattended parity with the Claude
   # adapter); the requests below are the STRAY-approval path, which must

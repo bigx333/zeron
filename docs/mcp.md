@@ -408,7 +408,8 @@ including archived chats, with every unresolved request in `pendingInputs` (and 
 Transcript failures appear per chat as `error`; other chats remain available.
 Use `respond_to_input {chat, request_id, answers}` with the returned question IDs
 and labels. Approval labels are `Yes` and `No`; a dropped approval resolver
-fails closed.
+fails closed. When Claude or Codex withdraws a permission request, its input is
+resolved automatically; other pending approvals remain answerable.
 
 Claude previously auto-approved all tools except its question tool. Codex used
 `approvalPolicy: never` and a full-access sandbox. With
