@@ -1134,6 +1134,38 @@ mod pinned_session_tests {
     }
 
     #[gpui::test]
+    fn sidebar_view_menu_offers_create_section_only_outside_t3(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        let key = |key: &str| gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke::parse(key).unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        window
+            .update(cx, |shell, window, cx| {
+                // Up from no highlight lands on the last row.
+                shell.open_sidebar_view_menu(window, cx);
+                shell.sidebar_view_menu_key(&key("up"), cx);
+                let active = shell.sidebar_view_menu.get().unwrap().active;
+                assert_eq!(active, Some(SIDEBAR_VIEW_GROUPS.len() + 1));
+                shell.close_sidebar_view_menu(cx);
+
+                shell.settings.sidebar_mode = SidebarMode::T3;
+                shell.open_sidebar_view_menu(window, cx);
+                shell.sidebar_view_menu_key(&key("up"), cx);
+                let active = shell.sidebar_view_menu.get().unwrap().active;
+                assert_eq!(active, Some(SIDEBAR_VIEW_GROUPS.len()), "Compact is last in T3");
+                shell.sidebar_view_menu.open_mut().unwrap().active =
+                    Some(SIDEBAR_VIEW_GROUPS.len() + 1);
+                shell.sidebar_view_menu_key(&key("enter"), cx);
+                assert!(shell.section_dialog.is_none());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn sidebar_projects_sharing_a_repository_group_only_by_project(cx: &mut gpui::TestAppContext) {
         use super::*;
         let dir = tempfile::tempdir().unwrap();
@@ -4566,6 +4598,8 @@ impl Shell {
     }
 
     fn sidebar_view_menu_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        // T3 Mode has no sections, so its menu ends at Compact.
+        let create_section = !self.t3_mode();
         let Some(menu) = self.sidebar_view_menu.open_mut() else {
             return;
         };
@@ -4598,8 +4632,11 @@ impl Shell {
                         delta,
                     );
                 } else {
-                    menu.active =
-                        popover::menu_step(menu.active, SIDEBAR_VIEW_GROUPS.len() + 2, delta);
+                    menu.active = popover::menu_step(
+                        menu.active,
+                        SIDEBAR_VIEW_GROUPS.len() + 1 + usize::from(create_section),
+                        delta,
+                    );
                 }
                 cx.notify();
             }
@@ -4615,7 +4652,7 @@ impl Shell {
                 } else {
                     let group = menu.active.unwrap_or(0);
                     if group == SIDEBAR_VIEW_GROUPS.len() + 1 {
-                        if key != "right" && !event.is_held {
+                        if create_section && key != "right" && !event.is_held {
                             self.open_section_dialog(None, cx);
                         }
                     } else if group == SIDEBAR_VIEW_GROUPS.len() {
@@ -4933,47 +4970,55 @@ impl Shell {
                 )
                 .into_any_element(),
         );
-        groups.push(popover::menu_separator().into_any_element());
-        groups.push(
-            div()
-                .id("sidebar-create-section-hover")
-                .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
-                    let target = SIDEBAR_VIEW_GROUPS.len() + 1;
-                    if *hovered {
-                        this.hover_sidebar_view_group(target, window.mouse_position(), false, cx);
-                    } else if let Some(menu) = this.sidebar_view_menu.open_mut() {
-                        menu.hover_intent.leave(&target);
-                    }
-                }))
-                .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
-                    this.hover_sidebar_view_group(
-                        SIDEBAR_VIEW_GROUPS.len() + 1,
-                        event.position,
-                        true,
-                        cx,
-                    );
-                }))
-                .child(
-                    popover::menu_row_nav(
-                        theme,
-                        false,
-                        active == Some(SIDEBAR_VIEW_GROUPS.len() + 1),
-                        "sidebar-create-section",
-                    )
-                    .id("sidebar-create-section")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open_section_dialog(None, cx);
-                        cx.stop_propagation();
+        // Sections only exist in the Default sidebar; T3 Mode has shelves.
+        if !self.t3_mode() {
+            groups.push(popover::menu_separator().into_any_element());
+            groups.push(
+                div()
+                    .id("sidebar-create-section-hover")
+                    .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                        let target = SIDEBAR_VIEW_GROUPS.len() + 1;
+                        if *hovered {
+                            this.hover_sidebar_view_group(
+                                target,
+                                window.mouse_position(),
+                                false,
+                                cx,
+                            );
+                        } else if let Some(menu) = this.sidebar_view_menu.open_mut() {
+                            menu.hover_intent.leave(&target);
+                        }
+                    }))
+                    .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                        this.hover_sidebar_view_group(
+                            SIDEBAR_VIEW_GROUPS.len() + 1,
+                            event.position,
+                            true,
+                            cx,
+                        );
                     }))
                     .child(
-                        icon(icons::PLUS)
-                            .size(px(14.0))
-                            .text_color(theme.text_muted),
+                        popover::menu_row_nav(
+                            theme,
+                            false,
+                            active == Some(SIDEBAR_VIEW_GROUPS.len() + 1),
+                            "sidebar-create-section",
+                        )
+                        .id("sidebar-create-section")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_section_dialog(None, cx);
+                            cx.stop_propagation();
+                        }))
+                        .child(
+                            icon(icons::PLUS)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child("Create Section"),
                     )
-                    .child("Create Section"),
-                )
-                .into_any_element(),
-        );
+                    .into_any_element(),
+            );
+        }
         popover::popover_card(theme)
             .w(px(self.sidebar_content_width() - 2.0 * Theme::SPACE_SM))
             .track_focus(&focus)
