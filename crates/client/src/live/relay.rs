@@ -31,6 +31,7 @@ const LIVENESS_WARMUP_MS: i64 = 60_000;
 
 pub(crate) fn deadline(method: &str) -> Duration {
     match method {
+        methods::CLONE_GITHUB_REPO => Duration::from_secs(15 * 60),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         methods::LIST_MODELS => Duration::from_secs(100),
         methods::UPLOAD_COMMIT => Duration::from_secs(150),

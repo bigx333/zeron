@@ -1331,6 +1331,121 @@ impl Client {
         }
     }
 
+    /// Browse repositories available to the selected host's GitHub CLI account.
+    pub async fn list_github_repositories(
+        &self,
+        device_id: &str,
+        cursor: Option<String>,
+    ) -> Result<crate::rpc::GitHubRepositoryPage> {
+        if self.inner.cancel.is_cancelled() {
+            return Err(ClientError::Closed);
+        }
+        match self.inner.backend() {
+            Backend::Demo(demo) => demo.github_repositories(device_id, cursor).await,
+            Backend::Live(live) => {
+                let value = live
+                    .relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::LIST_GITHUB_REPOS,
+                        serde_json::json!({ "cursor": cursor }),
+                    )
+                    .await?;
+                serde_json::from_value(value)
+                    .map_err(|error| ClientError::HostError(error.to_string()))
+            }
+        }
+    }
+
+    /// Clone using the selected execution host's account, then resolve the
+    /// host's actual project row. Never invent a fallback id after an ambiguous
+    /// create response: another phone or desktop may have created it first.
+    pub async fn clone_github_project(&self, device_id: &str, repository: &str) -> Result<String> {
+        if self.inner.cancel.is_cancelled() {
+            return Err(ClientError::Closed);
+        }
+        let repo: zeron_proto::Repo = match self.inner.backend() {
+            Backend::Demo(demo) => demo.clone_github_repository(device_id, repository).await?,
+            Backend::Live(live) => {
+                let value = live
+                    .relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::CLONE_GITHUB_REPO,
+                        serde_json::json!({ "repository": repository }),
+                    )
+                    .await?;
+                serde_json::from_value(value)
+                    .map_err(|error| ClientError::HostError(error.to_string()))?
+            }
+        };
+        if self.inner.cancel.is_cancelled() {
+            return Err(ClientError::Closed);
+        }
+        if let Some(existing) = self
+            .inner
+            .workspace
+            .state()
+            .0
+            .spaces
+            .iter()
+            .find(|space| space.device_id == device_id && space.path == repo.path)
+        {
+            return Ok(existing.id.clone());
+        }
+        let Some(live) = self.inner.live() else {
+            return self.create_project(device_id, &repo.path, true).await;
+        };
+        let created = live
+            .relay
+            .call(
+                device_id,
+                zeron_rpc::methods::MUTATE,
+                serde_json::json!({"op": "createSpace", "spaceId": crate::new_id(),
+                "deviceId": device_id, "path": repo.path, "gitDetected": true}),
+            )
+            .await?;
+        let authoritative = created
+            .get("space")
+            .map(|value| {
+                serde_json::from_value::<zeron_proto::Space>(value.clone())
+                    .map_err(|error| ClientError::HostError(error.to_string()))
+            })
+            .transpose()?;
+        if authoritative
+            .as_ref()
+            .is_some_and(|space| space.device_id != device_id || space.path != repo.path)
+        {
+            return Err(ClientError::HostError(
+                "Project creation returned a different folder".into(),
+            ));
+        }
+        // Wait for registry synchronization so selecting the returned project
+        // can immediately create a session. This also supports older hosts
+        // whose mutation reply contains only {ok: true}.
+        let wait = async {
+            loop {
+                if let Some(space) = self
+                    .inner
+                    .workspace
+                    .state()
+                    .0
+                    .spaces
+                    .iter()
+                    .find(|space| space.device_id == device_id && space.path == repo.path)
+                {
+                    return Ok(space.id.clone());
+                }
+                tokio::select! {
+                    _ = self.inner.cancel.cancelled() => return Err(ClientError::Closed),
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), wait).await.map_err(|_| ClientError::Network(
+            "Project was created on the host, but has not synchronized yet. Retry to open it.".into()))?
+    }
+
     /// Browse folders on a device (`None` = its home folder).
     pub async fn list_folders(
         &self,

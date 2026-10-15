@@ -311,6 +311,33 @@ final class SessionFlowTests: XCTestCase {
         XCTAssertFalse(use.exists)
     }
 
+    func testCloneGitHubProjectFromSelectedHost() {
+        let app = launch(["-route", "new"])
+        let project = app.buttons["composer-chip-project"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        project.tap()
+        app.buttons["New Project…"].tap()
+        app.buttons["project-host"].tap()
+        app.buttons["MacBook Pro"].firstMatch.tap()
+        app.segmentedControls["project-source"].buttons["GitHub"].tap()
+        let clone = app.buttons["clone-github-project"]
+        XCTAssertTrue(clone.waitForExistence(timeout: 5))
+        XCTAssertFalse(clone.isEnabled)
+        // This repository lives on the second page, beyond the initial response.
+        let repository = app.cells["github-repo-alex/website"]
+        XCTAssertTrue(repository.waitForExistence(timeout: 10))
+        snapshot(app, "github-projects")
+        let search = app.searchFields.firstMatch
+        search.tap()
+        search.typeText("website")
+        repository.tap()
+        XCTAssertTrue(clone.isEnabled)
+        snapshot(app, "github-project-selected")
+        clone.tap()
+        XCTAssertTrue(clone.waitForNonExistence(timeout: 10), "cloning returns to new session")
+        XCTAssertTrue(project.label.contains("website"), "the new project is selected")
+    }
+
     /// Clones of one repository are one project; the host chip then picks
     /// which checkout runs the session.
     func testProjectPickerGroupsClonesAndHostPicksCheckout() {

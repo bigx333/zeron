@@ -1108,3 +1108,158 @@ async fn stalled_wakes_yield_delivery_capacity_to_later_chats() {
     );
     client.shutdown();
 }
+
+struct GitHubProjectHost {
+    registry: Arc<HostRegistry>,
+    requests: Mutex<Vec<(String, serde_json::Value)>>,
+    legacy: bool,
+    fail_clone: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl zeron_rpc::RpcService for GitHubProjectHost {
+    async fn handle(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+        use serde_json::json;
+        use zeron_rpc::{RpcReply, methods};
+        // LinkCache probes the host before opening its cached relay.
+        if method == methods::LIST_HARNESSES {
+            return Ok(RpcReply::Value(json!([])));
+        }
+        self.requests
+            .lock()
+            .unwrap()
+            .push((method.into(), params.clone()));
+        let reply = match method {
+            methods::LIST_GITHUB_REPOS => json!({"login":"host-account", "repositories":[{
+                "nameWithOwner":if params["cursor"].is_null() { "octocat/private" } else { "organization/shared" },
+                "description":"From the selected execution host", "isPrivate":true
+            }], "nextCursor":if params["cursor"].is_null() { Some("next-page") } else { None }}),
+            methods::CLONE_GITHUB_REPO => {
+                if self.fail_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(zeron_rpc::RpcError::Failed("GitHub request failed".into()));
+                }
+                json!({"path":"/managed/github.com/octocat/private", "name":"private", "defaultBranch":"main"})
+            }
+            methods::MUTATE => {
+                let space = Space {
+                    // Simulate another creator winning before this phone's request.
+                    id: "host-winner".into(),
+                    device_id: HOST.into(),
+                    path: params["path"].as_str().unwrap().into(),
+                    name: None,
+                    git_detected: true,
+                    git_checked_at: None,
+                    checkout_id: None,
+                    repository_id: None,
+                    created_at: Utc::now(),
+                };
+                self.registry
+                    .doc
+                    .lock()
+                    .unwrap()
+                    .upsert_space(&space)
+                    .unwrap();
+                self.registry.client.nudge();
+                if self.legacy {
+                    json!({"ok":true})
+                } else {
+                    json!({"ok":true,"space":space})
+                }
+            }
+            other => return Err(zeron_rpc::RpcError::UnknownMethod(other.into())),
+        };
+        Ok(RpcReply::Value(reply))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_projects_use_the_selected_hosts_relay_and_reconcile_concurrent_creation() {
+    for legacy in [false, true] {
+        let edge = MockEdge::start().await;
+        let host = Arc::new(HostRegistry::start(&edge).await);
+        let service = Arc::new(GitHubProjectHost {
+            registry: host,
+            requests: Mutex::new(Vec::new()),
+            legacy,
+            fail_clone: std::sync::atomic::AtomicBool::new(false),
+        });
+        let _relay = zeron_rpc::HostRelay::spawn(
+            zeron_rpc::HostRelayConfig::new(
+                edge.edge_url(),
+                HOST,
+                Arc::new(zeron_rpc::StaticToken("t".into())),
+            ),
+            service.clone(),
+            Arc::new(|_| true),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let client = phone(&edge, dir.path());
+        let start = Instant::now();
+        while !(edge.relay_host_connected(HOST)
+            && client
+                .workspace()
+                .device(HOST)
+                .is_some_and(|device| device.online)
+            && client.workspace().project(SPACE).is_some())
+        {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "host did not synchronize"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let c = client.clone();
+        zeron_client::runtime::run(async move {
+            let first = c.list_github_repositories(HOST, None).await?;
+            assert_eq!(first.login, "host-account");
+            let last = c.list_github_repositories(HOST, first.next_cursor).await?;
+            assert_eq!(last.repositories[0].name_with_owner, "organization/shared");
+            assert!(last.next_cursor.is_none());
+            let id = c.clone_github_project(HOST, "octocat/private").await?;
+            assert_eq!(id, "host-winner");
+            assert!(
+                c.workspace().project(&id).is_some(),
+                "returned project must already be usable"
+            );
+            assert_eq!(c.clone_github_project(HOST, "octocat/private").await?, id);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        service
+            .fail_clone
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let c = client.clone();
+        assert!(
+            zeron_client::runtime::run(async move {
+                c.clone_github_project(HOST, "missing/project").await
+            })
+            .await
+            .is_err()
+        );
+        let requests = service.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(method, _)| method == zeron_rpc::methods::MUTATE)
+                .count(),
+            1
+        );
+        let pages: Vec<_> = requests
+            .iter()
+            .filter(|(method, _)| method == zeron_rpc::methods::LIST_GITHUB_REPOS)
+            .collect();
+        assert!(pages[0].1["cursor"].is_null());
+        assert_eq!(pages[1].1["cursor"], "next-page");
+        let clone = requests
+            .iter()
+            .find(|(method, _)| method == zeron_rpc::methods::CLONE_GITHUB_REPO)
+            .unwrap();
+        assert_eq!(clone.1["repository"], "octocat/private");
+        client.shutdown();
+    }
+}
