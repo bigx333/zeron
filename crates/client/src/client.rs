@@ -1401,7 +1401,7 @@ impl Client {
             .call(
                 device_id,
                 zeron_rpc::methods::MUTATE,
-                serde_json::json!({"op": "createSpace", "spaceId": crate::new_id(),
+                serde_json::json!({"op": "createSpace", "spaceId": zeron_proto::project_identity::github_project_space_id(device_id, &repo.path),
                 "deviceId": device_id, "path": repo.path, "gitDetected": true}),
             )
             .await?;

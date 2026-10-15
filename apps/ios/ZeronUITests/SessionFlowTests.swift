@@ -335,6 +335,7 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "github-project-selected")
         clone.tap()
         XCTAssertTrue(clone.waitForNonExistence(timeout: 10), "cloning returns to new session")
+        XCTAssertFalse(app.segmentedControls["project-source"].exists, "the project modal, not only search, is dismissed")
         XCTAssertTrue(project.label.contains("website"), "the new project is selected")
     }
 

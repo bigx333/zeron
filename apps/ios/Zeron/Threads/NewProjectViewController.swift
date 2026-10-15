@@ -41,7 +41,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
         view.backgroundColor = Palette.background
         navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
             guard let self, !creating else { return }
-            dismiss(animated: true)
+            dismissProjectPicker()
         })
         source.selectedSegmentIndex = 0
         source.accessibilityIdentifier = "project-source"
@@ -160,6 +160,13 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
             loadGitHub(reset: true)
         } else {
             search.isActive = false
+            // A failed folder load must not leave GitHub rows or its Clone
+            // action attached to a previously browsed folder.
+            listing = nil
+            listingDevice = nil
+            path = nil
+            applyItems([])
+            useButton.configuration?.title = "Use folder"
             load(nil)
         }
     }
@@ -325,11 +332,19 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
         useButton.configuration?.showsActivityIndicator = busy
     }
 
+    private func dismissProjectPicker() {
+        search.isActive = false
+        // Search is presented inside this modal. Dismiss its enclosing project
+        // navigation controller, including when Close is tapped during search.
+        (navigationController?.presentingViewController ?? presentingViewController)?.dismiss(animated: true)
+    }
+
     private func create() {
         guard !creating, let device else { return }
         if github {
             guard let repository = selectedRepository else { return }
             search.searchBar.resignFirstResponder()
+            search.isActive = false
             setCreating(true)
             status.text = "Cloning on \(device.name) and adding the project…"
             Task { @MainActor in
@@ -337,7 +352,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
                     let id = try await app.cloneGithubProject(deviceId: device.id, repository: repository)
                     onCreated?(id)
                     setCreating(false)
-                    dismiss(animated: true)
+                    dismissProjectPicker()
                 } catch {
                     setCreating(false)
                     updateCloneButton()
@@ -351,7 +366,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
             Task { @MainActor in
                 let created = await app.createProject(deviceId: device.id, path: path, gitDetected: git)
                 setCreating(false)
-                if let created { onCreated?(created); dismiss(animated: true) }
+                if let created { onCreated?(created); dismissProjectPicker() }
                 else { status.text = "Couldn't create the project on \(device.name)." }
             }
         }

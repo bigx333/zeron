@@ -1253,6 +1253,17 @@ async fn github_projects_use_the_selected_hosts_relay_and_reconcile_concurrent_c
             .iter()
             .filter(|(method, _)| method == zeron_rpc::methods::LIST_GITHUB_REPOS)
             .collect();
+        let create = requests
+            .iter()
+            .find(|(method, _)| method == zeron_rpc::methods::MUTATE)
+            .unwrap();
+        assert_eq!(
+            create.1["spaceId"],
+            zeron_proto::project_identity::github_project_space_id(
+                HOST,
+                "/managed/github.com/octocat/private"
+            )
+        );
         assert!(pages[0].1["cursor"].is_null());
         assert_eq!(pages[1].1["cursor"], "next-page");
         let clone = requests

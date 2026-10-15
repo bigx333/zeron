@@ -6497,7 +6497,7 @@ impl Shell {
                 if let Some(space) = existing {
                     return Ok(space);
                 }
-                let space_id = uuid::Uuid::new_v4().to_string();
+                let space_id = zeron_proto::project_identity::github_project_space_id(&device.id, &repo.path);
                 let created = engine
                         .client()
                         .call(
@@ -8654,6 +8654,13 @@ mod project_picker_tests {
         assert_eq!(create.len(), 1);
         assert_eq!(create[0]["params"]["op"], "createSpace");
         assert_eq!(create[0]["params"]["deviceId"], "remote");
+        assert_eq!(
+            create[0]["params"]["spaceId"],
+            zeron_proto::project_identity::github_project_space_id(
+                "remote",
+                "/managed/github.com/octocat/website"
+            )
+        );
         assert_eq!(
             create[0]["params"]["path"],
             "/managed/github.com/octocat/website"

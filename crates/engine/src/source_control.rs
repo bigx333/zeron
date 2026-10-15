@@ -8,7 +8,6 @@ mod review_threads;
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,6 +15,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use zeron_harness::process::{Command, Stdio};
 
 use zeron_proto::{
     ChangeRequestListItem, ChangeRequestMergeability, ChangeRequestReviewDecision,
@@ -454,6 +454,7 @@ impl GitHubCli {
             "clone".into(),
             format!("https://github.com/{repository}"),
             target.to_string_lossy().into_owned(),
+            "--no-upstream".into(),
         ];
         request.env.extend([
             ("GIT_TERMINAL_PROMPT".into(), "0".into()),
@@ -2147,24 +2148,47 @@ trait ProcessRunner: Send + Sync {
 
 struct SystemProcessRunner;
 
+/// GitHub CLI starts Git (and potentially an SSH transport). Keep the private
+/// group owned even if the direct child exits or this future is cancelled.
+#[cfg(unix)]
+struct ProcessGroup(i32);
+
+#[cfg(unix)]
+impl ProcessGroup {
+    fn terminate(&self) {
+        // SAFETY: this group was created for our own child at spawn time.
+        unsafe {
+            libc::kill(-self.0, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
 #[async_trait]
 impl ProcessRunner for SystemProcessRunner {
     async fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError> {
-        let mut command = tokio::process::Command::new(&request.program);
+        // Windows' harness command assigns the entire tree to a Job Object at
+        // creation time and terminates it on drop. Unix uses a private group.
+        let mut command = Command::new(&request.program);
         if request.program == "gh" {
-            zeron_harness::compose_login_shell_path(&mut command);
+            zeron_harness::compose_child_path(&mut command, Path::new(&request.program));
         }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.as_std_mut().creation_flags(0x08000000);
-        }
+        #[cfg(unix)]
+        command.process_group(0);
         command.args(&request.args);
         if let Some(cwd) = &request.cwd {
             command.current_dir(cwd);
         }
+        for (key, value) in request.env {
+            command.env(key, value);
+        }
         command
-            .envs(request.env)
             .stdin(if request.stdin.is_some() {
                 Stdio::piped()
             } else {
@@ -2176,6 +2200,8 @@ impl ProcessRunner for SystemProcessRunner {
         let mut child = command
             .spawn()
             .map_err(|error| ProcessRunError::Spawn(error.kind()))?;
+        #[cfg(unix)]
+        let group = ProcessGroup(child.id().expect("newly spawned child") as i32);
         let stdout = child.stdout.take().ok_or(ProcessRunError::Io)?;
         let stderr = child.stderr.take().ok_or(ProcessRunError::Io)?;
         let input = child.stdin.take().zip(request.stdin);
@@ -2201,7 +2227,9 @@ impl ProcessRunner for SystemProcessRunner {
             Ok(Ok(output)) => output,
             Ok(Err(_)) => return Err(ProcessRunError::Io),
             Err(_) => {
-                let _ = child.kill().await;
+                #[cfg(unix)]
+                group.terminate();
+                let _ = child.start_kill();
                 let _ = child.wait().await;
                 return Err(ProcessRunError::Timeout);
             }
@@ -2537,6 +2565,10 @@ mod tests {
             &requests[0].args[..3],
             ["repo", "clone", "https://github.com/octocat/project"]
         );
+        assert_eq!(
+            requests[0].args.last().map(String::as_str),
+            Some("--no-upstream")
+        );
         assert!(
             requests[0]
                 .env
@@ -2620,6 +2652,87 @@ mod tests {
         assert_eq!(first["space"]["id"], second["space"]["id"]);
         assert_eq!(first["space"]["path"], "/managed/project");
         assert_eq!(core.workspace.read_spaces().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn github_projects_created_on_independent_engines_share_one_registry_row() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let mut merged = zeron_doc::RegistryDoc::new("merged");
+        merged.set_local_only(true);
+        // Neither engine has synchronized the other engine's proposed row.
+        for coordinator in ["desktop-coordinator", "execution-host"] {
+            let core = crate::EngineCore::assemble(
+                &dir.path().join(coordinator),
+                Arc::new(crate::HarnessRegistry::new()),
+                zeron_proto::HarnessId::Mock,
+                None,
+            )
+            .unwrap();
+            let client = zeron_rpc::memory_client(core.rpc_service());
+            let reply = client.call(zeron_rpc::methods::MUTATE, json!({"op":"createSpace",
+                "spaceId": zeron_proto::project_identity::github_project_space_id("execution-host", "/managed/repo"),
+                "deviceId":"execution-host", "path":"/managed/repo", "gitDetected":true})).await.unwrap();
+            let space: zeron_proto::Space = serde_json::from_value(reply["space"].clone()).unwrap();
+            merged.upsert_space(&space).unwrap();
+        }
+        assert_eq!(merged.read_spaces().unwrap().len(), 1);
+    }
+
+    fn descendant_writer_request(writes: &Path) -> ProcessRequest {
+        // Exercise a CLI spawning Git-like descendants which keep writing after
+        // their parent dies. Both pipes also remain open in the descendant.
+        let writer = "import sys,time\nfor _ in range(500):\n with open(sys.argv[1], 'ab') as f: f.write(b'x')\n time.sleep(0.01)\n";
+        ProcessRequest {
+            program: if cfg!(windows) { "python" } else { "python3" }.into(),
+            args: vec!["-c".into(), "import subprocess,sys,time; subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]]); time.sleep(60)".into(), writer.into(), writes.to_string_lossy().into_owned()],
+            stdin: None, cwd: None, env: Vec::new(),
+            timeout: Duration::from_secs(3), output_limit: 1024,
+        }
+    }
+
+    async fn wait_for_descendant(writes: &Path) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !std::fs::metadata(writes).is_ok_and(|metadata| metadata.len() > 0) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("descendant must start writing");
+    }
+
+    async fn assert_descendant_stopped(writes: &Path) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let size = std::fs::metadata(writes).unwrap().len();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            std::fs::metadata(writes).unwrap().len(),
+            size,
+            "descendant kept writing after the CLI operation ended"
+        );
+    }
+
+    #[tokio::test]
+    async fn github_projects_timeout_terminates_the_process_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let writes = dir.path().join("writes");
+        let request = descendant_writer_request(&writes);
+        let task = tokio::spawn(async move { SystemProcessRunner.run(request).await });
+        wait_for_descendant(&writes).await;
+        assert_eq!(task.await.unwrap(), Err(ProcessRunError::Timeout));
+        assert_descendant_stopped(&writes).await;
+    }
+
+    #[tokio::test]
+    async fn github_projects_cancellation_terminates_the_process_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let writes = dir.path().join("writes");
+        let request = descendant_writer_request(&writes);
+        let task = tokio::spawn(async move { SystemProcessRunner.run(request).await });
+        wait_for_descendant(&writes).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_descendant_stopped(&writes).await;
     }
 
     /// Real engine dispatch, wire envelopes and GitHub decoding; only subprocess
