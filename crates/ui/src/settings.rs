@@ -2169,7 +2169,7 @@ impl UiSettings {
     }
 
     fn migrated(mut self) -> Self {
-        if self.accent == zeron_theme::AccentSelection::ThemeDefault
+        if self.accent == zeron_theme::AccentSelection::default()
             && let Some(accent) = self.legacy_accent_color.take()
         {
             self.accent = zeron_theme::AccentSelection::Preset(accent.into());
@@ -3436,7 +3436,10 @@ mod tests {
         .unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.appearance, crate::appearance::AppearanceMode::System);
-        assert_eq!(loaded.accent, zeron_theme::AccentSelection::ThemeDefault);
+        assert_eq!(
+            loaded.accent,
+            zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Nova)
+        );
         assert_eq!(loaded.surface, zeron_theme::SurfacePreference::ThemeDefault);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(loaded.sidebar_pinned_session_ids_by_profile.is_empty());
