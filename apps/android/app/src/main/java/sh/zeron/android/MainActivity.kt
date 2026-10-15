@@ -45,6 +45,21 @@ class MainActivity : ComponentActivity() {
         setContent { ZeronRoot(model) }
     }
 
+    override fun onResume() {
+        super.onResume()
+        model.voice.setForeground(hasWindowFocus())
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        model.voice.setForeground(hasFocus)
+    }
+
+    override fun onPause() {
+        model.voice.setForeground(false)
+        super.onPause()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleCallback(intent)

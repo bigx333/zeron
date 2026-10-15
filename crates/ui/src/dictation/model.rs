@@ -32,6 +32,7 @@ pub(crate) fn init(root: PathBuf, cx: &mut App) {
         input_select: widgets::SelectState::default(),
         voice_select: widgets::SelectState::default(),
         host_select: widgets::SelectState::default(),
+        mode_select: widgets::SelectState::default(),
         hosts: Vec::new(),
         call_live: false,
         voices: zeron_proto::voice::DEFAULT_VOICES
@@ -39,6 +40,7 @@ pub(crate) fn init(root: PathBuf, cx: &mut App) {
             .map(|voice| (*voice).to_owned())
             .collect(),
         shortcut: None,
+        push_to_talk_shortcut: None,
     });
     cx.set_global(VoiceGlobal { card, directory });
 }
@@ -70,12 +72,14 @@ pub(crate) struct VoiceCard {
     input_select: widgets::SelectState,
     voice_select: widgets::SelectState,
     host_select: widgets::SelectState,
+    mode_select: widgets::SelectState,
     hosts: Vec<(Option<String>, String, bool, String)>,
     call_live: bool,
     /// Native voice styles, refreshed with the live session's reported catalog.
     voices: Vec<String>,
     /// Created on first render (it needs this card's context).
     shortcut: Option<Entity<settings::shortcuts::ShortcutField>>,
+    push_to_talk_shortcut: Option<Entity<settings::shortcuts::ShortcutField>>,
 }
 /// Microphones as last enumerated, refreshed off the UI thread while the page
 /// is visible so newly connected devices appear.
@@ -407,22 +411,91 @@ impl Render for VoiceCard {
                 )
                 .child(control)
         };
-        let conversation_card = widgets::section_card(&theme).child(host_row).child(
-            widgets::card_row(&theme, true)
+        let push_to_talk = settings::current(cx).voice_push_to_talk;
+        let mode_control = widgets::select(
+            "voice-input-mode",
+            "Voice input mode",
+            &theme,
+            |card: &mut Self| &mut card.mode_select,
+        )
+        .options(
+            vec![
+                widgets::SelectOption::new("Hands-free"),
+                widgets::SelectOption::new("Push to talk"),
+            ],
+            usize::from(push_to_talk),
+        )
+        .width(200.0)
+        .on_select(|_, ix, _, cx| {
+            settings::update(settings::SavePolicy::Immediate, cx, |s| {
+                s.voice_push_to_talk = ix == 1;
+            });
+            cx.refresh_windows();
+            cx.notify();
+        })
+        .render(&self.mode_select, cx);
+        let mode_row = widgets::card_row(&theme, false)
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(widgets::row_title(&theme, "Voice input mode"))
+                    .child(widgets::meta_line(
+                        &theme,
+                        vec!["Hands-free, or hold a shortcut to transmit".into_any_element()],
+                    )),
+            )
+            .child(mode_control);
+        let push_to_talk_row = push_to_talk.then(|| {
+            let field = self
+                .push_to_talk_shortcut
+                .get_or_insert_with(|| {
+                    cx.new(|cx| {
+                        settings::shortcuts::ShortcutField::new(
+                            settings::ShortcutId::PushToTalk,
+                            cx,
+                        )
+                    })
+                })
+                .clone();
+            widgets::card_row(&theme, false)
                 .child(
                     div()
                         .flex_1()
-                        .min_w(px(160.0))
                         .flex()
                         .flex_col()
-                        .child(widgets::row_title(&theme, "Codex voice style"))
+                        .child(widgets::row_title(&theme, "Push-to-talk shortcut"))
                         .child(widgets::meta_line(
                             &theme,
-                            vec!["Applies to your next voice session".into_any_element()],
+                            vec![
+                                "Works globally during a call, even in other apps"
+                                    .into_any_element(),
+                            ],
                         )),
                 )
-                .child(voice_control),
-        );
+                .child(field)
+        });
+        let conversation_card = widgets::section_card(&theme)
+            .child(host_row)
+            .child(
+                widgets::card_row(&theme, true)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(&theme, "Codex voice style"))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec!["Applies to your next voice session".into_any_element()],
+                            )),
+                    )
+                    .child(voice_control),
+            )
+            .child(mode_row)
+            .children(push_to_talk_row);
         let enabled = settings::current(cx).dictation_enabled;
         let downloading = self.cancel.is_some();
         let on = downloading || (enabled && self.ready);

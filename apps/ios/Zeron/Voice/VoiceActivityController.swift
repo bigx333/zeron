@@ -37,7 +37,7 @@ final class VoiceActivityController {
 
     private func sync() {
         guard let voice, voice.live else { return end() }
-        let state = VoiceActivityAttributes.ContentState(orb: Self.orb(voice), muted: voice.muted, since: voice.activeSince)
+        let state = VoiceActivityAttributes.ContentState(orb: Self.orb(voice), muted: voice.muted, since: voice.activeSince, pushToTalk: voice.pushToTalk)
         guard let activity else { return start(host: voice.hostName, state: state) }
         guard state != sent else {
             pending?.cancel()
