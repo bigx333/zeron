@@ -120,7 +120,7 @@ async fn portal(
         let mut closed = session.receive_closed().await?;
         let trigger = shortcut.portal_trigger();
         let binding =
-            NewShortcut::new(ID, "Push to talk in Zeron").preferred_trigger(Some(trigger.as_str()));
+            NewShortcut::new(ID, "Push to talk in Zeron Nova").preferred_trigger(Some(trigger.as_str()));
         portal
             .bind_shortcuts(&session, &[binding], None, BindShortcutsOptions::default())
             .await?

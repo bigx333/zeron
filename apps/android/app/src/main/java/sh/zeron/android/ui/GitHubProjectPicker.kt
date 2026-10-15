@@ -211,7 +211,7 @@ private fun githubProjectFailure(error: Exception, host: String): String {
         message.contains("not installed", true) || message.contains("not authenticated", true) ->
             "$message Install GitHub CLI and run gh auth login on $host, then retry."
         message.contains("unknown method", true) || message.contains("not supported", true) ->
-            "Update Zeron on $host to use GitHub projects."
+            "Update Zeron Nova on $host to use GitHub projects."
         else -> message
     }
 }

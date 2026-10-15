@@ -169,7 +169,7 @@ fun NewProjectScreen(model: AppModel, onDismiss: () -> Unit, onCreated: (String)
                     Box(Modifier.weight(1f).fillMaxWidth()) {
                         if (hosts.isEmpty()) {
                             Text(
-                                "No desktop devices yet — open Zeron on a computer to add one.",
+                                "No desktop devices yet — open Zeron Nova on a computer to add one.",
                                 textAlign = TextAlign.Center,
                                 style = MaterialTheme.typography.bodyLarge,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,

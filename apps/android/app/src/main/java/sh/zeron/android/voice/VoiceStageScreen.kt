@@ -157,7 +157,7 @@ fun VoiceStageScreen(
             Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 TonalCircleButton(
                     R.drawable.zi_alt_arrow_down,
-                    "Back to Zeron",
+                    "Back to Zeron Nova",
                     onClick = close,
                     modifier = Modifier.align(Alignment.CenterStart),
                     container = MaterialTheme.colorScheme.surfaceContainerHighest,

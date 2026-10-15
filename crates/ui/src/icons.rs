@@ -234,8 +234,15 @@ icon_assets![
 /// icon theme through the single asset source registered at app startup.
 pub struct Assets;
 
+pub const NOVA_LOGO: &str = "brand/zeron-nova.png";
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == NOVA_LOGO {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/brand/zeron-nova.png"
+            ))));
+        }
         if let Some(asset) = ControlAssets.load(path)? {
             return Ok(Some(asset));
         }
@@ -244,6 +251,9 @@ impl AssetSource for Assets {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut assets = ControlAssets.list(path)?;
+        if NOVA_LOGO.starts_with(path) {
+            assets.push(NOVA_LOGO.into());
+        }
         assets.extend(crate::file_icons::Assets.list(path)?);
         Ok(assets)
     }

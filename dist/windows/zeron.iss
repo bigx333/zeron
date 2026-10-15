@@ -35,9 +35,9 @@
 ; crates/update/src/windows.rs refreshes DisplayVersion under this key after
 ; in-app updates.
 AppId={{AD5DEC34-E254-467B-8F24-8127EBAF4DA6}
-AppName=Zeron
+AppName=Zeron Nova
 AppVersion={#AppVersion}
-AppVerName=Zeron {#AppVersion}
+AppVerName=Zeron Nova {#AppVersion}
 AppPublisher=Zeron
 AppPublisherURL=https://zeron.sh
 AppSupportURL=https://github.com/zeronsh/zeron/issues
@@ -55,7 +55,7 @@ OutputDir={#OutputDir}
 OutputBaseFilename=zeron-{#AppVersion}-windows-{#Arch}-setup
 SetupIconFile=zeron.ico
 UninstallDisplayIcon={app}\zeron.exe
-UninstallDisplayName=Zeron
+UninstallDisplayName=Zeron Nova
 WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
@@ -75,19 +75,19 @@ Source: "{#PackageDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignorev
 Source: "{#PackageDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\Zeron"; Filename: "{app}\zeron.exe"
-Name: "{autodesktop}\Zeron"; Filename: "{app}\zeron.exe"; Tasks: desktopicon
+Name: "{autoprograms}\Zeron Nova"; Filename: "{app}\zeron.exe"
+Name: "{autodesktop}\Zeron Nova"; Filename: "{app}\zeron.exe"; Tasks: desktopicon
 
 [Registry]
 ; zeron:// conversation links — the scheme macOS registers in Info.plist and
 ; Linux in zeron.desktop.
-Root: HKCU; Subkey: "Software\Classes\zeron"; ValueType: string; ValueName: ""; ValueData: "URL:Zeron"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\zeron"; ValueType: string; ValueName: ""; ValueData: "URL:Zeron Nova"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\zeron"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKCU; Subkey: "Software\Classes\zeron\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\zeron.exe"",0"
 Root: HKCU; Subkey: "Software\Classes\zeron\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\zeron.exe"" ""%1"""
 
 [Run]
-Filename: "{app}\zeron.exe"; Description: "{cm:LaunchProgram,Zeron}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\zeron.exe"; Description: "{cm:LaunchProgram,Zeron Nova}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 ; Leftovers of in-app updates (crates/update/src/windows.rs).

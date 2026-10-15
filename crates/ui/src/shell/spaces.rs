@@ -7916,7 +7916,7 @@ impl Shell {
             } else if github_loading && count > 0 {
                 format!("{account}Loading more repositories…")
             } else {
-                format!("{account}Clones are saved in Zeron’s projects folder on {host}.")
+                format!("{account}Clones are saved in Zeron Nova’s projects folder on {host}.")
             };
             results = results.child(
                 div()

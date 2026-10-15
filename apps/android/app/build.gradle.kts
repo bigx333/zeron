@@ -46,8 +46,8 @@ android {
         applicationId = "sh.zeron.android"
         minSdk = 29
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.2.97"
+        versionCode = 2
+        versionName = "0.2.113"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 

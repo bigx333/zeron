@@ -158,13 +158,13 @@ class VoiceController(
         }
 
         fun message(reason: VoiceEndReason, host: String): String = when (reason) {
-            VoiceEndReason.MICROPHONE_DENIED -> "Zeron needs microphone access to talk with Codex."
+            VoiceEndReason.MICROPHONE_DENIED -> "Zeron Nova needs microphone access to talk with Codex."
             VoiceEndReason.AUDIO_UNAVAILABLE -> "The audio connection closed. Start a new call to reconnect."
             VoiceEndReason.SIGN_IN_REQUIRED -> "Sign in to Codex with ChatGPT on $host."
             VoiceEndReason.USAGE_UNAVAILABLE -> "Codex usage is currently unavailable on $host."
             VoiceEndReason.BUSY -> "$host is already on a voice call."
             VoiceEndReason.HOST_UNAVAILABLE -> "$host isn't reachable right now."
-            VoiceEndReason.HOST_INCOMPATIBLE -> "Update Zeron on $host and enable remote voice there."
+            VoiceEndReason.HOST_INCOMPATIBLE -> "Update Zeron Nova on $host and enable remote voice there."
             VoiceEndReason.CONNECTION_LOST -> "The call dropped. Start a new one to reconnect."
         }
 
