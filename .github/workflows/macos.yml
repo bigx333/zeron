@@ -29,6 +29,11 @@ on:
       - 'apps/ios/**'
       - '.github/workflows/macos.yml'
   workflow_dispatch:
+    inputs:
+      ios_t3_screenshots:
+        description: 'Only capture T3 Mode iOS screenshots (skips the regular macOS and iOS test jobs)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -82,6 +87,7 @@ jobs:
   # Updater and preview tests, native UI regressions and the two native WebKit fixtures. Everything is
   # compiled once (one cargo invocation, so dependencies are built once) and then run.
   macos-native:
+    if: ${{ !inputs.ios_t3_screenshots }}
     runs-on: macos-latest
     # A cold cache (first run, eviction, toolchain bump) takes about 32 minutes; warm is about 10.
     timeout-minutes: 45
@@ -165,6 +171,7 @@ jobs:
 
   # gpui_macos lives in the pinned GPUI checkout, a separate workspace with its own cache.
   macos-frame-source:
+    if: ${{ !inputs.ios_t3_screenshots }}
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -195,7 +202,7 @@ jobs:
   # bindings are generated from the host build of the library).
   ios-core:
     needs: changes
-    if: needs.changes.outputs.ios == 'true'
+    if: needs.changes.outputs.ios == 'true' && !inputs.ios_t3_screenshots
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -231,7 +238,7 @@ jobs:
   # VM and slow every other step down by minutes. xcodebuild boots it when needed.
   ios-tests:
     needs: [changes, ios-core, macos-frame-source]
-    if: needs.changes.outputs.ios == 'true'
+    if: needs.changes.outputs.ios == 'true' && !inputs.ios_t3_screenshots
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -288,4 +295,103 @@ jobs:
         with:
           name: ios-test-results
           path: ${{ runner.temp }}/ios-tests.xcresult
+          if-no-files-found: ignore
+
+  # Manual only (`ios_t3_screenshots`): native T3 Mode screenshots from the simulator, over the demo
+  # workspace. The PNGs come out of the result bundle's attachments.
+  ios-t3-screenshots:
+    needs: changes
+    if: ${{ inputs.ios_t3_screenshots && needs.changes.outputs.ios == 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Select an available iPhone simulator
+        run: |
+          # The app targets iOS 26: use the newest Xcode 26 and the newest iOS runtime installed.
+          xcode=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$xcode" ]; then echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"; fi
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          devices = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "--json"]))["devices"]
+          def version(runtime):
+              return [int(part) for part in runtime.split("iOS-")[-1].split("-") if part.isdigit()]
+          iphones = [device for runtime, group in sorted(devices.items(), key=lambda item: version(item[0]), reverse=True)
+                     if "iOS" in runtime for device in group if device["name"].startswith("iPhone")]
+          if not iphones:
+              raise SystemExit("No iPhone simulator is installed")
+          print("Simulator:", iphones[0]["name"])
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write("IOS_SIMULATOR_ID=" + iphones[0]["udid"] + "\n")
+          PYTHON
+      - name: Rust toolchain + iOS simulator target
+        run: |
+          rustup update stable --no-self-update
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: false
+          cache-on-failure: true
+      - name: Build the Rust core and FFI headers for the simulator
+        run: |
+          # Self-contained (no ios-core): the same build and header generation as
+          # scripts/ios/build-core.sh iphonesimulator. The committed Swift bindings are used as-is.
+          IPHONEOS_DEPLOYMENT_TARGET=26.0 cargo build --locked -p zeron-mobile --lib --profile mobile --target aarch64-apple-ios-sim
+          cargo build --locked -p zeron-mobile --bin uniffi-bindgen --features bindgen --profile mobile
+          out=target/ios-core/iphonesimulator
+          lib=target/aarch64-apple-ios-sim/mobile/libzeron_mobile.a
+          mkdir -p "$out/include"
+          cp "$lib" "$out/libzeron_mobile.a"
+          target/mobile/uniffi-bindgen generate --library "$lib" --language swift --out-dir "$out/gen" >/dev/null
+          cp "$out/gen/zeron_coreFFI.h" "$out/include/zeron_coreFFI.h"
+          cp "$out/gen/zeron_coreFFI.modulemap" "$out/include/module.modulemap"
+          # Screenshots of stale bindings would mislead: fail loudly instead.
+          diff -u apps/ios/Zeron/Core/Generated/zeron_core.swift "$out/gen/zeron_core.swift"
+      - name: Capture T3 Mode screens
+        working-directory: apps/ios
+        env:
+          ZERON_SKIP_CORE: 1
+        run: |
+          xcodebuild -project Zeron.xcodeproj -scheme Zeron \
+            -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -resultBundlePath "$RUNNER_TEMP/ios-t3.xcresult" \
+            -only-testing:ZeronUITests/T3ModeTests/testCaptureT3Screens CODE_SIGNING_ALLOWED=NO test
+      - name: Export screenshots
+        if: always()
+        run: |
+          test -d "$RUNNER_TEMP/ios-t3.xcresult" || exit 0
+          mkdir -p "$RUNNER_TEMP/ios-t3-screens"
+          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/ios-t3.xcresult" \
+            --output-path "$RUNNER_TEMP/ios-t3-screens"
+          # Name each PNG after its attachment ("t3-dark-inbox-folded.png") via the manifest.
+          python3 - "$RUNNER_TEMP/ios-t3-screens" <<'PYTHON'
+          import json, os, sys
+          root = sys.argv[1]
+          manifest = os.path.join(root, "manifest.json")
+          if not os.path.exists(manifest):
+              raise SystemExit(0)
+          for test in json.load(open(manifest)):
+              for item in test.get("attachments", []):
+                  source = os.path.join(root, item["exportedFileName"])
+                  name = item.get("suggestedHumanReadableName") or item["exportedFileName"]
+                  stem = name.split("_")[0] if name.startswith("t3-") else name
+                  target = os.path.join(root, stem if stem.endswith(".png") else stem + ".png")
+                  if os.path.exists(source) and not os.path.exists(target):
+                      os.rename(source, target)
+          PYTHON
+          ls -la "$RUNNER_TEMP/ios-t3-screens"
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-t3-screenshots
+          path: ${{ runner.temp }}/ios-t3-screens
+          if-no-files-found: warn
+      - name: Upload result bundle
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-t3-xcresult
+          path: ${{ runner.temp }}/ios-t3.xcresult
           if-no-files-found: ignore
