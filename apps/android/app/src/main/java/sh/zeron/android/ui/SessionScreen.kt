@@ -206,7 +206,6 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
                             row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
                             // T3: snooze lengths in a sheet (touch, no hover); a snoozed chat wakes from here.
                             row?.takeIf { mode.isT3 && !it.archived }?.let { MenuAction(if (it.snoozed) "Snooze again…" else "Snooze…", ZIcons.Snooze) { snoozing = true } },
-                            row?.takeIf { it.snoozed }?.let { MenuAction("Wake now", ZIcons.Wake) { model.wake(chatId) } },
                             row?.let { r ->
                                 if (r.archived) {
                                     MenuAction(mode.unsettle, ZIcons.Unarchive) { model.unarchive(chatId) }

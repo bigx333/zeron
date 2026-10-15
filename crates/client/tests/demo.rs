@@ -284,6 +284,46 @@ fn t3_snooze_deadline_revises_snapshot_without_a_write() {
 }
 
 #[test]
+fn snoozed_threads_resume_only_on_send_not_view_or_preload() {
+    let (client, _dir) = demo(fast());
+    client.pin_session("chat-home").unwrap();
+    client.snooze_session("chat-home", 3_600).unwrap();
+    let deadline = client
+        .workspace()
+        .session("chat-home")
+        .unwrap()
+        .snoozed_until_ms;
+    client.preload_sessions();
+    let session = client.open_session("chat-home").unwrap();
+    let _ = session.snapshot();
+    session.set_view_attached(true);
+    session.mark_seen();
+    let reading = client.workspace();
+    let row = reading.session("chat-home").unwrap();
+    assert!(row.snoozed);
+    assert_eq!(row.snoozed_until_ms, deadline);
+    assert!(ids(&reading.t3_front.snoozed).contains(&"chat-home"));
+    assert!(!ids(&reading.t3_front.pinned).contains(&"chat-home"));
+
+    session.interrupt().unwrap();
+    assert!(client.workspace().session("chat-home").unwrap().snoozed);
+    assert!(session.send(SendRequest::text("")).is_err());
+    assert!(client.workspace().session("chat-home").unwrap().snoozed);
+    session
+        .send(SendRequest::text("Picking this back up."))
+        .unwrap();
+    let sent = client.workspace();
+    let row = sent.session("chat-home").unwrap();
+    assert!(!row.snoozed && row.snoozed_until_ms.is_none());
+    assert!(!ids(&sent.t3_front.snoozed).contains(&"chat-home"));
+    assert!(ids(&sent.front.pinned).contains(&"chat-home"));
+
+    client.snooze_session("chat-home", 3_600).unwrap();
+    session.enqueue("One more thought.", vec![], true).unwrap();
+    assert!(!client.workspace().session("chat-home").unwrap().snoozed);
+}
+
+#[test]
 fn send_streams_a_reply_and_adopts_the_echo() {
     let (client, _dir) = demo(fast());
     let session = client.open_session("chat-home").unwrap();
