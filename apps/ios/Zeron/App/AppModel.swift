@@ -584,9 +584,21 @@ final class AppModel {
 
     @discardableResult
     func snooze(_ id: String, seconds: UInt32, title: String) -> Bool {
+        snooze(id, seconds: seconds, toast: "Snoozed for \(title.lowercased())")
+    }
+
+    /// Snooze until a wall-clock time ("Snoozed until Thu 9:00 AM").
+    @discardableResult
+    func snooze(_ id: String, until date: Date) -> Bool {
+        let now = Date()
+        guard let seconds = SnoozeUntil.seconds(until: date, now: now) else { return false }
+        return snooze(id, seconds: seconds, toast: "Snoozed until \(SnoozeUntil.label(date, now: now))")
+    }
+
+    private func snooze(_ id: String, seconds: UInt32, toast: String) -> Bool {
         guard attempt("snooze", { try $0.snoozeSession(chatId: id, durationSecs: seconds) }) else { return false }
         refreshWorkspace()
-        Toast.show("Snoozed for \(title.lowercased())", action: "Undo", in: keyWindow) { [weak self] in self?.wake(id) }
+        Toast.show(toast, action: "Undo", in: keyWindow) { [weak self] in self?.wake(id) }
         return true
     }
 

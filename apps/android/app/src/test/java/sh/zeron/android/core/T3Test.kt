@@ -3,6 +3,9 @@ package sh.zeron.android.core
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.util.Locale
 
 class T3Test {
     @Test
@@ -27,32 +30,58 @@ class T3Test {
     fun snoozePresetsAreTheDesktopLengths() {
         assertEquals(listOf("15m", "1h", "4h", "1d"), SnoozeOptions.map { it.short })
         assertEquals(listOf(900u, 3_600u, 14_400u, 86_400u), SnoozeOptions.map { it.seconds })
+        assertEquals("for 1 hour", SnoozeOptions[1].phrase)
+    }
+
+    private val zone = ZoneId.of("America/New_York")
+    private fun at(day: Int, hour: Int, minute: Int = 0) = ZonedDateTime.of(2026, 10, day, hour, minute, 0, 0, zone)
+
+    @Test
+    fun shortcutsAreEveningTomorrowAndNextWeek() {
+        // Wednesday 10:00.
+        val now = at(14, 10)
+        assertEquals(
+            listOf("This evening" to at(14, 18), "Tomorrow morning" to at(15, 9), "Next week" to at(19, 9)),
+            snoozeShortcuts(now).map { it.title to it.at },
+        )
     }
 
     @Test
-    fun customSnoozeTakesWholePositiveAmounts() {
-        assertEquals(SnoozeOption("3 hours", "3h", 10_800u), customSnooze("3", SnoozeUnit.Hours))
-        assertEquals(SnoozeOption("1 day", "1d", 86_400u), customSnooze(" 1 ", SnoozeUnit.Days))
-        assertEquals(SnoozeOption("1 minute", "1m", 60u), customSnooze("01", SnoozeUnit.Minutes))
-        // A week or two is Custom… now that 1w isn't a preset.
-        assertEquals(SnoozeOption("14 days", "14d", 1_209_600u), customSnooze("14", SnoozeUnit.Days))
-        for (bad in listOf("", "  ", "0", "000", "-1", "+2", "1.5", "1e3", "abc", "3h")) {
-            assertNull("'$bad' should not snooze", customSnooze(bad, SnoozeUnit.Hours))
-        }
+    fun eveningNeedsMoreThanAnHourAndNextWeekIsntTomorrow() {
+        assertEquals(true, snoozeShortcuts(at(14, 16, 59)).any { it.title == "This evening" })
+        assertEquals(false, snoozeShortcuts(at(14, 17)).any { it.title == "This evening" })
+        assertEquals(false, snoozeShortcuts(at(14, 22)).any { it.title == "This evening" })
+        // Sunday: Monday 9 AM is tomorrow morning, listed once.
+        assertEquals(listOf("This evening", "Tomorrow morning"), snoozeShortcuts(at(18, 10)).map { it.title })
     }
 
     @Test
-    fun customSnoozeFitsTheCoresU32Seconds() {
-        // u32 seconds = 4 294 967 295: the largest whole amount of each unit is allowed, one more is not.
-        assertEquals(71_582_788L, SnoozeUnit.Minutes.max)
-        assertEquals(1_193_046L, SnoozeUnit.Hours.max)
-        assertEquals(49_710L, SnoozeUnit.Days.max)
-        for (unit in SnoozeUnit.entries) {
-            val top = customSnooze("${unit.max}", unit)!!
-            assertEquals((unit.max * unit.seconds).toUInt(), top.seconds)
-            assertNull(customSnooze("${unit.max + 1}", unit))
-        }
-        assertNull(customSnooze("99999999999999999999", SnoozeUnit.Minutes))
+    fun secondsUntilRoundsUpToTheMinuteWithinU32() {
+        val now = 1_000_000L
+        assertEquals(60u, secondsUntil(now + 1, now))
+        assertEquals(60u, secondsUntil(now + 60_000, now))
+        assertEquals(120u, secondsUntil(now + 60_001, now))
+        assertNull(secondsUntil(now, now))
+        assertNull(secondsUntil(now - 1, now))
+        assertEquals(UInt.MAX_VALUE, secondsUntil(now + 200L * 365 * 86_400_000, now))
+    }
+
+    @Test
+    fun wakeTimeReadsLikeAClock() {
+        val now = at(14, 10)
+        val us = Locale.US
+        assertEquals("6:00 PM", wakeTimeLabel(at(14, 18), now, is24Hour = false, locale = us))
+        assertEquals("Thu 9:00 AM", wakeTimeLabel(at(15, 9), now, is24Hour = false, locale = us))
+        assertEquals("Thu 09:00", wakeTimeLabel(at(15, 9), now, is24Hour = true, locale = us))
+        assertEquals("Oct 26, 9:00 AM", wakeTimeLabel(at(26, 9), now, is24Hour = false, locale = us))
+        assertEquals("Jan 4, 2027, 9:00 AM", wakeTimeLabel(ZonedDateTime.of(2027, 1, 4, 9, 0, 0, 0, zone), now, is24Hour = false, locale = us))
+    }
+
+    @Test
+    fun snoozeUntilIsTheDurationToTheWakeTime() {
+        val now = at(14, 10)
+        assertEquals(SnoozeOption("until Thu 9:00 AM", "Thu 9:00 AM", 82_800u), snoozeUntil(at(15, 9), now, "Thu 9:00 AM"))
+        assertNull(snoozeUntil(at(14, 9), now, "9:00 AM"))
     }
 
     @Test

@@ -4,7 +4,7 @@ Native captures from the isolated demo workspace. These show the actual app, inc
 
 Snoozing moves a thread to the Snoozed shelf, collapsed by default. Opening or reading leaves it snoozed; sending a message clears the snooze. There is no separate Wake action.
 
-Current choices are 15 minutes, 1 hour, 4 hours, 1 day, and Custom (minutes, hours, or days). Earlier captures may still show the replaced 1 Week preset.
+The four presets are 15 minutes, 1 hour, 4 hours and 1 day. A compact ⋯ button expands contextual wake times, followed by a native date-and-time picker. Earlier captures may still show the replaced 1 Week preset or the former custom-duration form.
 
 Some captures show “in 60m”; the current code displays “in 1h” after the rounding fix.
 
@@ -12,8 +12,11 @@ Some captures show “in 60m”; the current code displays “in 1h” after the
 
 | Screen | Dark | Light |
 | --- | --- | --- |
-| Four presets and Custom | — | [Open](android-t3-light-custom-menu.png) |
-| Custom duration | — | [Open](android-t3-light-custom-duration.png) |
+| Four presets and compact ⋯ | — | [Open](android-t3-light-custom-menu.png) |
+| Expanded wake-time choices | — | [Open](android-t3-light-snooze-until-options.png) |
+| Pick a date | — | [Open](android-t3-light-snooze-date.png) |
+| Pick a time | — | [Open](android-t3-light-custom-duration.png) |
+| After confirming: Snoozed shelf folded | — | [Open](android-t3-light-until-snoozed-folded.png) |
 | Working, Snoozed and Settled folded | [Open](android-t3-dark-shelves-folded.png) | — |
 | Snooze presets and Settle button | [Open](android-t3-dark-actions.png) | [Open](android-t3-light-actions.png) |
 | Snoozed row | [Open](android-t3-dark-snoozed.png) | [Open](android-t3-light-snoozed.png) |
@@ -27,7 +30,7 @@ Some captures show “in 60m”; the current code displays “in 1h” after the
 
 ## iOS
 
-Native simulator captures from [the passing screenshot workflow](https://github.com/bigx333/zeron/actions/runs/38677893616).
+These iOS captures predate the custom picker redesign. Native simulator captures from [the passing screenshot workflow](https://github.com/bigx333/zeron/actions/runs/38677893616).
 
 | Screen | Dark | Light |
 | --- | --- | --- |
