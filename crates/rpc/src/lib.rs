@@ -151,6 +151,10 @@ pub mod methods {
     pub const LIST_REPOS: &str = "ListRepos";
     pub const ADD_REPO: &str = "AddRepo";
     pub const CLONE_REPO: &str = "CloneRepo";
+    /// Repositories accessible through the target device's GitHub CLI account.
+    pub const LIST_GITHUB_REPOS: &str = "ListGitHubRepos";
+    /// Clone with the target device's GitHub CLI authentication.
+    pub const CLONE_GITHUB_REPO: &str = "CloneGitHubRepo";
     pub const CREATE_REPO: &str = "CreateRepo";
     pub const LIST_BRANCHES: &str = "ListBranches";
     pub const LIST_REFS: &str = "ListRefs";

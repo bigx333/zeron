@@ -89,8 +89,9 @@ jobs:
   macos-native:
     if: ${{ !inputs.ios_t3_screenshots }}
     runs-on: macos-latest
-    # A cold cache (first run, eviction, toolchain bump) takes about 32 minutes; warm is about 10.
-    timeout-minutes: 45
+    # A cold build plus the application check can take 43 minutes. Leave time
+    # for the native tests and bounded WebKit fixture attempts as well.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Rust toolchain

@@ -31,6 +31,7 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
         let window = app
             .keyWindow()
             .or_else(|| app.mainWindow())
+            .or_else(|| app.windows().into_iter().find(|window| window.isVisible()))
             .ok_or_else(|| anyhow::anyhow!("fixture window is not available"))?;
         std::process::Command::new("/usr/sbin/screencapture")
             .args(["-x", "-o", "-l", &window.windowNumber().to_string()])
@@ -336,7 +337,7 @@ fn main() -> anyhow::Result<()> {
                             first.read_with(cx, |b,_| b.fixture_move_cursor(x as f64,y as f64));
                             gpui::AnyWindowHandle::from(window).update(cx, |_,w,cx| { w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {position:gpui::point(px(x),px(y)),pressed_button:None,modifiers:Default::default()}),cx); })?;
                             pause(cx, 1000).await;
-                            anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_overlay_visible() && b.fixture_native_visible() && b.fixture_focused() && b.fixture_visibility_changes() == before), "repeated tab/toolbar tooltip disrupted the live page");
+                            anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_overlay_visible() && b.fixture_native_visible() && b.fixture_focused() && b.fixture_visibility_changes() == before), "repeated tab/toolbar tooltip disrupted the live page at ({x}, {y}): {:?}", first.read_with(cx, |b,_| (b.fixture_overlay_visible(), b.fixture_native_visible(), b.fixture_focused(), b.fixture_visibility_changes(), before)));
                         }
                     }
                     first.read_with(cx, |b,_| b.fixture_move_cursor((left-20.) as f64,150.));

@@ -694,6 +694,23 @@ final class AppModel {
     }
 
     @MainActor
+    func githubRepositories(deviceId: String, cursor: String?) async throws -> GitHubRepositoryPage {
+        guard let current = client else { throw CoreError.Closed }
+        let page = try await current.listGithubRepositories(deviceId: deviceId, cursor: cursor)
+        guard client === current else { throw CoreError.Closed }
+        return page
+    }
+
+    @MainActor
+    func cloneGithubProject(deviceId: String, repository: String) async throws -> String {
+        guard let current = client else { throw CoreError.Closed }
+        let id = try await current.cloneGithubProject(deviceId: deviceId, repository: repository)
+        guard client === current else { throw CoreError.Closed }
+        refreshWorkspace()
+        return id
+    }
+
+    @MainActor
     func createProject(deviceId: String, path: String, gitDetected: Bool) async -> String? {
         guard let client else { return nil }
         do {

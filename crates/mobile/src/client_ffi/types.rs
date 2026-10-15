@@ -1041,6 +1041,40 @@ impl From<zc::rpc::FolderListing> for FolderListing {
     }
 }
 
+// ── GitHub projects ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct GitHubRepository {
+    pub name_with_owner: String,
+    pub description: Option<String>,
+    pub is_private: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct GitHubRepositoryPage {
+    pub login: String,
+    pub repositories: Vec<GitHubRepository>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<zc::rpc::GitHubRepositoryPage> for GitHubRepositoryPage {
+    fn from(page: zc::rpc::GitHubRepositoryPage) -> Self {
+        Self {
+            login: page.login,
+            next_cursor: page.next_cursor,
+            repositories: page
+                .repositories
+                .into_iter()
+                .map(|repo| GitHubRepository {
+                    name_with_owner: repo.name_with_owner,
+                    description: repo.description,
+                    is_private: repo.is_private,
+                })
+                .collect(),
+        }
+    }
+}
+
 // ── attachments ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]

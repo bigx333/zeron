@@ -1035,6 +1035,11 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func childSessions(parentId: String)  -> [SessionRow]
     
     /**
+     * Clone on the selected execution host and open the resulting project.
+     */
+    func cloneGithubProject(deviceId: String, repository: String) async throws  -> String
+    
+    /**
      * The view closed; the session stays warm until evicted.
      */
     func closeSession(chatId: String) 
@@ -1087,6 +1092,11 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      * Browse folders on a device (`None` = its home folder).
      */
     func listFolders(deviceId: String, path: String?) async throws  -> FolderListing
+    
+    /**
+     * Browse repositories available to the selected host's GitHub CLI account.
+     */
+    func listGithubRepositories(deviceId: String, cursor: String?) async throws  -> GitHubRepositoryPage
     
     /**
      * Harness catalog of an execution device (static fallback when it's
@@ -1376,6 +1386,25 @@ open func childSessions(parentId: String) -> [SessionRow]  {
 }
     
     /**
+     * Clone on the selected execution host and open the resulting project.
+     */
+open func cloneGithubProject(deviceId: String, repository: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_clone_github_project(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(repository)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
      * The view closed; the session stays warm until evicted.
      */
 open func closeSession(chatId: String)  {try! rustCall() {
@@ -1553,6 +1582,25 @@ open func listFolders(deviceId: String, path: String?)async throws  -> FolderLis
             completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
             freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeFolderListing_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Browse repositories available to the selected host's GitHub CLI account.
+     */
+open func listGithubRepositories(deviceId: String, cursor: String?)async throws  -> GitHubRepositoryPage  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_list_github_repositories(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterOptionString.lower(cursor)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGitHubRepositoryPage_lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
@@ -6969,6 +7017,122 @@ public func FfiConverterTypeFrontPage_lift(_ buf: RustBuffer) throws -> FrontPag
 #endif
 public func FfiConverterTypeFrontPage_lower(_ value: FrontPage) -> RustBuffer {
     return FfiConverterTypeFrontPage.lower(value)
+}
+
+
+public struct GitHubRepository: Equatable, Hashable {
+    public var nameWithOwner: String
+    public var description: String?
+    public var isPrivate: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(nameWithOwner: String, description: String?, isPrivate: Bool) {
+        self.nameWithOwner = nameWithOwner
+        self.description = description
+        self.isPrivate = isPrivate
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GitHubRepository: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGitHubRepository: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GitHubRepository {
+        return
+            try GitHubRepository(
+                nameWithOwner: FfiConverterString.read(from: &buf), 
+                description: FfiConverterOptionString.read(from: &buf), 
+                isPrivate: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GitHubRepository, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.nameWithOwner, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterBool.write(value.isPrivate, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitHubRepository_lift(_ buf: RustBuffer) throws -> GitHubRepository {
+    return try FfiConverterTypeGitHubRepository.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitHubRepository_lower(_ value: GitHubRepository) -> RustBuffer {
+    return FfiConverterTypeGitHubRepository.lower(value)
+}
+
+
+public struct GitHubRepositoryPage: Equatable, Hashable {
+    public var login: String
+    public var repositories: [GitHubRepository]
+    public var nextCursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(login: String, repositories: [GitHubRepository], nextCursor: String?) {
+        self.login = login
+        self.repositories = repositories
+        self.nextCursor = nextCursor
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GitHubRepositoryPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGitHubRepositoryPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GitHubRepositoryPage {
+        return
+            try GitHubRepositoryPage(
+                login: FfiConverterString.read(from: &buf), 
+                repositories: FfiConverterSequenceTypeGitHubRepository.read(from: &buf), 
+                nextCursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GitHubRepositoryPage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.login, into: &buf)
+        FfiConverterSequenceTypeGitHubRepository.write(value.repositories, into: &buf)
+        FfiConverterOptionString.write(value.nextCursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitHubRepositoryPage_lift(_ buf: RustBuffer) throws -> GitHubRepositoryPage {
+    return try FfiConverterTypeGitHubRepositoryPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGitHubRepositoryPage_lower(_ value: GitHubRepositoryPage) -> RustBuffer {
+    return FfiConverterTypeGitHubRepositoryPage.lower(value)
 }
 
 
@@ -16079,6 +16243,31 @@ fileprivate struct FfiConverterSequenceTypeFolderEntry: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeGitHubRepository: FfiConverterRustBuffer {
+    typealias SwiftType = [GitHubRepository]
+
+    public static func write(_ value: [GitHubRepository], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGitHubRepository.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GitHubRepository] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GitHubRepository]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeGitHubRepository.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHarnessInfo: FfiConverterRustBuffer {
     typealias SwiftType = [HarnessInfo]
 
@@ -17197,6 +17386,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_child_sessions() != 10159) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_clone_github_project() != 65324) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_close_session() != 11270) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17240,6 +17432,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_folders() != 2324) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_list_github_repositories() != 52734) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_harnesses() != 2345) {

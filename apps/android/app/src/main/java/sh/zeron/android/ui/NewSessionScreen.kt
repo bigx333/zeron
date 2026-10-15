@@ -323,7 +323,7 @@ private fun ProjectSheet(
                     count = 2,
                     leading = { IconTile(ZIcons.Plus) },
                     title = "New project…",
-                    supporting = "Pick a folder on one of your computers",
+                    supporting = "Use a folder or clone from GitHub",
                     mono = false,
                     onClick = onNewProject,
                 )

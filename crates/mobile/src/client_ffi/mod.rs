@@ -448,6 +448,30 @@ impl CoreClient {
             .collect())
     }
 
+    /// Browse repositories available to the selected host's GitHub CLI account.
+    pub async fn list_github_repositories(
+        &self,
+        device_id: String,
+        cursor: Option<String>,
+    ) -> CoreResult<GitHubRepositoryPage> {
+        let client = self.client.clone();
+        Ok(
+            on_runtime(async move { client.list_github_repositories(&device_id, cursor).await })
+                .await?
+                .into(),
+        )
+    }
+
+    /// Clone on the selected execution host and open the resulting project.
+    pub async fn clone_github_project(
+        &self,
+        device_id: String,
+        repository: String,
+    ) -> CoreResult<String> {
+        let client = self.client.clone();
+        on_runtime(async move { client.clone_github_project(&device_id, &repository).await }).await
+    }
+
     /// Browse folders on a device (`None` = its home folder).
     pub async fn list_folders(
         &self,

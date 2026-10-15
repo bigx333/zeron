@@ -1067,15 +1067,25 @@ impl WorkspaceHost {
         name: Option<String>,
         git_detected: bool,
     ) -> Result<(), EngineError> {
-        let spaces = self.read(|doc| doc.read_spaces())?;
-        if spaces
-            .iter()
-            .any(|s| s.id == space_id || (s.device_id == device_id && s.path == path))
-        {
-            return Ok(());
-        }
+        self.get_or_create_space(space_id, device_id, path, name, git_detected).map(drop)
+    }
+
+    /// Resolve duplicates and insert under the same registry lock. Callers
+    /// receive the actual row even when another client created it first.
+    pub fn get_or_create_space(
+        &self,
+        space_id: &str,
+        device_id: &str,
+        path: &str,
+        name: Option<String>,
+        git_detected: bool,
+    ) -> Result<Space, EngineError> {
         self.mutate(|doc| {
-            doc.upsert_space(&Space {
+            if let Some(existing) = doc.read_spaces()?.into_iter()
+                .find(|space| space.id == space_id || (space.device_id == device_id && space.path == path)) {
+                return Ok(existing);
+            }
+            let space = Space {
                 id: space_id.to_string(),
                 device_id: device_id.to_string(),
                 path: path.to_string(),
@@ -1085,9 +1095,10 @@ impl WorkspaceHost {
                 checkout_id: None,
                 repository_id: None,
                 created_at: Utc::now(),
-            })
-        })?;
-        Ok(())
+            };
+            doc.upsert_space(&space)?;
+            Ok(space)
+        })
     }
 
     pub fn rename_space(&self, space_id: &str, name: Option<&str>) -> Result<bool, EngineError> {

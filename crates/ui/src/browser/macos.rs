@@ -99,7 +99,7 @@ impl BrowserData {
             return;
         };
         if url.scheme() != "http"
-            || url.port() != Some(zeron_proto::PREVIEW_PROXY_PORT)
+            || url.port() != Some(super::preview_proxy_port())
             || !host.ends_with(".localhost")
         {
             return;
@@ -169,7 +169,8 @@ fn configure_preview_proxy(
             std::mem::transmute(symbol(c"nw_proxy_config_create_http_connect")?);
         let match_domain: unsafe extern "C" fn(*mut NSObject, *const c_char) =
             std::mem::transmute(symbol(c"nw_proxy_config_add_match_domain")?);
-        let endpoint = Retained::from_raw(endpoint(c"127.0.0.1".as_ptr(), c"7331".as_ptr()))
+        let port = CString::new(super::preview_proxy_port().to_string()).unwrap();
+        let endpoint = Retained::from_raw(endpoint(c"127.0.0.1".as_ptr(), port.as_ptr()))
             .ok_or("Could not create preview endpoint")?;
         let config = Retained::from_raw(proxy(
             Retained::as_ptr(&endpoint) as *mut _,
