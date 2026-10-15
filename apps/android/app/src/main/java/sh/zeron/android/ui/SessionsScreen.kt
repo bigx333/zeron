@@ -702,12 +702,12 @@ fun SessionItem(
                 settle = { actions.archive(row) },
                 unsettle = { model.unarchive(row.id) },
                 snooze = { model.snooze(row.id, it) },
-                customSnooze = { customizing = true },
+                pickDateTime = { customizing = true },
             ),
             onDismiss = { sheet.value = false },
         )
     }
-    if (customizing) CustomSnoozeDialog(onDismiss = { customizing = false }) { model.snooze(row.id, it) }
+    if (customizing) SnoozeDateTimeDialogs(onDismiss = { customizing = false }) { model.snooze(row.id, it) }
     if (renaming) RenameDialog(row.title, onDismiss = { renaming = false }) { model.rename(row.id, it) }
 }
 
