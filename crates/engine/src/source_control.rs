@@ -28,8 +28,8 @@ const GIT_OUTPUT_LIMIT: usize = 64 * 1024;
 /// `ssh -G` only reads configuration; it never connects.
 const SSH_CONFIG_TIMEOUT: Duration = Duration::from_secs(3);
 /// `repository()` follows renames: the old name resolves to the current one.
-const GITHUB_REPOSITORY_QUERY: &str =
-    "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { nameWithOwner } }";
+const GITHUB_REPOSITORY_QUERY: &str = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { nameWithOwner } }";
+const GITHUB_ACCOUNT_REPOSITORIES_QUERY: &str = "query($after: String) { viewer { login repositories(first: 100, after: $after, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], orderBy: {field: PUSHED_AT, direction: DESC}) { nodes { nameWithOwner description isPrivate } pageInfo { hasNextPage endCursor } } } }";
 const GITHUB_OUTPUT_LIMIT: usize = 1024 * 1024;
 const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
@@ -360,6 +360,112 @@ pub struct GitHubCli {
 }
 
 impl GitHubCli {
+    pub async fn repositories(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<zeron_proto::GitHubRepositoryPage, ChangeRequestError> {
+        if cursor.is_some_and(|cursor| !valid_page_cursor(cursor)) {
+            return Err(ChangeRequestError::Decode);
+        }
+        let mut request = github_request();
+        request.args = vec![
+            "api".into(),
+            "graphql".into(),
+            "-f".into(),
+            format!("query={GITHUB_ACCOUNT_REPOSITORIES_QUERY}"),
+        ];
+        if let Some(cursor) = cursor {
+            request
+                .args
+                .extend(["-f".into(), format!("after={cursor}")]);
+        }
+        let output = self.runner.run(request).await.map_err(classify_run_error)?;
+        if !output.success {
+            return Err(classify_github_failure(&output.stderr));
+        }
+        if output.stdout_truncated {
+            return Err(ChangeRequestError::Decode);
+        }
+        #[derive(Deserialize)]
+        struct Response {
+            data: Data,
+        }
+        #[derive(Deserialize)]
+        struct Data {
+            viewer: Viewer,
+        }
+        #[derive(Deserialize)]
+        struct Viewer {
+            login: String,
+            repositories: Connection,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Connection {
+            nodes: Vec<zeron_proto::GitHubRepository>,
+            page_info: PageInfo,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PageInfo {
+            has_next_page: bool,
+            end_cursor: Option<String>,
+        }
+        let response: Response =
+            serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
+        let viewer = response.data.viewer;
+        let page = viewer.repositories;
+        if viewer.login.is_empty()
+            || page
+                .nodes
+                .iter()
+                .any(|repo| !valid_pr_repository(&repo.name_with_owner))
+            || (page.page_info.has_next_page
+                && page
+                    .page_info
+                    .end_cursor
+                    .as_deref()
+                    .is_none_or(|next| !valid_page_cursor(next) || Some(next) == cursor))
+        {
+            return Err(ChangeRequestError::Decode);
+        }
+        Ok(zeron_proto::GitHubRepositoryPage {
+            login: viewer.login,
+            repositories: page.nodes,
+            next_cursor: page
+                .page_info
+                .end_cursor
+                .filter(|_| page.page_info.has_next_page),
+        })
+    }
+
+    pub(crate) async fn clone_repository(
+        &self,
+        repository: &str,
+        target: &Path,
+    ) -> Result<(), ChangeRequestError> {
+        if !valid_pr_repository(repository) {
+            return Err(ChangeRequestError::UnsupportedRepository);
+        }
+        let mut request = github_request();
+        request.args = vec![
+            "repo".into(),
+            "clone".into(),
+            format!("https://github.com/{repository}"),
+            target.to_string_lossy().into_owned(),
+        ];
+        request.env.extend([
+            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+            ("GCM_INTERACTIVE".into(), "never".into()),
+        ]);
+        request.timeout = Duration::from_secs(14 * 60);
+        let output = self.runner.run(request).await.map_err(classify_run_error)?;
+        if !output.success {
+            return Err(classify_github_failure(&output.stderr));
+        }
+        Ok(())
+    }
+
     /// Shared across RPC clients on this engine. Simultaneous identical reads
     /// share one provider call; distinct reads run side by side. The read runs
     /// detached, so it completes and is cached even when every caller has gone
@@ -2225,6 +2331,209 @@ mod tests {
             stderr: Vec::new(),
             stdout_truncated: false,
         })
+    }
+
+    fn repository_page(repository: &str, cursor: Option<&str>) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({"data": {"viewer": {
+            "login": "octocat", "repositories": {
+                "nodes": [{"nameWithOwner": repository, "description": null, "isPrivate": true}],
+                "pageInfo": {"hasNextPage": cursor.is_some(), "endCursor": cursor}
+            }
+        }}}))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn github_projects_list_account_repositories_through_rpc_with_pagination() {
+        use serde_json::json;
+        use zeron_rpc::methods;
+
+        let runner = FakeProcessRunner::with_responses([
+            command_success(repository_page("octocat/private", Some("next-page"))),
+            command_success(repository_page("organization/shared", None)),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            dir.path(),
+            Arc::new(crate::HarnessRegistry::new()),
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = Arc::try_unwrap(core.rpc_service())
+            .ok()
+            .unwrap()
+            .with_github(GitHubCli::with_runner(runner.clone()));
+        let client = zeron_rpc::memory_client(Arc::new(rpc));
+        let first: zeron_proto::GitHubRepositoryPage = client
+            .call_as(
+                methods::LIST_GITHUB_REPOS,
+                json!({"targetDeviceId": core.device_id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.login, "octocat");
+        assert!(first.repositories[0].is_private);
+        assert_eq!(first.repositories[0].description, None);
+        assert_eq!(first.next_cursor.as_deref(), Some("next-page"));
+        let last: zeron_proto::GitHubRepositoryPage = client
+            .call_as(
+                methods::LIST_GITHUB_REPOS,
+                json!({"cursor": first.next_cursor}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(last.repositories[0].name_with_owner, "organization/shared");
+        assert!(last.next_cursor.is_none());
+        assert!(
+            client
+                .call(methods::LIST_GITHUB_REPOS, json!({"cursor":"bad cursor"}))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid repository page cursor")
+        );
+        assert!(
+            client
+                .call(
+                    methods::CLONE_GITHUB_REPO,
+                    json!({"repository":"../escape"})
+                )
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid GitHub repository")
+        );
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(&requests[0].args[..2], ["api", "graphql"]);
+        assert_eq!(&requests[1].args[4..], ["-f", "after=next-page"]);
+        for request in requests {
+            assert_eq!(request.env, github_request().env);
+            assert_eq!(request.timeout, GITHUB_TIMEOUT);
+            assert_eq!(request.output_limit, GITHUB_OUTPUT_LIMIT);
+            assert!(request.cwd.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn github_projects_reject_malformed_pages_and_classify_authentication_errors() {
+        let runner = FakeProcessRunner::with_responses([
+            command_success(repository_page("../escape", None)),
+            command_success(repository_page("octocat/private", Some("same-page"))),
+            command_failure("authentication required: gh auth login; secret-provider-diagnostic"),
+        ]);
+        let github = GitHubCli::with_runner(runner);
+        assert_eq!(
+            github.repositories(None).await,
+            Err(ChangeRequestError::Decode)
+        );
+        assert_eq!(
+            github.repositories(Some("same-page")).await,
+            Err(ChangeRequestError::Decode)
+        );
+        assert_eq!(
+            github.repositories(None).await,
+            Err(ChangeRequestError::Authentication)
+        );
+    }
+
+    struct LocalCloneRunner {
+        source: PathBuf,
+        requests: Mutex<Vec<ProcessRequest>>,
+    }
+
+    #[async_trait]
+    impl ProcessRunner for LocalCloneRunner {
+        async fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError> {
+            let target = PathBuf::from(&request.args[3]);
+            self.requests.lock().unwrap().push(request.clone());
+            run_git(
+                self.source.parent().unwrap(),
+                &[
+                    "clone",
+                    "--",
+                    &self.source.to_string_lossy(),
+                    &target.to_string_lossy(),
+                ],
+            );
+            run_git(&target, &["remote", "set-url", "origin", &request.args[2]]);
+            command_success("")
+        }
+    }
+
+    #[tokio::test]
+    async fn github_projects_clone_reuse_completed_checkouts_and_preserve_other_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        run_git(&source, &["init", "-q", "-b", "main"]);
+        std::fs::write(source.join("README.md"), "Project contents").unwrap();
+        run_git(&source, &["add", "."]);
+        run_git(
+            &source,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "-qm",
+                "feat: seed fixture",
+            ],
+        );
+        let runner = Arc::new(LocalCloneRunner {
+            source,
+            requests: Mutex::new(Vec::new()),
+        });
+        let github = GitHubCli::with_runner(runner.clone());
+        let repos = crate::Repos::new(&dir.path().join("engine"), "local");
+        let cloned = repos
+            .clone_github_repo(&github, "octocat/project")
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&cloned.path).join("README.md")).unwrap(),
+            "Project contents"
+        );
+        assert_eq!(
+            repos
+                .clone_github_repo(&github, "octocat/project")
+                .await
+                .unwrap(),
+            cloned
+        );
+        let other = repos
+            .clone_github_repo(&github, "organization/project")
+            .await
+            .unwrap();
+        assert_ne!(cloned.path, other.path);
+        assert_eq!(repos.list().await.len(), 2);
+        let blocked = dir.path().join("engine/repos/github.com/another/project");
+        std::fs::create_dir_all(&blocked).unwrap();
+        std::fs::write(blocked.join("keep.txt"), "keep me").unwrap();
+        assert!(
+            repos
+                .clone_github_repo(&github, "another/project")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(blocked.join("keep.txt")).unwrap(),
+            "keep me"
+        );
+        let requests = runner.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            &requests[0].args[..3],
+            ["repo", "clone", "https://github.com/octocat/project"]
+        );
+        assert!(
+            requests[0]
+                .env
+                .contains(&("GIT_TERMINAL_PROMPT".into(), "0".into()))
+        );
+        assert!(requests[0].timeout > GITHUB_TIMEOUT);
     }
 
     /// Real engine dispatch, wire envelopes and GitHub decoding; only subprocess

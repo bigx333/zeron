@@ -154,6 +154,8 @@ struct ReposInner {
     http: reqwest::Client,
     github_avatars: std::sync::Mutex<HashMap<String, String>>,
     github_avatar_pages: std::sync::Mutex<HashSet<String>>,
+    /// A retry from another client must wait for the first clone to finish.
+    github_clones: tokio::sync::Mutex<()>,
     /// The engine's one workspace search index set (`@`, file tree, cmd+K).
     workspace_search: WorkspaceSearch,
     /// HEAD commit → its trunk's root commit. History behind a commit never
@@ -225,6 +227,7 @@ impl Repos {
                 github_avatars: std::sync::Mutex::new(HashMap::new()),
                 trunk_roots: std::sync::Mutex::new(HashMap::new()),
                 github_avatar_pages: std::sync::Mutex::new(HashSet::new()),
+                github_clones: tokio::sync::Mutex::new(()),
                 workspace_search: WorkspaceSearch::new(),
             }),
         }
@@ -649,6 +652,53 @@ impl Repos {
         std::fs::create_dir_all(&repos_dir)?;
         self.git(&["clone", trimmed, &target.to_string_lossy()], None)
             .await?;
+        self.register(&target.to_string_lossy())?;
+        self.to_repo(&target).await
+    }
+
+    /// Managed GitHub checkouts are namespaced by owner to avoid collisions.
+    /// Reuse a completed clone on retries, but never overwrite another folder.
+    pub async fn clone_github_repo(
+        &self,
+        github: &crate::source_control::GitHubCli,
+        repository: &str,
+    ) -> Result<Repo, EngineError> {
+        if !crate::source_control::valid_pr_repository(repository) {
+            return Err(EngineError::Other("Invalid GitHub repository".into()));
+        }
+        let _clone = self.inner.github_clones.lock().await;
+        let target = self
+            .inner
+            .data_dir
+            .join("repos")
+            .join("github.com")
+            .join(repository);
+        if target.exists() {
+            let remote = self
+                .git(&["remote", "get-url", "origin"], Some(&target))
+                .await
+                .ok();
+            let matches = remote
+                .as_deref()
+                .and_then(crate::source_control::parse_git_remote)
+                .is_some_and(|remote| {
+                    remote.host.eq_ignore_ascii_case("github.com")
+                        && format!("{}/{}", remote.owner, remote.repository)
+                            .eq_ignore_ascii_case(repository)
+                });
+            if !target.join(".git").exists() || !matches || !self.is_repo(&target).await {
+                return Err(EngineError::Other(format!(
+                    "Already exists: {}",
+                    target.display()
+                )));
+            }
+        } else {
+            std::fs::create_dir_all(target.parent().expect("repository has an owner"))?;
+            github
+                .clone_repository(repository, &target)
+                .await
+                .map_err(|error| EngineError::Other(error.to_string()))?;
+        }
         self.register(&target.to_string_lossy())?;
         self.to_repo(&target).await
     }

@@ -340,6 +340,23 @@ pub struct Repo {
     pub default_branch: Option<String>,
 }
 
+/// A repository accessible to the active GitHub account on the selected device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubRepository {
+    pub name_with_owner: String,
+    pub description: Option<String>,
+    pub is_private: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubRepositoryPage {
+    pub login: String,
+    pub repositories: Vec<GitHubRepository>,
+    pub next_cursor: Option<String>,
+}
+
 /// One row of `ListRefs`: a branch plus its checkout state — whether it is
 /// the repo's current (main-checkout) branch and whether it is materialized
 /// as a linked worktree. Drives the composer's ref picker (`current` /

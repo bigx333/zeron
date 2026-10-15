@@ -1466,9 +1466,10 @@ fn forward_deadline(method: &str) -> std::time::Duration {
     }
     use std::time::Duration;
     match method {
-        methods::CLONE_REPO | methods::FETCH_ALL | methods::APPLY_UPDATE => {
-            Duration::from_secs(15 * 60)
-        }
+        methods::CLONE_REPO
+        | methods::CLONE_GITHUB_REPO
+        | methods::FETCH_ALL
+        | methods::APPLY_UPDATE => Duration::from_secs(15 * 60),
         methods::INSTALL_HARNESS => Duration::from_secs(15 * 60),
         // A full fleet of enabled providers is checked two at a time; each
         // provider may need both a CLI probe and a network request.
@@ -1525,6 +1526,8 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_REPOS
             | methods::ADD_REPO
             | methods::CLONE_REPO
+            | methods::LIST_GITHUB_REPOS
+            | methods::CLONE_GITHUB_REPO
             | methods::CREATE_REPO
             | methods::LIST_BRANCHES
             | methods::LIST_REFS
@@ -3090,6 +3093,41 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&repo)
             }
+            methods::LIST_GITHUB_REPOS => {
+                #[derive(Deserialize)]
+                struct P {
+                    cursor: Option<String>,
+                }
+                let p: P = parse_params(params)?;
+                if p.cursor
+                    .as_deref()
+                    .is_some_and(|cursor| !crate::source_control::valid_page_cursor(cursor))
+                {
+                    return Err(RpcError::BadParams("Invalid repository page cursor".into()));
+                }
+                let page = self
+                    .github
+                    .repositories(p.cursor.as_deref())
+                    .await
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&page)
+            }
+            methods::CLONE_GITHUB_REPO => {
+                #[derive(Deserialize)]
+                struct P {
+                    repository: String,
+                }
+                let p: P = parse_params(params)?;
+                if !crate::source_control::valid_pr_repository(&p.repository) {
+                    return Err(RpcError::BadParams("Invalid GitHub repository".into()));
+                }
+                let repo = self
+                    .repos
+                    .clone_github_repo(&self.github, &p.repository)
+                    .await
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&repo)
+            }
             methods::CLONE_REPO => {
                 #[derive(Deserialize)]
                 struct P {
@@ -4407,6 +4445,12 @@ mod tests {
     /// long leash, and nothing awaits forever (the "Sending…" wedge).
     #[test]
     fn forward_deadlines_are_tiered_and_bounded() {
+        assert!(forwardable(methods::LIST_GITHUB_REPOS));
+        assert!(forwardable(methods::CLONE_GITHUB_REPO));
+        assert_eq!(
+            forward_deadline(methods::CLONE_GITHUB_REPO),
+            Duration::from_secs(15 * 60)
+        );
         for method in [methods::LIST_MODELS, methods::LIST_COMMANDS] {
             assert_eq!(
                 forward_deadline(method),
