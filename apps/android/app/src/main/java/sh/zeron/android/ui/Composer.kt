@@ -103,8 +103,6 @@ import uniffi.zeron_core.UserInputAnswer
 import uniffi.zeron_core.fallbackModels
 import uniffi.zeron_core.reasoningLabel
 
-private enum class Delivery(val label: String) { Queue("Queue"), Steer("Steer"), Interrupt("Stop & send") }
-
 /**
  * The session composer: the shared surface plus this chat's context chips,
  * staged photos, `@` mentions, and editing of messages queued behind the
@@ -125,9 +123,9 @@ fun Composer(
     var error by remember { mutableStateOf<String?>(null) }
     val running = c.live.turnRunning
     val canSteer = c.host.capabilities.midTurnSteering == true
+    // Delivery while a turn runs comes from the Steer mode setting.
     val steerMode by model.steerMode.collectAsState()
-    val preferred = if (steerMode && canSteer) Delivery.Steer else Delivery.Queue
-    var delivery by remember(preferred) { mutableStateOf(preferred) }
+    val steer = steerMode && canSteer
 
     // Queue editing: the row being edited, its lease, and the user's own draft parked meanwhile.
     var editingId by remember { mutableStateOf<String?>(null) }
@@ -207,21 +205,19 @@ fun Composer(
         }
         val body = draft.encoded()
         try {
-            val queued = running && delivery == Delivery.Queue
-            if (delivery == Delivery.Interrupt && running) handle.interrupt()
+            val queued = running && !steer
             handle.send(
                 SendRequest(
                     body,
                     draft.images.map { it.outgoing },
                     null,
-                    if (running && delivery == Delivery.Steer) BusyPolicy.STEER else BusyPolicy.QUEUE,
+                    if (running && steer) BusyPolicy.STEER else BusyPolicy.QUEUE,
                 ),
             )
             model.noteDeliveryActivity()
             draft.clear()
             model.drafts.save(c.chatId, "")
             error = null
-            delivery = preferred
             // An immediate send gets the runway; one queued behind a live turn
             // takes it over once its bubble lands.
             if (queued) transcript.expectQueuedTurn() else transcript.beginOwnTurn()
@@ -277,7 +273,6 @@ fun Composer(
             attach = editingId == null,
             focusRequester = focus,
         ) {
-            if (running && editingId == null) DeliveryChip(delivery, canSteer) { delivery = it }
             SessionChips(client, c, row)
         }
     }
@@ -290,32 +285,6 @@ private fun replacingVisible(raw: String, visible: String, edited: String): Stri
     if (body.startsWith(visible)) return edited + body.substring(visible.length)
     // Attachment-only rows show a placeholder: all of the raw text is context.
     return if (body.isEmpty()) edited else edited + "\n\n" + body
-}
-
-@Composable
-private fun DeliveryChip(current: Delivery, canSteer: Boolean, onChange: (Delivery) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    ContextChip(
-        current.label,
-        leading = { ZIcon(ZIcons.Queue, null, Modifier.size(16.dp)) },
-        onClick = { open = true },
-        tint = MaterialTheme.colorScheme.primary,
-    ) {
-        ChoiceMenu(
-            open,
-            { open = false },
-            listOf(
-                MenuSection(
-                    "While the agent works",
-                    listOfNotNull(
-                        MenuChoice("Queue", current == Delivery.Queue, "Send when this turn ends") { onChange(Delivery.Queue) },
-                        if (canSteer) MenuChoice("Steer", current == Delivery.Steer, "Add to the running turn") { onChange(Delivery.Steer) } else null,
-                        MenuChoice("Stop & send", current == Delivery.Interrupt, "Stop the turn, then send") { onChange(Delivery.Interrupt) },
-                    ),
-                ),
-            ),
-        )
-    }
 }
 
 @Composable

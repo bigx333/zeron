@@ -36,8 +36,8 @@ struct ComposerChip: Equatable {
 /// - active (focused, or holding a draft/photos): a card — photos, full-width
 ///   text, and a toolbar row inside the glass: [+] [model] [effort] [branch] … [Send]
 ///
-/// The action button is one control that becomes Send, Queue/Steer (a labelled
-/// pill while an agent works) or Stop.
+/// The action button stays icon-only: send uses the delivery mode in Settings,
+/// and an empty composer offers Stop while an agent works.
 final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
     enum Action: Equatable {
         case send
@@ -589,8 +589,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             config.baseForegroundColor = enabled ? .white : Palette.tertiary
             config.contentInsets = .zero
         case .queue:
-            // Same look as Send (the long-press menu still offers steer /
-            // stop-and-send); only the accessibility label says "Queue".
+            // Delivery comes from Settings; the button keeps the Send shape.
             symbol = "arrow.up"
             config.baseBackgroundColor = Palette.accent
             config.baseForegroundColor = .white
@@ -620,16 +619,11 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         case .queue: actionButton.accessibilityLabel = steering ? "Steer" : "Queue message"
         case .stop: actionButton.accessibilityLabel = "Stop response"
         }
-        // Long-press offers the other delivery modes mid-turn.
+        // Long-press can stop the turn and send; Queue/Steer lives in Settings.
         if action == .queue {
-            var items: [UIMenuElement] = [
-                UIAction(title: "Queue for next turn", image: UIImage(systemName: "text.line.last.and.arrowtriangle.forward")) { [weak self] _ in self?.send(.queue) },
-            ]
-            if canSteer {
-                items.append(UIAction(title: "Steer now", subtitle: "Deliver into the running turn", image: UIImage(systemName: "arrow.turn.down.right")) { [weak self] _ in self?.send(.steer) })
-            }
-            items.append(UIAction(title: "Stop and send", image: UIImage(systemName: "stop.circle"), attributes: .destructive) { [weak self] _ in self?.send(.interrupt) })
-            actionButton.menu = UIMenu(title: "While the agent works", children: items)
+            actionButton.menu = UIMenu(title: "While the agent works", children: [
+                UIAction(title: "Stop and send", image: UIImage(systemName: "stop.circle"), attributes: .destructive) { [weak self] _ in self?.send(.interrupt) },
+            ])
             actionButton.showsMenuAsPrimaryAction = false
         } else {
             actionButton.menu = nil
