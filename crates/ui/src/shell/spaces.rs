@@ -6481,24 +6481,24 @@ impl Shell {
                     .await?;
                 let existing = this
                     .update(cx, |shell, cx| {
-                        shell
-                            .state
-                            .read(cx)
-                            .spaces
+                        let state = shell.state.read(cx);
+                        if state.engine().is_none_or(|current| !current.same_connection(&engine)) {
+                            return Err(zeron_rpc::RpcError::Closed);
+                        }
+                        Ok(state.spaces
                             .iter()
                             .find(|space| {
                                 space.device_id == device.id
                                     && same_folder_path(&space.path, &repo.path)
                             })
-                            .map(|space| space.id.clone())
+                            .cloned())
                     })
-                    .ok()
-                    .flatten();
-                let space_id = existing
-                    .clone()
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                if existing.is_none() {
-                    engine
+                    .map_err(|_| zeron_rpc::RpcError::Closed)??;
+                if let Some(space) = existing {
+                    return Ok(space);
+                }
+                let space_id = uuid::Uuid::new_v4().to_string();
+                let created = engine
                         .client()
                         .call(
                             methods::MUTATE,
@@ -6508,26 +6508,49 @@ impl Shell {
                             }),
                         )
                         .await?;
+                // Another client can win the (device, path) race. The mutation
+                // returns that client's actual row rather than our proposed id.
+                let space: Space = if let Some(space) = created.get("space") {
+                    serde_json::from_value(space.clone())
+                        .map_err(|error| zeron_rpc::RpcError::Failed(error.to_string()))?
+                } else {
+                    // Older coordinator engines still return only {ok: true}.
+                    // Resolve their authoritative row through the existing watch.
+                    let mut spaces = engine.client().subscribe_scoped(methods::WATCH_SPACES, serde_json::Value::Null).await?;
+                    let receive = async {
+                        while let Some(value) = spaces.recv().await {
+                            let rows: Vec<Space> = serde_json::from_value(value)
+                                .map_err(|error| zeron_rpc::RpcError::Failed(error.to_string()))?;
+                            if let Some(space) = rows.into_iter().find(|space|
+                                space.device_id == device.id && same_folder_path(&space.path, &repo.path)) {
+                                return Ok(space);
+                            }
+                        }
+                        Err(zeron_rpc::RpcError::Closed)
+                    };
+                    let timeout = cx.background_executor().timer(Duration::from_secs(30));
+                    match futures::future::select(Box::pin(receive), Box::pin(timeout)).await {
+                        futures::future::Either::Left((result, _)) => result?,
+                        futures::future::Either::Right(_) => return Err(zeron_rpc::RpcError::Failed(
+                            "Project was created, but its details did not arrive. Reopen the project picker to retry.".into())),
+                    }
+                };
+                if space.device_id != device.id || !same_folder_path(&space.path, &repo.path) {
+                    return Err(zeron_rpc::RpcError::Failed("Project creation returned a different folder".into()));
                 }
-                Ok::<_, zeron_rpc::RpcError>((space_id, repo.path))
+                Ok::<_, zeron_rpc::RpcError>(space)
             }
             .await;
             this.update(cx, |shell, cx| {
+                if shell.state.read(cx).engine().is_none_or(|current| !current.same_connection(&engine)) {
+                    return;
+                }
                 match result {
-                    Ok((space_id, path)) => {
+                    Ok(space) => {
+                        let space_id = space.id.clone();
                         shell.state.update(cx, |state, cx| {
                             if !state.spaces.iter().any(|space| space.id == space_id) {
-                                state.spaces.push(Space {
-                                    id: space_id.clone(),
-                                    device_id: device.id.clone(),
-                                    path,
-                                    name: None,
-                                    git_detected: true,
-                                    git_checked_at: None,
-                                    checkout_id: None,
-                                    repository_id: None,
-                                    created_at: Utc::now(),
-                                });
+                                state.spaces.push(space);
                                 cx.notify();
                             }
                         });
@@ -8549,6 +8572,11 @@ mod project_picker_tests {
         }], "nextCursor": cursor})
     }
 
+    fn created_project(request: &serde_json::Value, id: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "deviceId": request["params"]["deviceId"],
+            "path": request["params"]["path"], "gitDetected": true, "createdAt": "2026-10-15T00:00:00Z"})
+    }
+
     #[gpui::test]
     fn github_projects_page_and_search_on_the_selected_device(cx: &mut TestAppContext) {
         for device in ["local", "remote"] {
@@ -8630,7 +8658,8 @@ mod project_picker_tests {
             create[0]["params"]["path"],
             "/managed/github.com/octocat/website"
         );
-        engine.reply(&create[0], serde_json::json!({}));
+        engine.reply(&create[0], serde_json::json!({"ok": true,
+            "space": created_project(&create[0], create[0]["params"]["spaceId"].as_str().unwrap())}));
         cx.run_until_parked();
         window
             .read_with(cx, |shell, cx| {
@@ -8667,7 +8696,8 @@ mod project_picker_tests {
         engine.reply(&clone[0], serde_json::json!({"path": "/managed/website", "name": "website", "defaultBranch": "main"}));
         let create = engine.take(methods::MUTATE, cx);
         assert_eq!(create.len(), 1);
-        engine.reply(&create[0], serde_json::json!({}));
+        engine.reply(&create[0], serde_json::json!({"ok": true,
+            "space": created_project(&create[0], create[0]["params"]["spaceId"].as_str().unwrap())}));
         cx.run_until_parked();
         window
             .read_with(cx, |shell, cx| {
@@ -8703,6 +8733,60 @@ mod project_picker_tests {
                 assert!(shell.add_space.as_ref().unwrap().github.error.is_none());
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn github_projects_reconcile_a_concurrent_creator_on_current_and_older_engines(cx: &mut TestAppContext) {
+        for legacy in [false, true] {
+            let (window, _dir, mut engine) = picker(cx, "local");
+            go_github(window, cx);
+            let list = engine.take(methods::LIST_GITHUB_REPOS, cx);
+            engine.reply(&list[0], github_page("octocat/website", None));
+            cx.run_until_parked();
+            window.update(cx, |shell, _, cx| shell.add_space_open_active(cx)).unwrap();
+            let clone = engine.take(methods::CLONE_GITHUB_REPO, cx);
+            engine.reply(&clone[0], serde_json::json!({"path":"/managed/website", "name":"website", "defaultBranch":"main"}));
+            let create = engine.take(methods::MUTATE, cx);
+            let winner = created_project(&create[0], "concurrent-winner");
+            if legacy {
+                engine.reply(&create[0], serde_json::json!({"ok": true}));
+                let watch = engine.take(methods::WATCH_SPACES, cx);
+                assert_eq!(watch.len(), 1);
+                // The watch may initially hold a snapshot from before creation.
+                engine.send(serde_json::json!({"id": watch[0]["id"], "item": []}));
+                engine.send(serde_json::json!({"id": watch[0]["id"], "item": [winner]}));
+            } else {
+                engine.reply(&create[0], serde_json::json!({"ok": true, "space": winner}));
+            }
+            cx.run_until_parked();
+            window.read_with(cx, |shell, cx| {
+                let state = shell.state.read(cx);
+                assert_eq!(state.spaces.len(), 1);
+                assert_eq!(state.spaces[0].id, "concurrent-winner");
+                assert_eq!(state.selected_space.as_deref(), Some("concurrent-winner"));
+                assert_ne!(state.spaces[0].id, create[0]["params"]["spaceId"].as_str().unwrap());
+            }).unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn github_projects_do_not_restore_rows_after_the_workspace_runtime_changes(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = picker(cx, "local");
+        go_github(window, cx);
+        let list = engine.take(methods::LIST_GITHUB_REPOS, cx);
+        engine.reply(&list[0], github_page("octocat/website", None));
+        cx.run_until_parked();
+        window.update(cx, |shell, _, cx| shell.add_space_open_active(cx)).unwrap();
+        let clone = engine.take(methods::CLONE_GITHUB_REPO, cx);
+        engine.reply(&clone[0], serde_json::json!({"path":"/managed/website", "name":"website", "defaultBranch":"main"}));
+        let create = engine.take(methods::MUTATE, cx);
+        window.update(cx, |shell, _, cx| shell.state.update(cx, |state, cx| state.prepare_runtime_replacement(cx))).unwrap();
+        engine.reply(&create[0], serde_json::json!({"ok": true, "space": created_project(&create[0], "old-workspace")}));
+        cx.run_until_parked();
+        window.read_with(cx, |shell, cx| {
+            assert!(shell.state.read(cx).spaces.is_empty());
+            assert!(shell.state.read(cx).selected_space.is_none());
+        }).unwrap();
     }
 
     #[gpui::test]

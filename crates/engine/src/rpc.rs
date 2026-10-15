@@ -2598,6 +2598,12 @@ impl RpcService for EngineRpc {
             }
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
+                if let MutateParams::CreateSpace { space_id, device_id, path, name, git_detected } = &p {
+                    let space = self.workspace.get_or_create_space(
+                        space_id, device_id, path, name.clone(), *git_detected,
+                    ).map_err(|error| RpcError::Failed(error.to_string()))?;
+                    return RpcReply::value(&serde_json::json!({ "ok": true, "space": space }));
+                }
                 let sidebar_pins = matches!(&p, MutateParams::ChangeSidebarPin { .. });
                 self.mutate(p)?;
                 if sidebar_pins {

@@ -51,6 +51,7 @@ pub const HOME_FOLDER_MAX_RESULTS: usize = 50;
 const HOME_FOLDER_CANDIDATES: usize = 300;
 const HOME_FOLDER_PATH_CANDIDATES: usize = 2_000;
 const GITHUB_AVATAR_TIMEOUT: Duration = Duration::from_secs(6);
+const GITHUB_CLONE_MARKER: &str = "zeron-clone-complete";
 pub const GIT_HISTORY_DEFAULT_LIMIT: usize = 100;
 pub const GIT_HISTORY_MAX_LIMIT: usize = 200;
 
@@ -154,8 +155,9 @@ struct ReposInner {
     http: reqwest::Client,
     github_avatars: std::sync::Mutex<HashMap<String, String>>,
     github_avatar_pages: std::sync::Mutex<HashSet<String>>,
-    /// A retry from another client must wait for the first clone to finish.
-    github_clones: tokio::sync::Mutex<()>,
+    /// Only clones of the same destination wait on each other.
+    github_clones: std::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    registry_lock: std::sync::Mutex<()>,
     /// The engine's one workspace search index set (`@`, file tree, cmd+K).
     workspace_search: WorkspaceSearch,
     /// HEAD commit → its trunk's root commit. History behind a commit never
@@ -227,7 +229,8 @@ impl Repos {
                 github_avatars: std::sync::Mutex::new(HashMap::new()),
                 trunk_roots: std::sync::Mutex::new(HashMap::new()),
                 github_avatar_pages: std::sync::Mutex::new(HashSet::new()),
-                github_clones: tokio::sync::Mutex::new(()),
+                github_clones: std::sync::Mutex::new(HashMap::new()),
+                registry_lock: std::sync::Mutex::new(()),
                 workspace_search: WorkspaceSearch::new(),
             }),
         }
@@ -258,16 +261,20 @@ impl Repos {
     }
 
     fn save_paths(&self, paths: &[String]) -> Result<(), EngineError> {
+        use std::io::Write as _;
         let mut seen = HashSet::new();
         let deduped: Vec<&String> = paths.iter().filter(|p| seen.insert(p.as_str())).collect();
         let json = serde_json::to_string_pretty(&deduped)
             .map_err(|e| EngineError::Other(format!("repos registry serialize: {e}")))?;
         std::fs::create_dir_all(&self.inner.data_dir)?;
-        std::fs::write(self.registry_path(), json)?;
+        let mut file = tempfile::NamedTempFile::new_in(&self.inner.data_dir)?;
+        file.write_all(json.as_bytes())?;
+        file.persist(self.registry_path()).map_err(|error| EngineError::from(error.error))?;
         Ok(())
     }
 
     fn register(&self, path: &str) -> Result<(), EngineError> {
+        let _registry = self.inner.registry_lock.lock().unwrap_or_else(|error| error.into_inner());
         let mut paths = self.load_paths();
         paths.push(path.to_string());
         self.save_paths(&paths)
@@ -666,13 +673,45 @@ impl Repos {
         if !crate::source_control::valid_pr_repository(repository) {
             return Err(EngineError::Other("Invalid GitHub repository".into()));
         }
-        let _clone = self.inner.github_clones.lock().await;
+        // Queueing, cloning and verification share one budget below the relay's
+        // 15-minute deadline. A failed predecessor cannot give a retry a fresh
+        // 14-minute budget after it has already waited in the queue.
+        let deadline = tokio::time::Instant::now() + crate::source_control::GITHUB_CLONE_TIMEOUT;
+        tokio::time::timeout_at(deadline,
+            self.clone_github_repo_inner(github, repository, deadline),
+        ).await.map_err(|_| EngineError::Other("GitHub clone timed out".into()))?
+    }
+
+    async fn clone_github_repo_inner(
+        &self,
+        github: &crate::source_control::GitHubCli,
+        repository: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<Repo, EngineError> {
+        let clone_lock = {
+            let mut locks = self.inner.github_clones.lock().unwrap_or_else(|error| error.into_inner());
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            let entry = locks.entry(repository.to_ascii_lowercase()).or_default();
+            match entry.upgrade() {
+                Some(lock) => lock,
+                None => {
+                    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                    *entry = std::sync::Arc::downgrade(&lock);
+                    lock
+                }
+            }
+        };
+        let _clone = clone_lock.lock().await;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(EngineError::Other("GitHub clone timed out".into()));
+        }
         let target = self
             .inner
             .data_dir
             .join("repos")
             .join("github.com")
             .join(repository);
+        let marker = target.join(".git").join(GITHUB_CLONE_MARKER);
         if target.exists() {
             let remote = self
                 .git(&["remote", "get-url", "origin"], Some(&target))
@@ -692,12 +731,21 @@ impl Repos {
                     target.display()
                 )));
             }
+            if std::fs::read_to_string(&marker).ok().as_deref() != Some(&repository.to_ascii_lowercase()) {
+                return Err(EngineError::Other(format!(
+                    "Clone did not finish: {}. Existing files were preserved. Repair the checkout and add it as a folder, or move it aside before retrying.",
+                    target.display()
+                )));
+            }
         } else {
             std::fs::create_dir_all(target.parent().expect("repository has an owner"))?;
             github
                 .clone_repository(repository, &target)
                 .await
                 .map_err(|error| EngineError::Other(error.to_string()))?;
+            // Git can leave a valid repository behind when checkout fails.
+            // Only a successful clone may be reused on a later attempt.
+            std::fs::write(&marker, repository.to_ascii_lowercase())?;
         }
         self.register(&target.to_string_lossy())?;
         self.to_repo(&target).await

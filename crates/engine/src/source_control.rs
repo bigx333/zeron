@@ -24,6 +24,7 @@ use zeron_proto::{
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const GITHUB_CLONE_TIMEOUT: Duration = Duration::from_secs(14 * 60);
 const GIT_OUTPUT_LIMIT: usize = 64 * 1024;
 /// `ssh -G` only reads configuration; it never connects.
 const SSH_CONFIG_TIMEOUT: Duration = Duration::from_secs(3);
@@ -458,7 +459,7 @@ impl GitHubCli {
             ("GIT_TERMINAL_PROMPT".into(), "0".into()),
             ("GCM_INTERACTIVE".into(), "never".into()),
         ]);
-        request.timeout = Duration::from_secs(14 * 60);
+        request.timeout = GITHUB_CLONE_TIMEOUT;
         let output = self.runner.run(request).await.map_err(classify_run_error)?;
         if !output.success {
             return Err(classify_github_failure(&output.stderr));
@@ -2441,6 +2442,8 @@ mod tests {
     struct LocalCloneRunner {
         source: PathBuf,
         requests: Mutex<Vec<ProcessRequest>>,
+        barrier: Option<Arc<tokio::sync::Barrier>>,
+        fail_checkout: bool,
     }
 
     #[async_trait]
@@ -2448,24 +2451,21 @@ mod tests {
         async fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError> {
             let target = PathBuf::from(&request.args[3]);
             self.requests.lock().unwrap().push(request.clone());
-            run_git(
-                self.source.parent().unwrap(),
-                &[
-                    "clone",
-                    "--",
-                    &self.source.to_string_lossy(),
-                    &target.to_string_lossy(),
-                ],
-            );
+            if let Some(barrier) = &self.barrier { barrier.wait().await; }
+            let source = self.source.to_string_lossy();
+            let destination = target.to_string_lossy();
+            let mut args = vec!["clone"];
+            if self.fail_checkout { args.push("--no-checkout"); }
+            args.extend(["--", &source, &destination]);
+            run_git(self.source.parent().unwrap(), &args);
             run_git(&target, &["remote", "set-url", "origin", &request.args[2]]);
+            if self.fail_checkout { return command_failure("fatal: unable to checkout working tree"); }
             command_success("")
         }
     }
 
-    #[tokio::test]
-    async fn github_projects_clone_reuse_completed_checkouts_and_preserve_other_folders() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("source");
+    fn local_clone_source(root: &Path) -> PathBuf {
+        let source = root.join("source");
         std::fs::create_dir(&source).unwrap();
         run_git(&source, &["init", "-q", "-b", "main"]);
         std::fs::write(source.join("README.md"), "Project contents").unwrap();
@@ -2482,9 +2482,18 @@ mod tests {
                 "feat: seed fixture",
             ],
         );
+        source
+    }
+
+    #[tokio::test]
+    async fn github_projects_clone_reuse_completed_checkouts_and_preserve_other_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = local_clone_source(dir.path());
         let runner = Arc::new(LocalCloneRunner {
             source,
             requests: Mutex::new(Vec::new()),
+            barrier: None,
+            fail_checkout: false,
         });
         let github = GitHubCli::with_runner(runner.clone());
         let repos = crate::Repos::new(&dir.path().join("engine"), "local");
@@ -2534,6 +2543,83 @@ mod tests {
                 .contains(&("GIT_TERMINAL_PROMPT".into(), "0".into()))
         );
         assert!(requests[0].timeout > GITHUB_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn github_projects_failed_checkout_is_preserved_and_never_reused_as_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(LocalCloneRunner { source: local_clone_source(dir.path()),
+            requests: Mutex::new(Vec::new()), barrier: None, fail_checkout: true });
+        let github = GitHubCli::with_runner(runner.clone());
+        let repos = crate::Repos::new(&dir.path().join("engine"), "local");
+        assert!(repos.clone_github_repo(&github, "octocat/project").await.is_err());
+        let checkout = dir.path().join("engine/repos/github.com/octocat/project");
+        assert!(checkout.join(".git").is_dir());
+        assert!(!checkout.join("README.md").exists());
+        let error = repos.clone_github_repo(&github, "octocat/project").await.unwrap_err();
+        assert!(error.to_string().contains("Clone did not finish"));
+        assert!(checkout.join(".git").is_dir());
+        assert!(repos.list().await.is_empty());
+        assert_eq!(runner.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn github_projects_different_destinations_clone_concurrently_without_losing_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let runner = Arc::new(LocalCloneRunner { source: local_clone_source(dir.path()),
+            requests: Mutex::new(Vec::new()), barrier: Some(barrier.clone()), fail_checkout: false });
+        let github = GitHubCli::with_runner(runner.clone());
+        let repos = crate::Repos::new(&dir.path().join("engine"), "local");
+        let first = { let (repos, github) = (repos.clone(), github.clone());
+            tokio::spawn(async move { repos.clone_github_repo(&github, "octocat/project").await }) };
+        let second = { let (repos, github) = (repos.clone(), github.clone());
+            tokio::spawn(async move { repos.clone_github_repo(&github, "organization/project").await }) };
+        tokio::time::timeout(Duration::from_secs(2), barrier.wait()).await
+            .expect("unrelated clones must both start without waiting for one another");
+        let (first, second) = tokio::join!(first, second);
+        assert_ne!(first.unwrap().unwrap().path, second.unwrap().unwrap().path);
+        assert_eq!(repos.list().await.len(), 2);
+        assert_eq!(runner.requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn github_projects_clone_deadline_includes_waiting_for_the_same_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(LocalCloneRunner { source: local_clone_source(dir.path()),
+            requests: Mutex::new(Vec::new()), barrier: Some(Arc::new(tokio::sync::Barrier::new(2))), fail_checkout: false });
+        let github = GitHubCli::with_runner(runner.clone());
+        let repos = crate::Repos::new(&dir.path().join("engine"), "local");
+        let first = { let (repos, github) = (repos.clone(), github.clone());
+            tokio::spawn(async move { repos.clone_github_repo(&github, "octocat/project").await }) };
+        tokio::task::yield_now().await;
+        let second = { let (repos, github) = (repos.clone(), github.clone());
+            tokio::spawn(async move { repos.clone_github_repo(&github, "octocat/project").await }) };
+        tokio::task::yield_now().await;
+        tokio::time::advance(GITHUB_CLONE_TIMEOUT).await;
+        for outcome in [first.await.unwrap(), second.await.unwrap()] {
+            assert!(outcome.unwrap_err().to_string().contains("timed out"));
+        }
+        assert_eq!(runner.requests.lock().unwrap().len(), 1);
+        assert!(repos.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn github_projects_creation_returns_the_authoritative_id_for_duplicate_requests() {
+        use serde_json::json;
+        use zeron_rpc::methods;
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(dir.path(), Arc::new(crate::HarnessRegistry::new()),
+            zeron_proto::HarnessId::Mock, None).unwrap();
+        let client = zeron_rpc::memory_client(core.rpc_service());
+        let request = |id| json!({"op":"createSpace", "spaceId":id,
+            "deviceId":core.device_id, "path":"/managed/project", "gitDetected":true});
+        let (first, second) = tokio::join!(client.call(methods::MUTATE, request("first")),
+            client.call(methods::MUTATE, request("second")));
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_eq!(first["space"]["id"], second["space"]["id"]);
+        assert_eq!(first["space"]["path"], "/managed/project");
+        assert_eq!(core.workspace.read_spaces().unwrap().len(), 1);
     }
 
     /// Real engine dispatch, wire envelopes and GitHub decoding; only subprocess
