@@ -275,7 +275,9 @@ pub struct ColorParseError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AccentPreset {
+    /// Sapphire from the Zeron Nova icon; this fork's default accent.
     #[default]
+    Nova,
     Zeron,
     Orange,
     Amber,
@@ -286,7 +288,8 @@ pub enum AccentPreset {
 }
 
 impl AccentPreset {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
+        Self::Nova,
         Self::Zeron,
         Self::Orange,
         Self::Amber,
@@ -298,6 +301,7 @@ impl AccentPreset {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Nova => "Nova",
             Self::Zeron => "Zeron",
             Self::Orange => "Orange",
             Self::Amber => "Amber",
@@ -310,6 +314,7 @@ impl AccentPreset {
 
     pub fn color(self, appearance: Appearance) -> Color {
         let (dark, light) = match self {
+            Self::Nova => ("#57a8ff", "#105fd9"),
             Self::Zeron => ("#8b7cf6", "#5b43e8"),
             Self::Orange => ("#fb923c", "#c2410c"),
             Self::Amber => ("#fbbf24", "#a16207"),
@@ -324,12 +329,17 @@ impl AccentPreset {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AccentSelection {
-    #[default]
     ThemeDefault,
     Preset(AccentPreset),
+}
+
+impl Default for AccentSelection {
+    fn default() -> Self {
+        Self::Preset(AccentPreset::Nova)
+    }
 }
 
 impl AccentSelection {
