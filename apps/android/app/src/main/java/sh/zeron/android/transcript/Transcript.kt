@@ -73,6 +73,8 @@ import kotlin.math.pow
 class TranscriptActions(
     val openUrl: (String) -> Unit,
     val loadImage: suspend (String) -> androidx.compose.ui.graphics.ImageBitmap?,
+    /** An already-decoded image, so a thumbnail scrolled back in never flashes its placeholder. */
+    val cachedImage: (String) -> androidx.compose.ui.graphics.ImageBitmap? = { null },
     val showText: (title: String, text: String, mono: Boolean) -> Unit,
     /** Open an attachment full size (a tapped image, or an image chip's upload). */
     val openImage: (String) -> Unit = {},
@@ -275,7 +277,9 @@ private fun RowHost(
 
 /** Link taps (row coordinates) and the long-press menu. */
 private fun Modifier.pointerTaps(model: RowModel, d: Float, actions: TranscriptActions, onLongPress: (Offset) -> Unit) =
-    pointerInput(model) {
+    // A host change replaces actions without necessarily rebuilding the row.
+    // Restart hit testing so file links use the current host and density.
+    pointerInput(model, actions, d) {
         detectTapGestures(
             onTap = { pos ->
                 val x = pos.x / d

@@ -40,7 +40,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     private(set) var following = true
     var onFollowChange: ((Bool) -> Void)?
     var onDistanceFromBottom: ((CGFloat) -> Void)?
-    var imageLoader: ((String, UIImageView) -> Void)?
+    var imageLoader: ((String, RemoteImageView) -> Void)?
     /// An attachment's picture, for an image chip opened full size.
     var imageFetcher: ((String) async -> UIImage?)?
 
@@ -581,10 +581,20 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
             guard let reference = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "ref" })?.value
             else { return }
-            Task { @MainActor [weak self, weak view, weak vc] in
-                guard let image = await self?.imageFetcher?(reference), let view, let vc else { return }
-                vc.present(ImageViewer(image: image, source: view), animated: true)
+            openImage(reference, source: view, from: vc)
+            return
+        }
+        // A path on the chat's host: only it can read the file, so fetch it from there.
+        if url.scheme == nil || url.isFileURL {
+            let host = url.host ?? ""
+            guard (host.isEmpty || (url.isFileURL && host.lowercased() == "localhost")),
+                  let path = url.path(percentEncoded: true).removingPercentEncoding,
+                  path.hasPrefix("/"), !path.contains("\0")
+            else {
+                Self.cantOpen(url.absoluteString, from: vc)
+                return
             }
+            openImage(path, source: view, from: vc)
             return
         }
         if url.scheme == "http" || url.scheme == "https" {
@@ -592,11 +602,33 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
             safari.preferredControlTintColor = Palette.accent
             vc.present(safari, animated: true)
         } else {
-            UIApplication.shared.open(url)
+            UIApplication.shared.open(url) { opened in
+                if !opened { Self.cantOpen(url.absoluteString, from: vc) }
+            }
         }
     }
 
-    func rowView(_ view: RowView, imageFor reference: String, into imageView: UIImageView) {
+    private func openImage(_ reference: String, source: UIView, from vc: UIViewController) {
+        Task { @MainActor [weak self, weak source, weak vc] in
+            let image = await self?.imageFetcher?(reference)
+            guard !Task.isCancelled, let source, let vc,
+                  vc.viewIfLoaded?.window != nil, vc.presentedViewController == nil
+            else { return }
+            guard let image else {
+                Self.cantOpen((reference as NSString).lastPathComponent, from: vc)
+                return
+            }
+            vc.present(ImageViewer(image: image, source: source), animated: true)
+        }
+    }
+
+    private static func cantOpen(_ what: String, from vc: UIViewController) {
+        let alert = UIAlertController(title: "Couldn't open \(what)", message: nil, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        vc.present(alert, animated: true)
+    }
+
+    func rowView(_ view: RowView, imageFor reference: String, into imageView: RemoteImageView) {
         imageLoader?(reference, imageView)
     }
 

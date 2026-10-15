@@ -69,6 +69,9 @@ pub(crate) enum PBlock {
     List { items: Vec<PItem>, marker_w: f32 },
     Table(Box<PTable>),
     Rule,
+    /// A paragraph of nothing but host images (`![…](/abs/path.png)`): drawn
+    /// as thumbnails that load from the chat's device and open full size.
+    Images(Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +119,10 @@ pub(crate) fn prepare_runs(ctx: &mut Ctx, runs: &[InlineRun], kind: TextKind, mu
             continue;
         }
         let link = link.map(|url| {
+            // Bare absolute destinations are host paths, not URL components.
+            // Encode before the platform parses them, preserving literal %, #
+            // and ? in filenames just as the thumbnail reference does.
+            let url = if url.starts_with('/') && !url.starts_with("//") { path_link(&url) } else { url };
             let ix = links.iter().position(|l| *l == url).unwrap_or_else(|| {
                 links.push(url);
                 links.len() - 1
@@ -220,7 +227,10 @@ pub(crate) fn prepare_plain(
 
 pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: bool) -> PBlock {
     match block {
-        Block::Paragraph { runs } => PBlock::Text(prepare_runs(ctx, runs, TextKind::Body, muted)),
+        Block::Paragraph { runs } => match host_images(runs) {
+            Some(paths) => PBlock::Images(paths),
+            None => PBlock::Text(prepare_runs(ctx, runs, TextKind::Body, muted)),
+        },
         Block::Heading { level, runs } => {
             PBlock::Heading(prepare_runs(ctx, runs, TextKind::Heading(*level), muted))
         }
@@ -286,6 +296,76 @@ pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: b
         }
         Block::Rule => PBlock::Rule,
     }
+}
+
+/// The host paths of a paragraph made only of images (whitespace aside) that
+/// live on the chat's device; `None` when anything else is in it, so mixed
+/// text keeps its inline flow.
+fn host_images(runs: &[InlineRun]) -> Option<Vec<String>> {
+    let mut paths = Vec::new();
+    for run in runs {
+        match &run.style.image {
+            Some(img) if img.link.is_none() => paths.push(host_path(&img.source)?),
+            Some(_) => return None,
+            None if run.text.trim().is_empty() => {}
+            None => return None,
+        }
+    }
+    (!paths.is_empty()).then_some(paths)
+}
+
+/// An absolute path or `file://` URL as a host path (the form
+/// `ReadAttachmentChunk` reads); remote and relative sources are `None`.
+fn host_path(source: &str) -> Option<String> {
+    let path = if source.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("file://")) {
+        let rest = &source[7..];
+        let slash = rest.find('/')?;
+        let authority = &rest[..slash];
+        if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
+            return None;
+        }
+        // Query and fragment are URL components; escaped delimiters belong to
+        // the path and must only be decoded after splitting them off.
+        percent_decode(rest[slash..].split(['?', '#']).next()?)?
+    } else {
+        if source.starts_with("//") {
+            return None; // A network-path URL, not a path on the chat's host.
+        }
+        source.to_owned()
+    };
+    (path.starts_with('/') && !path.contains('\0')).then_some(path)
+}
+
+fn path_link(path: &str) -> String {
+    let mut url = String::from("file://");
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~') {
+            url.push(byte as char);
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    url
+}
+
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = s.get(i + 1..i + 3)?;
+            if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 fn syntax_color(kind: zeron_syntax::HighlightKind) -> ColorRole {
@@ -422,6 +502,9 @@ pub(crate) mod geom {
     pub const CELL_PAD_X: f32 = 10.0;
     pub const CELL_PAD_Y: f32 = 7.0;
     pub const RULE_HEIGHT: f32 = 21.0;
+    pub const IMAGE: f32 = 260.0;
+    pub const IMAGE_GAP: f32 = 8.0;
+    pub const IMAGE_RADIUS: f32 = 14.0;
 }
 
 /// Layout scale (text scale) for geometry constants.
@@ -589,6 +672,22 @@ pub(crate) fn place(block: &PBlock, px: Px, x: f32, y: f32, width: f32, out: Opt
                 out.fill(x, y + (h / 2.0).floor(), width, 1.0, 0.0, ColorRole::Rule);
             }
             h
+        }
+        PBlock::Images(paths) => {
+            // Squares that wrap like words, as image rows draw theirs.
+            let side = px.v(IMAGE).min(width).floor();
+            let gap = px.v(IMAGE_GAP);
+            let per_line = (((width + gap) / (side + gap)).floor() as usize).max(1);
+            let lines = paths.len().div_ceil(per_line);
+            if let Some(out) = out {
+                for (i, path) in paths.iter().enumerate() {
+                    let ix = x + (i % per_line) as f32 * (side + gap);
+                    let iy = y + (i / per_line) as f32 * (side + gap);
+                    out.fill(ix, iy, side, side, px.v(IMAGE_RADIUS), ColorRole::ChipBackground);
+                    out.widget(WidgetKind::Image { reference: path.clone() }, (ix, iy, side, side), None);
+                }
+            }
+            lines as f32 * side + lines.saturating_sub(1) as f32 * gap
         }
     }
 }

@@ -3,6 +3,7 @@ package sh.zeron.android.ui
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.widget.Toast
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -78,9 +79,11 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.transcript.ImageCache
 import sh.zeron.android.design.Geist
 import sh.zeron.android.design.GeistMono
 import sh.zeron.android.transcript.Transcript
@@ -134,26 +137,39 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
     val scope = rememberCoroutineScope()
     var sheet by remember { mutableStateOf<TextSheet?>(null) }
     var viewing by remember { mutableStateOf<ImageBitmap?>(null) }
-    val actions = remember(chatId) {
+    val actions = remember(chatId, composer.host.deviceId) {
+        val device = composer.host.deviceId
         suspend fun load(ref: String): ImageBitmap? {
-            val device = handle.composer().host.deviceId
+            val key = ImageCache.key(device, ref)
+            ImageCache[key]?.let { return it }
             return runCatching {
                 val bytes = core.readAttachment(device, ref)
                 withContext(Dispatchers.Default) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }
-            }.getOrNull()
+            }.onFailure { if (it is CancellationException) throw it }.getOrNull()?.also { ImageCache.put(key, it) }
         }
-        val open: (String) -> Unit = { ref -> scope.launch { load(ref)?.let { viewing = it } } }
+        fun cantOpen(what: String) = Toast.makeText(context, "Couldn't open $what", Toast.LENGTH_SHORT).show()
+        val open: (String) -> Unit = { ref ->
+            scope.launch { load(ref)?.let { viewing = it } ?: cantOpen(ref.substringAfterLast('/')) }
+        }
         TranscriptActions(
             openUrl = { url ->
                 val uri = Uri.parse(url)
-                when (uri.scheme) {
+                when (uri.scheme?.lowercase()) {
                     "http", "https" -> CustomTabsIntent.Builder().build().launchUrl(context, uri)
                     // An image chip opens its upload full size, as its thumbnail did.
-                    "zeron-preview" -> uri.getQueryParameter("ref")?.let(open)
-                    else -> runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                    "zeron-preview" -> uri.getQueryParameter("ref")?.let(open) ?: cantOpen(url)
+                    // A path on the chat's host: only it can read the file, so fetch it from there.
+                    null, "file" -> {
+                        val local = uri.authority.isNullOrEmpty() ||
+                            (uri.scheme != null && uri.authority.equals("localhost", ignoreCase = true))
+                        val path = if (uri.scheme == null && local) url else uri.path
+                        path?.takeIf { local && it.startsWith("/") && '\u0000' !in it }?.let(open) ?: cantOpen(url)
+                    }
+                    else -> runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }.onFailure { cantOpen(url) }
                 }
             },
             loadImage = ::load,
+            cachedImage = { ref -> ImageCache[ImageCache.key(device, ref)] },
             showText = { title, text, mono -> sheet = TextSheet(title, text, mono) },
             openImage = open,
         )
