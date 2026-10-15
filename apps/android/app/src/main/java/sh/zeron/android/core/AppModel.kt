@@ -611,8 +611,8 @@ class AppModel(private val app: Application) {
         return true
     }
 
-    /** Back into the inbox before the deadline. */
-    fun wake(id: String): Boolean = report("wake", "Couldn't wake it. Try again.") { it.wakeSession(id) }
+    /** Back into the inbox before the deadline (a snooze's Undo). */
+    fun wake(id: String): Boolean = report("wake", "Couldn't undo the snooze. Try again.") { it.wakeSession(id) }
     fun rename(id: String, title: String) = attempt("rename") { _client.value?.renameSession(id, title) }
     fun markSeen(id: String) = attempt("seen") { _client.value?.markSeen(id) }
     fun setSectionCollapsed(id: String, collapsed: Boolean) = attempt("collapse") { _client.value?.setSectionCollapsed(id, collapsed) }

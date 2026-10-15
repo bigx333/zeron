@@ -69,13 +69,13 @@ class SheetCallbacks(
     val settle: () -> Unit,
     val unsettle: () -> Unit,
     val snooze: (SnoozeOption) -> Unit,
-    val wake: () -> Unit,
 )
 
 /**
  * A session's T3 actions as a bottom sheet — the touch home of everything the
- * desktop puts on hover: snooze lengths up top as big tap targets, Wake early
- * for a snoozed row, then pin / move / rename / settle.
+ * desktop puts on hover: snooze lengths up top as big tap targets (a snoozed
+ * row picks a new length; sending to it is what un-snoozes), then pin / move /
+ * rename / settle.
  */
 @Composable
 fun SessionActionsSheet(row: SessionRow, mode: SidebarMode, callbacks: SheetCallbacks, onDismiss: () -> Unit) {
@@ -107,10 +107,7 @@ fun SessionActionsSheet(row: SessionRow, mode: SidebarMode, callbacks: SheetCall
             }
             if (!row.archived) {
                 if (row.snoozed) {
-                    SnoozedCard(row) {
-                        haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-                        then(callbacks.wake)
-                    }
+                    SnoozedCard(row)
                     Spacer(Modifier.height(16.dp))
                 }
                 Text(
@@ -202,9 +199,9 @@ fun SnoozeChoices(onPick: (SnoozeOption) -> Unit) {
     }
 }
 
-/** "Snoozed · in 42m" with Wake now, atop the sheet for a snoozed row. */
+/** "Snoozed · Wakes in 42m" atop the sheet for a snoozed row (sending to the thread un-snoozes it). */
 @Composable
-private fun SnoozedCard(row: SessionRow, onWake: () -> Unit) {
+private fun SnoozedCard(row: SessionRow) {
     Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer) {
         Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             ZIcon(ZIcons.Snooze, null, Modifier.size(22.dp))
@@ -212,11 +209,6 @@ private fun SnoozedCard(row: SessionRow, onWake: () -> Unit) {
             Column(Modifier.weight(1f)) {
                 Text("Snoozed", style = MaterialTheme.typography.titleMediumEmphasized)
                 Text("Wakes ${snoozeCaption(row.snoozeLabel, row.snoozedUntilMs)}", style = MaterialTheme.typography.bodyMedium)
-            }
-            androidx.compose.material3.Button(onClick = onWake, shapes = ButtonDefaults.shapes()) {
-                ZIcon(ZIcons.Wake, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Wake now")
             }
         }
     }

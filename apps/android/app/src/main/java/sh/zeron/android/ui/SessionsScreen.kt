@@ -544,8 +544,9 @@ private class SwipeAction(val label: String, val icon: Int, val run: () -> Boole
 
 /**
  * Default: swipe right to pin (or unpin), left to archive.
- * T3: right to snooze (the sheet's lengths) or wake a snoozed row, left to
- * settle; a settled row swipes left to unsettle.
+ * T3: right to snooze (the sheet's lengths; a snoozed row picks a new one),
+ * left to settle; a settled row swipes left to unsettle. Sending to a
+ * snoozed row is what brings it back.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -560,8 +561,6 @@ private fun SwipeableSessionRow(row: SessionRow, index: Int, count: Int, actions
         !mode.isT3 -> SwipeAction(if (row.pinned) "Unpin" else "Pin", ZIcons.Pin, { model.setPinned(row.id, !row.pinned); true }, keepsRow = true) to
             SwipeAction("Archive", ZIcons.Archive, { actions.archive(row) }, keepsRow = false)
         row.archived -> null to SwipeAction(mode.unsettle, ZIcons.Unarchive, { model.unarchive(row.id) }, keepsRow = false)
-        row.snoozed -> SwipeAction("Wake", ZIcons.Wake, { model.wake(row.id) }, keepsRow = false) to
-            SwipeAction(mode.settle, ZIcons.Settle, { actions.archive(row) }, keepsRow = false)
         else -> SwipeAction("Snooze", ZIcons.Snooze, { sheet.value = true; true }, keepsRow = true) to
             SwipeAction(mode.settle, ZIcons.Settle, { actions.archive(row) }, keepsRow = false)
     }
@@ -675,7 +674,6 @@ fun SessionItem(
                 MenuAction(if (row.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(row.id, !row.pinned) },
                 MenuAction("Move to section…", ZIcons.Folder) { moving = true },
                 MenuAction("Rename…", ZIcons.Rename) { renaming = true },
-                if (row.snoozed) MenuAction("Wake now", ZIcons.Wake) { model.wake(row.id) } else null,
                 MenuAction(mode.settle, ZIcons.Archive, destructive = true) { actions.archive(row) },
             ),
         )
@@ -703,7 +701,6 @@ fun SessionItem(
                 settle = { actions.archive(row) },
                 unsettle = { model.unarchive(row.id) },
                 snooze = { model.snooze(row.id, it) },
-                wake = { model.wake(row.id) },
             ),
             onDismiss = { sheet.value = false },
         )

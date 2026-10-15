@@ -100,7 +100,6 @@ object ZIcons {
     val Inbox = R.drawable.zi_checklist
     val Snooze = R.drawable.zi_clock_circle
     val Settle = R.drawable.zi_queue_check
-    val Wake = R.drawable.zi_bell
 }
 
 @Composable

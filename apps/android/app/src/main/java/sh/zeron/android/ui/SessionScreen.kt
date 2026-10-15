@@ -311,7 +311,6 @@ fun SessionScreen(
                                 MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
                                 // T3: snooze lengths in a sheet (touch, no hover); a snoozed chat wakes from here.
                                 row?.takeIf { mode.isT3 && !it.archived }?.let { MenuAction(if (it.snoozed) "Snooze again…" else "Snooze…", ZIcons.Snooze) { snoozing = true } },
-                                row?.takeIf { it.snoozed }?.let { MenuAction("Wake now", ZIcons.Wake) { model.wake(chatId) } },
                                 row?.let { r ->
                                     if (r.archived) {
                                         MenuAction(mode.unsettle, ZIcons.Unarchive) { model.unarchive(chatId) }
