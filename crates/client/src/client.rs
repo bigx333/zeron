@@ -268,6 +268,21 @@ impl ClientInner {
         let _ = self.registry_write(|doc| doc.set_chat_seen(chat_id, Utc::now()));
     }
 
+    /// Sending a message resumes a parked thread; viewing, warming its
+    /// session and receiving agent output leave the snooze untouched.
+    pub(crate) fn clear_snooze_on_send(self: &Arc<Self>, chat_id: &str) {
+        if !self
+            .workspace
+            .chat(chat_id)
+            .is_some_and(|chat| chat.snoozed_until.is_some())
+        {
+            return;
+        }
+        if let Err(error) = self.registry_write(|doc| doc.set_chat_snoozed_until(chat_id, None)) {
+            tracing::warn!(%chat_id, %error, "could not clear snooze on send");
+        }
+    }
+
     pub(crate) fn recompute_connectivity(self: &Arc<Self>) {
         let raw = match self.live() {
             None => RawConnectivity {

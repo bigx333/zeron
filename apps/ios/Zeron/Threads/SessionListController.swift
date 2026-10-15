@@ -293,26 +293,19 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             restore.backgroundColor = Palette.accent
             return UISwipeActionsConfiguration(actions: [restore])
         }
-        if app.t3Mode, let vm = sessions[id] {
-            // Full swipe settles; the second action parks it until later.
+        if app.t3Mode {
+            // Full swipe settles; the second parks it (or re-times a snooze).
+            // Snoozes clear at their deadline or on a sent message, never by a control.
             let settle = UIContextualAction(style: .destructive, title: "Settle") { [weak self] _, _, done in
                 done(self?.app.archive(id) ?? false)
             }
             settle.image = UIImage(systemName: "checkmark")
             settle.backgroundColor = StatusTone.done.withAlphaComponent(1)
-            let later: UIContextualAction
-            if vm.snoozed {
-                later = UIContextualAction(style: .normal, title: "Wake") { [weak self] _, _, done in
-                    done(self?.app.wake(id) ?? false)
-                }
-                later.image = UIImage(systemName: "sun.max.fill")
-            } else {
-                later = UIContextualAction(style: .normal, title: "Snooze") { [weak self] _, view, done in
-                    self?.presentSnoozeSheet(id, from: view)
-                    done(true)
-                }
-                later.image = UIImage(systemName: "clock.fill")
+            let later = UIContextualAction(style: .normal, title: "Snooze") { [weak self] _, view, done in
+                self?.presentSnoozeSheet(id, from: view)
+                done(true)
             }
+            later.image = UIImage(systemName: "clock.fill")
             later.backgroundColor = UIColor(hex: 0x5E6AD2)
             return UISwipeActionsConfiguration(actions: [settle, later])
         }
@@ -353,7 +346,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         var items: [UIMenuElement] = [
             UIAction(title: vm.pinned ? "Unpin" : "Pin", image: UIImage(systemName: vm.pinned ? "pin.slash" : "pin")) { [weak self] _ in self?.app.setPinned(id, !vm.pinned) },
         ]
-        if app.t3Mode { items.append(Self.snoozeMenu(app: app, id: id, snoozed: vm.snoozed)) }
+        if app.t3Mode { items.append(Self.snoozeMenu(app: app, id: id)) }
         items += [
             moveMenu(id),
             UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { [weak self] _ in self?.rename(id) },
@@ -383,18 +376,16 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         return .customView(configuration: .init(customView: button, placement: .trailing(), reservedLayoutWidth: .custom(44), maintainsFixedSize: true))
     }
 
-    /// Snooze presets as a submenu, or Wake Now for a snoozed session.
-    static func snoozeMenu(app: AppModel, id: String, snoozed: Bool) -> UIMenuElement {
-        if snoozed {
-            return UIAction(title: "Wake Now", image: UIImage(systemName: "sun.max")) { _ in app.wake(id) }
-        }
-        return UIMenu(title: "Snooze", image: UIImage(systemName: "clock"), children: AppModel.snoozePresets.map { preset in
+    /// Snooze presets as a submenu. A snoozed session offers them too, to
+    /// re-time it; its deadline or a sent message is what clears the snooze.
+    static func snoozeMenu(app: AppModel, id: String) -> UIMenuElement {
+        UIMenu(title: "Snooze", image: UIImage(systemName: "clock"), children: AppModel.snoozePresets.map { preset in
             UIAction(title: preset.title) { _ in app.snooze(id, seconds: preset.seconds, title: preset.title) }
         })
     }
 
     func presentSnoozeSheet(_ id: String, from view: UIView) {
-        let sheet = UIAlertController(title: "Snooze", message: "It comes back to the inbox when the time is up.", preferredStyle: .actionSheet)
+        let sheet = UIAlertController(title: "Snooze", message: "It comes back to the inbox when the time is up, or when you send it a message.", preferredStyle: .actionSheet)
         for preset in AppModel.snoozePresets {
             sheet.addAction(UIAlertAction(title: preset.title, style: .default) { [weak self] _ in
                 self?.app.snooze(id, seconds: preset.seconds, title: preset.title)
@@ -419,15 +410,11 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             return true
         }]
         if app.t3Mode {
-            out.append(vm.snoozed
-                ? UIAccessibilityCustomAction(name: "Wake Now") { [weak self] _ in
-                    self?.app.wake(id) ?? false
-                }
-                : UIAccessibilityCustomAction(name: "Snooze") { [weak self, weak cell] _ in
-                    guard let self, let cell else { return false }
-                    self.presentSnoozeSheet(id, from: cell)
-                    return true
-                })
+            out.append(UIAccessibilityCustomAction(name: "Snooze") { [weak self, weak cell] _ in
+                guard let self, let cell else { return false }
+                self.presentSnoozeSheet(id, from: cell)
+                return true
+            })
         }
         out.append(UIAccessibilityCustomAction(name: app.archiveWord) { [weak self] _ in
             self?.app.archive(id) ?? false

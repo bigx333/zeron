@@ -1,7 +1,9 @@
 import XCTest
 
 /// T3 Mode over the core's demo workspace: an Inbox, folded shelves, and
-/// Snooze / Wake / Settle reachable by touch alone (swipe and long-press).
+/// Snooze and Settle reachable by touch alone (swipe, ⋯ and long-press).
+/// There is no Wake control: a snooze ends at its deadline or when the user
+/// sends the session a message (just opening it is not enough).
 final class T3ModeTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
@@ -27,7 +29,7 @@ final class T3ModeTests: XCTestCase {
         app.cells.matching(NSPredicate(format: "identifier BEGINSWITH 'session-'")).firstMatch
     }
 
-    func testSnoozeWakeAndSettleByTouch() {
+    func testSnoozeSendAndSettleByTouch() {
         let app = launch()
         let inbox = app.cells["section-recent"]
         XCTAssertTrue(inbox.waitForExistence(timeout: 10))
@@ -58,11 +60,34 @@ final class T3ModeTests: XCTestCase {
         XCTAssertTrue(parked.label.contains("Snoozed, wakes in"))
         snapshot(app, "t3-snoozed-shelf")
 
-        // Long-press wakes it early; it returns to the inbox.
+        // No Wake control anywhere on the row.
         parked.press(forDuration: 0.8)
-        app.buttons["Wake Now"].tap()
-        XCTAssertTrue(snoozed.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Snooze"].waitForExistence(timeout: 3), "re-timing stays available")
+        XCTAssertFalse(app.buttons["Wake Now"].exists)
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.06)).tap()
+
+        // Just reading it keeps the snooze: back on the list it is still parked.
+        parked.tap()
+        let input = app.textViews["composer-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(snoozed.waitForExistence(timeout: 5))
         XCTAssertTrue(app.cells[id].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.cells[id].label.contains("Snoozed, wakes in"))
+
+        // Sending it a message ends the snooze: it is back in the inbox.
+        app.cells[id].tap()
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        input.tap()
+        input.typeText("Picking this back up.")
+        app.buttons["composer-send"].tap()
+        let echo = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'You: Picking this back up.'")).firstMatch
+        XCTAssertTrue(echo.waitForExistence(timeout: 5))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(snoozed.waitForNonExistence(timeout: 10))
+        let restored = app.cells[id]
+        XCTAssertTrue(restored.waitForExistence(timeout: 3))
+        XCTAssertFalse(restored.label.contains("Snoozed"))
 
         // A full Settle lands on the folded Settled shelf, undoable from there.
         app.cells[id].swipeLeft()

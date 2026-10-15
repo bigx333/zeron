@@ -540,14 +540,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             ]
             if t3, !archived {
                 // Snoozing parks the session like settling: leave it.
-                let snoozed = vm?.snoozed ?? false
-                items.append(snoozed
-                    ? UIAction(title: "Wake Now", image: UIImage(systemName: "sun.max")) { _ in self.app.wake(self.chatId) } as UIMenuElement
-                    : UIMenu(title: "Snooze", image: UIImage(systemName: "clock"), children: AppModel.snoozePresets.map { preset in
-                        UIAction(title: preset.title) { _ in
-                            if self.app.snooze(self.chatId, seconds: preset.seconds, title: preset.title) { self.leave() }
-                        }
-                    }))
+                items.append(UIMenu(title: "Snooze", image: UIImage(systemName: "clock"), children: AppModel.snoozePresets.map { preset in
+                    UIAction(title: preset.title) { _ in
+                        if self.app.snooze(self.chatId, seconds: preset.seconds, title: preset.title) { self.leave() }
+                    }
+                }))
             }
             items += [
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
