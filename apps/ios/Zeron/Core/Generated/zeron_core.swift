@@ -1216,10 +1216,17 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func setSessionConfig(chatId: String, config: ChatConfig) throws 
     
+    func setSteerMode(enabled: Bool) throws 
+    
     /**
      * Stop all background work (sign-out). Snapshots stay readable.
      */
     func shutdown() 
+    
+    /**
+     * Account-wide Queue/Steer preference. Unset means Queue.
+     */
+    func steerMode()  -> Bool
     
     /**
      * `git checkout <ref>` in `repo_path` on the device.
@@ -1949,6 +1956,15 @@ open func setSessionConfig(chatId: String, config: ChatConfig)throws   {try rust
 }
 }
     
+open func setSteerMode(enabled: Bool)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_set_steer_mode(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(enabled),uniffiCallStatus
+    )
+}
+}
+    
     /**
      * Stop all background work (sign-out). Snapshots stay readable.
      */
@@ -1958,6 +1974,18 @@ open func shutdown()  {try! rustCall() {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * Account-wide Queue/Steer preference. Unset means Queue.
+     */
+open func steerMode() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_steer_mode(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
 }
     
     /**
@@ -17466,7 +17494,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_session_config() != 56055) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_set_steer_mode() != 27739) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_shutdown() != 4352) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_steer_mode() != 7842) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_switch_ref() != 45706) {

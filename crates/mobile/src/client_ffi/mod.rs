@@ -130,6 +130,21 @@ impl CoreClient {
         (&*self.client.workspace()).into()
     }
 
+    /// Account-wide Queue/Steer preference. Unset means Queue.
+    pub fn steer_mode(&self) -> bool {
+        self.client.queue_send_mode() == Some(zeron_proto::QueueSendMode::Steer)
+    }
+
+    pub fn set_steer_mode(&self, enabled: bool) -> CoreResult<()> {
+        self.client
+            .set_queue_send_mode(if enabled {
+                zeron_proto::QueueSendMode::Steer
+            } else {
+                zeron_proto::QueueSendMode::Queue
+            })
+            .map_err(Into::into)
+    }
+
     /// Threads page: pinned, sections, recent.
     pub fn front_page(&self) -> FrontPage {
         (&self.client.workspace().front).into()
