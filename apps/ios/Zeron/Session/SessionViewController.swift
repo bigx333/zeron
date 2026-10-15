@@ -538,11 +538,15 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                     UIAction(title: preset.title) { _ in
                         if self.app.snooze(self.chatId, seconds: preset.seconds, title: preset.title) { self.leave() }
                     }
-                } + [UIAction(title: "Custom…", image: UIImage(systemName: "slider.horizontal.3")) { _ in
-                    CustomSnooze.present(from: self) { seconds, title in
-                        if self.app.snooze(self.chatId, seconds: seconds, title: title) { self.leave() }
+                } + SnoozeUntil.menuElements(
+                    snooze: { if self.app.snooze(self.chatId, until: $0) { self.leave() } },
+                    pickDate: {
+                        SnoozeUntil.pickDate(from: self) { [weak self] date in
+                            guard let self, self.app.snooze(self.chatId, until: date) else { return }
+                            self.leave()
+                        }
                     }
-                }]))
+                )))
             }
             items += [
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
