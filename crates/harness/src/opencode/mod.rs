@@ -624,9 +624,12 @@ impl Server {
             .env("OPENCODE_PASSWORD", &password)
             .env("OPENCODE_SERVER_PASSWORD", &password)
             .env("OPENCODE_CLIENT", "zeron");
-        if let Some(mcp) = mcp {
+        let skills = cwd
+            .map(|cwd| crate::skills::zeron_roots(std::path::Path::new(cwd)))
+            .unwrap_or_default();
+        if mcp.is_some() || !skills.is_empty() {
             // The config shape differs by generation. If even the cold probe
-            // can't tell, run without the Zeron MCP server rather than fail.
+            // can't tell, run without Zeron's MCP server and skills rather than fail.
             match opencode_version(exe).await {
                 Some(version) => {
                     let protocol = if version.major >= 2 {
@@ -634,18 +637,20 @@ impl Server {
                     } else {
                         Protocol::V1
                     };
-                    cmd.env(
-                        "OPENCODE_CONFIG_CONTENT",
-                        mcp_config(
-                            std::env::var("OPENCODE_CONFIG_CONTENT").ok().as_deref(),
-                            mcp,
-                            protocol,
-                        )?,
-                    );
+                    let mut config = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
+                    if let Some(mcp) = mcp {
+                        config = Some(mcp_config(config.as_deref(), mcp, protocol)?);
+                    }
+                    if !skills.is_empty() {
+                        config = Some(skills_config(config.as_deref(), &skills, protocol)?);
+                    }
+                    if let Some(config) = config {
+                        cmd.env("OPENCODE_CONFIG_CONTENT", config);
+                    }
                 }
                 None => tracing::warn!(
                     binary_path = %exe.display(),
-                    "opencode version unknown; starting without the Zeron MCP server"
+                    "opencode version unknown; starting without Zeron's MCP server and skills"
                 ),
             }
         }
@@ -4450,6 +4455,45 @@ async fn opencode_version(exe: &std::path::Path) -> Option<semver::Version> {
     Some(version)
 }
 
+/// Zeron's skill folders join the inherited `skills` paths: a plain list on
+/// 2.x, the `{paths}` object on 1.x.
+fn skills_config(
+    inherited: Option<&str>,
+    roots: &[std::path::PathBuf],
+    protocol: Protocol,
+) -> Result<String, HarnessError> {
+    let mut config: Value = match inherited.filter(|s| !s.trim().is_empty()) {
+        Some(raw) => deser_hjson::from_str(raw).map_err(|_| {
+            HarnessError::Protocol("OPENCODE_CONFIG_CONTENT must be a valid config object".into())
+        })?,
+        None => json!({}),
+    };
+    let object = config.as_object_mut().ok_or_else(|| {
+        HarnessError::Protocol("OPENCODE_CONFIG_CONTENT must be an object".into())
+    })?;
+    let skills = object.entry("skills").or_insert_with(|| match protocol {
+        Protocol::V1 => json!({"paths": []}),
+        Protocol::V2 => json!([]),
+    });
+    let paths = match skills {
+        Value::Array(paths) => paths,
+        Value::Object(object) => object
+            .entry("paths")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| {
+                HarnessError::Protocol("OPENCODE_CONFIG_CONTENT.skills.paths must be a list".into())
+            })?,
+        _ => {
+            return Err(HarnessError::Protocol(
+                "OPENCODE_CONFIG_CONTENT.skills must be a list or object".into(),
+            ));
+        }
+    };
+    paths.extend(roots.iter().map(|root| json!(root)));
+    Ok(config.to_string())
+}
+
 /// Inline config is the final user config layer. Preserve inherited overrides
 /// and other MCP servers; never write chat identity into a shared config file.
 fn mcp_config(
@@ -4496,6 +4540,31 @@ fn mcp_config(
 #[cfg(test)]
 mod mcp_injection_tests {
     use super::*;
+
+    #[test]
+    fn skills_config_appends_zeron_roots_in_each_generation_shape() {
+        let roots = [std::path::PathBuf::from("/home/u/.zeron/skills")];
+        let v2: Value =
+            serde_json::from_str(&skills_config(None, &roots, Protocol::V2).unwrap()).unwrap();
+        assert_eq!(v2["skills"], json!(["/home/u/.zeron/skills"]));
+        let v1: Value =
+            serde_json::from_str(&skills_config(None, &roots, Protocol::V1).unwrap()).unwrap();
+        assert_eq!(v1["skills"]["paths"], json!(["/home/u/.zeron/skills"]));
+        let inherited = r#"{"model": "x", "skills": ["/team"]}"#;
+        let merged: Value =
+            serde_json::from_str(&skills_config(Some(inherited), &roots, Protocol::V2).unwrap())
+                .unwrap();
+        assert_eq!(merged["model"], "x");
+        assert_eq!(merged["skills"], json!(["/team", "/home/u/.zeron/skills"]));
+        let legacy = r#"{"skills": {"paths": ["/team"]}}"#;
+        let merged: Value =
+            serde_json::from_str(&skills_config(Some(legacy), &roots, Protocol::V2).unwrap())
+                .unwrap();
+        assert_eq!(
+            merged["skills"]["paths"],
+            json!(["/team", "/home/u/.zeron/skills"])
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]

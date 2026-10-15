@@ -3959,7 +3959,11 @@ async fn run_session(session: Session) {
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
     // The text of the prompt in flight (re-sent by a preempt when the agent
     // drops an unstarted cancelled prompt).
-    let mut current_prompt_text = prompt_transform(request.reasoning, &request.prompt);
+    let mut current_prompt_text = crate::skills::with_zeron_instructions(
+        &request.cwd,
+        request.resume.as_deref(),
+        prompt_transform(request.reasoning, &request.prompt),
+    );
     let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
         prompt_turn(
             client.clone(),

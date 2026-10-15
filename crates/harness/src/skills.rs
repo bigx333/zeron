@@ -48,14 +48,141 @@ pub(crate) async fn discover(harness: HarnessId, cwd: &Path) -> Result<Vec<Skill
         .map_err(|error| HarnessError::Protocol(error.to_string()))?
 }
 
-/// Shared Agent Skills do not establish a provider-native command identity.
+/// Zeron's own skill folder, in the home directory and in each project. Like
+/// bb's `.bb/skills`, these roots are handed to each harness at launch in its
+/// own dialect, so the agent loads them natively rather than only on selection.
+const ZERON_SKILLS: &str = ".zeron/skills";
+
+/// The Claude plugin that carries Zeron's skills; they surface as `/zeron:<name>`.
+pub(crate) const CLAUDE_PLUGIN: &str = "zeron";
+
+/// Existing Zeron skill roots for `cwd`, global first, then project roots from
+/// the worktree root down so later roots override earlier ones by name.
+pub(crate) fn zeron_roots(cwd: &Path) -> Vec<PathBuf> {
+    zeron_roots_at(cwd, &crate::executable::home_or_current_dir())
+}
+
+fn zeron_roots_at(cwd: &Path, home: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for dir in std::iter::once(home).chain(project_scope(cwd, home)) {
+        let root = dir.join(ZERON_SKILLS);
+        if root.is_dir() && !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
+/// Project scope stops at the nearest worktree root (or home), outermost first.
+fn project_scope<'a>(cwd: &'a Path, home: &Path) -> Vec<&'a Path> {
+    let mut ancestors = Vec::new();
+    for dir in cwd.ancestors() {
+        ancestors.push(dir);
+        if dir.join(".git").exists() || dir == home {
+            break;
+        }
+    }
+    ancestors.reverse();
+    ancestors
+}
+
+/// Claude Code loads extra skills only from plugins, so assemble a session-only
+/// plugin whose `skills/` links each Zeron skill (nearest scope wins). The
+/// directory is content-addressed by its links, so concurrent runs share it.
+pub(crate) fn claude_plugin(cwd: &Path) -> Option<PathBuf> {
+    let base = std::env::temp_dir().join("zeron-claude-skills");
+    match claude_plugin_at(&zeron_roots(cwd), &base) {
+        Ok(plugin) => plugin,
+        Err(error) => {
+            tracing::warn!(%error, "could not assemble the Zeron skills plugin");
+            None
+        }
+    }
+}
+
+fn claude_plugin_at(roots: &[PathBuf], base: &Path) -> std::io::Result<Option<PathBuf>> {
+    use sha2::Digest;
+    let mut found = BTreeMap::new();
+    let mut remaining = MAX_DISCOVERY_ENTRIES;
+    for root in roots {
+        // Only folder skills can be linked; the scan already skips loose files.
+        let _ = scan_root(root, "", HarnessId::ClaudeCode, &mut found, &mut remaining);
+    }
+    let links: Vec<(String, PathBuf)> = found
+        .into_values()
+        .filter(|skill| {
+            skill
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                && !skill.name.starts_with('.')
+        })
+        .filter_map(|skill| Some((skill.name, Path::new(&skill.path).parent()?.to_owned())))
+        .collect();
+    if links.is_empty() {
+        return Ok(None);
+    }
+    let mut hash = sha2::Sha256::new();
+    for (name, dir) in &links {
+        hash.update(name.as_bytes());
+        hash.update([0]);
+        hash.update(dir.as_os_str().as_encoded_bytes());
+        hash.update([0]);
+    }
+    let digest: String = hash.finalize()[..12]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let plugin = base.join(digest);
+    if plugin.join(".claude-plugin/plugin.json").is_file() {
+        return Ok(Some(plugin));
+    }
+    std::fs::create_dir_all(base)?;
+    let staging = base.join(format!(".{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        std::fs::create_dir_all(staging.join(".claude-plugin"))?;
+        std::fs::write(
+            staging.join(".claude-plugin/plugin.json"),
+            serde_json::json!({
+                "name": CLAUDE_PLUGIN,
+                "version": "0.1.0",
+                "description": "Skills from Zeron's .zeron/skills folders.",
+            })
+            .to_string(),
+        )?;
+        std::fs::create_dir(staging.join("skills"))?;
+        for (name, dir) in &links {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(dir, staging.join("skills").join(name))?;
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_dir(dir, staging.join("skills").join(name))?;
+        }
+        std::fs::rename(&staging, &plugin)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+        // Another run published the same content first.
+        if !plugin.join(".claude-plugin/plugin.json").is_file() {
+            result?;
+        }
+    }
+    Ok(Some(plugin))
+}
+
+/// Skills from a `.zeron/skills` root.
+pub(crate) fn is_zeron_skill(path: &str) -> bool {
+    Path::new(path).ancestors().any(is_zeron_root)
+}
+
+/// Shared Agent Skills and Zeron's own skills do not establish a
+/// provider-native command identity; they are delivered as file references.
 pub(crate) fn is_shared_skill(path: &str) -> bool {
     Path::new(path).ancestors().any(|dir| {
         dir.file_name().is_some_and(|name| name == "skills")
             && dir
                 .parent()
                 .and_then(Path::file_name)
-                .is_some_and(|name| name == ".agents")
+                .is_some_and(|name| name == ".agents" || name == ".zeron")
     })
 }
 
@@ -125,8 +252,76 @@ fn project_dirs(harness: HarnessId) -> &'static [&'static str] {
     }
 }
 
+fn is_zeron_root(root: &Path) -> bool {
+    root.ends_with(ZERON_SKILLS)
+}
+
+/// Agents without a configurable skill root learn Zeron's skills from the
+/// first prompt of a fresh session. A leading slash command stays first so the
+/// agent still routes it.
+pub(crate) fn with_zeron_instructions(cwd: &str, resume: Option<&str>, prompt: String) -> String {
+    if resume.is_some()
+        || cwd.is_empty()
+        || zeron_proto::invocation::leading_command(&prompt).is_some()
+    {
+        return prompt;
+    }
+    match zeron_instructions(Path::new(cwd)) {
+        Some(block) => format!("{block}\n\n{prompt}"),
+        None => prompt,
+    }
+}
+
+/// The skills block bb gives agents without a native skill root: name,
+/// description and absolute `SKILL.md` path, read on demand by the agent.
+pub(crate) fn zeron_instructions(cwd: &Path) -> Option<String> {
+    let roots = zeron_roots(cwd);
+    let mut found = BTreeMap::new();
+    let mut remaining = MAX_DISCOVERY_ENTRIES;
+    for root in &roots {
+        let _ = scan_root(root, "", HarnessId::Devin, &mut found, &mut remaining);
+    }
+    let lines: Vec<String> = found
+        .into_values()
+        .filter(|skill| skill.enabled)
+        .map(|skill| {
+            let description = skill
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let description = if description.is_empty() {
+                "(no description)".into()
+            } else {
+                description
+            };
+            format!("- {}: {description} (SKILL.md: {})", skill.name, skill.path)
+        })
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "<zeron-skills>\nZeron skills are reusable instruction folders. When the current task \
+         matches a listed skill description, read that skill's SKILL.md at the absolute path \
+         before proceeding; you may read supporting files in the same skill directory that \
+         SKILL.md references.\n\n{}\n</zeron-skills>",
+        lines.join("\n")
+    ))
+}
+
 fn discover_at(harness: HarnessId, cwd: &Path, home: &Path) -> Result<Vec<Skill>, HarnessError> {
-    let mut roots: Vec<(PathBuf, String)> = project_dirs(harness)
+    // Zeron's folder comes after the native ones so it wins name collisions
+    // at the same scope.
+    let dirs: Vec<&str> = match harness {
+        HarnessId::Mock => Vec::new(),
+        _ => project_dirs(harness)
+            .iter()
+            .copied()
+            .chain([ZERON_SKILLS])
+            .collect(),
+    };
+    let mut roots: Vec<(PathBuf, String)> = dirs
         .iter()
         .map(|dir| (home.join(dir), String::new()))
         .collect();
@@ -199,17 +394,10 @@ fn discover_at(harness: HarnessId, cwd: &Path, home: &Path) -> Result<Vec<Skill>
         }
         _ => {}
     }
-    // Project scope stops at the nearest worktree root; nested directories
-    // override ancestors, and project skills override global skills by name.
-    let mut ancestors = Vec::new();
-    for dir in cwd.ancestors() {
-        ancestors.push(dir);
-        if dir.join(".git").exists() || dir == home {
-            break;
-        }
-    }
-    for dir in ancestors.into_iter().rev() {
-        for suffix in project_dirs(harness) {
+    // Nested directories override ancestors, and project skills override
+    // global skills by name.
+    for dir in project_scope(cwd, home) {
+        for suffix in &dirs {
             roots.push((dir.join(suffix), String::new()));
         }
     }
@@ -280,7 +468,9 @@ fn scan_root(
             }
             let legacy_commands = root.file_name().is_some_and(|name| name == "commands");
             let flat = legacy_commands
-                || (matches!(harness, HarnessId::Opencode | HarnessId::Pi) && depth == 0);
+                || (matches!(harness, HarnessId::Opencode | HarnessId::Pi)
+                    && depth == 0
+                    && !is_zeron_root(root));
             if entry.file_name() != "SKILL.md"
                 && !(flat && path.extension().is_some_and(|ext| ext == "md"))
             {
@@ -734,6 +924,145 @@ mod tests {
                 "{harness:?}"
             );
         }
+    }
+
+    #[test]
+    fn zeron_skills_load_globally_and_per_project_for_every_harness() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        write(
+            &home,
+            ".zeron/skills/global/SKILL.md",
+            "---\nname: global\n---\nBody",
+        );
+        write(&home, ".zeron/skills/loose.md", "Not a skill folder");
+        write(
+            &repo,
+            ".agents/skills/review/SKILL.md",
+            "---\nname: review\ndescription: Shared\n---\nBody",
+        );
+        let project = write(
+            &repo,
+            ".zeron/skills/review/SKILL.md",
+            "---\nname: review\ndescription: Zeron\n---\nBody",
+        );
+        for harness in [
+            HarnessId::ClaudeCode,
+            HarnessId::Codex,
+            HarnessId::Cursor,
+            HarnessId::Devin,
+            HarnessId::Grok,
+            HarnessId::Hermes,
+            HarnessId::Pi,
+            HarnessId::Antigravity,
+            HarnessId::Opencode,
+        ] {
+            let skills = discover_at(harness, &repo, &home).unwrap();
+            assert!(skills.iter().any(|s| s.name == "global"), "{harness:?}");
+            assert!(!skills.iter().any(|s| s.name == "loose"), "{harness:?}");
+            let review = skills.iter().find(|s| s.name == "review").unwrap();
+            assert_eq!(review.description, "Zeron", "{harness:?}");
+            assert_eq!(Path::new(&review.path), project.as_path());
+        }
+        assert!(is_zeron_skill(&project.to_string_lossy()));
+        assert!(is_shared_skill(&project.to_string_lossy()));
+        assert!(!is_zeron_skill("/repo/.agents/skills/review/SKILL.md"));
+    }
+
+    #[test]
+    fn zeron_roots_are_global_first_and_stop_at_the_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        let nested = repo.join("packages/web");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        for dir in [&home, &repo, &nested, &temp.path().to_path_buf()] {
+            std::fs::create_dir_all(dir.join(ZERON_SKILLS)).unwrap();
+        }
+        assert_eq!(
+            zeron_roots_at(&nested, &home),
+            [
+                home.join(ZERON_SKILLS),
+                repo.join(ZERON_SKILLS),
+                nested.join(ZERON_SKILLS)
+            ]
+        );
+        // Missing roots are not handed to harnesses.
+        std::fs::remove_dir(repo.join(ZERON_SKILLS)).unwrap();
+        assert_eq!(zeron_roots_at(&repo, &home), [home.join(ZERON_SKILLS)]);
+        assert_eq!(zeron_roots_at(&home, &home), [home.join(ZERON_SKILLS)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_plugin_links_the_nearest_skill_and_is_shared_by_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("home").join(ZERON_SKILLS);
+        let project = temp.path().join("repo").join(ZERON_SKILLS);
+        write(&global, "review/SKILL.md", "---\nname: review\n---\nGlobal");
+        write(&global, "deploy/SKILL.md", "---\nname: deploy\n---\nBody");
+        write(&global, "bad/SKILL.md", "---\nname: a:b\n---\nBody");
+        write(
+            &project,
+            "review/SKILL.md",
+            "---\nname: review\n---\nProject",
+        );
+        let base = temp.path().join("plugins");
+        let roots = [global.clone(), project.clone()];
+        let plugin = claude_plugin_at(&roots, &base).unwrap().unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(plugin.join(".claude-plugin/plugin.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["name"], CLAUDE_PLUGIN);
+        let mut linked: Vec<_> = std::fs::read_dir(plugin.join("skills"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        linked.sort();
+        assert_eq!(linked, ["deploy", "review"]);
+        assert_eq!(
+            std::fs::read_to_string(plugin.join("skills/review/SKILL.md")).unwrap(),
+            "---\nname: review\n---\nProject"
+        );
+        assert_eq!(claude_plugin_at(&roots, &base).unwrap().unwrap(), plugin);
+        write(&project, "lint/SKILL.md", "---\nname: lint\n---\nBody");
+        assert_ne!(claude_plugin_at(&roots, &base).unwrap().unwrap(), plugin);
+        assert!(claude_plugin_at(&[], &base).unwrap().is_none());
+    }
+
+    #[test]
+    fn instructions_list_skills_only_for_fresh_non_command_prompts() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let path = write(
+            &repo,
+            ".zeron/skills/deploy/SKILL.md",
+            "---\nname: deploy\ndescription: >-\n  Ship it\n  safely\n---\nBody",
+        );
+        write(
+            &repo,
+            ".zeron/skills/hidden/SKILL.md",
+            "---\nname: hidden\nuser-invocable: false\n---\nBody",
+        );
+        let cwd = repo.to_str().unwrap();
+        let prompt = with_zeron_instructions(cwd, None, "hello".into());
+        assert!(prompt.starts_with("<zeron-skills>"), "{prompt}");
+        assert!(prompt.contains(&format!(
+            "- deploy: Ship it safely (SKILL.md: {})",
+            path.display()
+        )));
+        assert!(!prompt.contains("hidden"));
+        assert!(prompt.ends_with("</zeron-skills>\n\nhello"));
+        assert_eq!(with_zeron_instructions(cwd, Some("s"), "hi".into()), "hi");
+        assert_eq!(
+            with_zeron_instructions(cwd, None, "/compact".into()),
+            "/compact"
+        );
+        assert_eq!(with_zeron_instructions("", None, "hi".into()), "hi");
     }
 
     #[test]

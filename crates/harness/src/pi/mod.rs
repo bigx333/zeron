@@ -135,9 +135,12 @@ impl PiHarness {
         if let Some(dir) = &self.agent_dir {
             cmd.env("PI_CODING_AGENT_DIR", dir);
         }
-        cmd.args(["--mode", "rpc", "--no-themes"])
-            .args(args)
-            .current_dir(cwd)
+        cmd.args(["--mode", "rpc", "--no-themes"]).args(args);
+        // Zeron's own skill folders load beside Pi's native ones.
+        for root in crate::skills::zeron_roots(cwd) {
+            cmd.arg("--skill").arg(root);
+        }
+        cmd.current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
