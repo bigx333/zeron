@@ -222,7 +222,7 @@ private fun androidx.compose.foundation.layout.BoxScope.Toasts(model: AppModel, 
             // One at a time: a new toast replaces the one showing.
             host.currentSnackbarData?.dismiss()
             launch {
-                val result = host.showSnackbar(toast.message, actionLabel = toast.action, withDismissAction = toast.action != null, duration = SnackbarDuration.Long)
+                val result = host.showSnackbar(toast.message, actionLabel = toast.action, withDismissAction = toast.action != null, duration = SnackbarDuration.Short)
                 if (result == SnackbarResult.ActionPerformed) toast.run?.invoke()
             }
         }
