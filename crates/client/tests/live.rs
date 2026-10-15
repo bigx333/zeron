@@ -437,6 +437,83 @@ async fn session_send_round_trips_through_the_chat_room() {
     offline.shutdown();
 }
 
+/// A thread parked on the desktop (snoozed, then settled) comes back on every
+/// device once the phone sends to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn phone_send_revives_a_thread_parked_on_the_host() {
+    let edge = MockEdge::start().await;
+    let host = HostRegistry::start(&edge).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    tokio::task::spawn_blocking({
+        let client = client.clone();
+        move || {
+            wait_for("chat row", Duration::from_secs(10), || {
+                client.workspace().device(HOST).is_some_and(|d| d.online)
+                    && client.workspace().session(CHAT).is_some()
+            })
+        }
+    })
+    .await
+    .unwrap();
+    let session = client.open_session(CHAT).unwrap();
+    session.set_view_attached(true);
+
+    for archive in [false, true] {
+        {
+            let mut doc = host.doc.lock().unwrap();
+            if archive {
+                doc.set_chat_archived(CHAT, true).unwrap();
+            } else {
+                let until = Utc::now() + chrono::Duration::hours(1);
+                doc.set_chat_snoozed_until(CHAT, Some(until)).unwrap();
+            }
+        }
+        host.client.nudge();
+        tokio::task::spawn_blocking({
+            let client = client.clone();
+            move || {
+                wait_for("phone sees the park", Duration::from_secs(10), || {
+                    client
+                        .workspace()
+                        .session(CHAT)
+                        .is_some_and(|r| if archive { r.archived } else { r.snoozed })
+                })
+            }
+        })
+        .await
+        .unwrap();
+
+        session.send(SendRequest::text("back to this")).unwrap();
+        let ws = client.workspace();
+        let row = ws.session(CHAT).unwrap();
+        assert!(!row.archived && !row.snoozed, "revived locally: {row:?}");
+        let doc = host.doc.clone();
+        tokio::task::spawn_blocking(move || {
+            wait_for("host sees the revive", Duration::from_secs(10), || {
+                doc.lock()
+                    .unwrap()
+                    .chat(CHAT)
+                    .unwrap()
+                    .is_some_and(|c| !c.archived && c.snoozed_until.is_none())
+            })
+        })
+        .await
+        .unwrap();
+        // Let the host settle the turn so the next send starts a new one.
+        let host_doc = LoroDoc::new();
+        let start = Instant::now();
+        while host_answers(&edge, &host_doc).is_none() {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "command never reached the room"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    client.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sends_survive_a_room_outage_and_deliver_on_rejoin() {
     let edge = MockEdge::start().await;
