@@ -333,7 +333,12 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         var items: [UIMenuElement] = [
             UIAction(title: vm.pinned ? "Unpin" : "Pin", image: UIImage(systemName: vm.pinned ? "pin.slash" : "pin")) { [weak self] _ in self?.app.setPinned(id, !vm.pinned) },
         ]
-        if app.t3Mode { items.append(Self.snoozeMenu(app: app, id: id)) }
+        if app.t3Mode {
+            items.append(Self.snoozeMenu(app: app, id: id) { [weak self] in
+                guard let self else { return }
+                CustomSnooze.present(from: self) { seconds, title in self.app.snooze(id, seconds: seconds, title: title) }
+            })
+        }
         items += [
             moveMenu(id),
             UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { [weak self] _ in self?.rename(id) },
@@ -365,10 +370,11 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
 
     /// Snooze presets as a submenu. A snoozed session offers them too, to
     /// re-time it; its deadline or a sent message is what clears the snooze.
-    static func snoozeMenu(app: AppModel, id: String) -> UIMenuElement {
+    /// `custom` opens the custom-duration dialog ("Custom…", last).
+    static func snoozeMenu(app: AppModel, id: String, custom: @escaping () -> Void) -> UIMenuElement {
         UIMenu(title: "Snooze", image: UIImage(systemName: "clock"), children: AppModel.snoozePresets.map { preset in
             UIAction(title: preset.title) { _ in app.snooze(id, seconds: preset.seconds, title: preset.title) }
-        })
+        } + [UIAction(title: "Custom…", image: UIImage(systemName: "slider.horizontal.3")) { _ in custom() }])
     }
 
     func presentSnoozeSheet(_ id: String, from view: UIView) {
@@ -378,6 +384,10 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                 self?.app.snooze(id, seconds: preset.seconds, title: preset.title)
             })
         }
+        sheet.addAction(UIAlertAction(title: "Custom…", style: .default) { [weak self] _ in
+            guard let self else { return }
+            CustomSnooze.present(from: self) { seconds, title in self.app.snooze(id, seconds: seconds, title: title) }
+        })
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         sheet.popoverPresentationController?.sourceView = view
         sheet.popoverPresentationController?.sourceRect = view.bounds

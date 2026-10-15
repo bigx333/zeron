@@ -55,6 +55,25 @@ import sh.zeron.android.core.Shelf
 import sh.zeron.android.core.SidebarMode
 import sh.zeron.android.core.SnoozeOption
 import sh.zeron.android.core.SnoozeOptions
+import sh.zeron.android.core.SnoozeUnit
+import sh.zeron.android.core.customSnooze
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonGroupDefaults
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.ToggleButton
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import sh.zeron.android.core.snoozeCaption
 import sh.zeron.android.design.HarnessMark
 import sh.zeron.android.design.ZIcon
@@ -69,6 +88,8 @@ class SheetCallbacks(
     val settle: () -> Unit,
     val unsettle: () -> Unit,
     val snooze: (SnoozeOption) -> Unit,
+    /** Custom…: the duration dialog, owned by the row. */
+    val customSnooze: () -> Unit,
 )
 
 /**
@@ -116,10 +137,13 @@ fun SessionActionsSheet(row: SessionRow, mode: SidebarMode, callbacks: SheetCall
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(start = 12.dp, bottom = 10.dp),
                 )
-                SnoozeChoices { option ->
-                    haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-                    then { callbacks.snooze(option) }
-                }
+                SnoozeChoices(
+                    onPick = { option ->
+                        haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+                        then { callbacks.snooze(option) }
+                    },
+                    onCustom = { then(callbacks.customSnooze) },
+                )
                 Spacer(Modifier.height(20.dp))
             }
             val items = buildList {
@@ -155,7 +179,7 @@ fun SessionActionsSheet(row: SessionRow, mode: SidebarMode, callbacks: SheetCall
 
 /** Just the snooze lengths, from the open session's header menu. */
 @Composable
-fun SnoozeSheet(row: SessionRow?, onDismiss: () -> Unit, onSnooze: (SnoozeOption) -> Unit) {
+fun SnoozeSheet(row: SessionRow?, onDismiss: () -> Unit, onCustom: () -> Unit, onSnooze: (SnoozeOption) -> Unit) {
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
@@ -168,35 +192,119 @@ fun SnoozeSheet(row: SessionRow?, onDismiss: () -> Unit, onSnooze: (SnoozeOption
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 16.dp),
             )
-            SnoozeChoices { option ->
-                haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+            fun then(action: () -> Unit) {
                 scope.launch { sheet.hide() }.invokeOnCompletion {
                     onDismiss()
-                    onSnooze(option)
+                    action()
                 }
             }
+            SnoozeChoices(
+                onPick = { option ->
+                    haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+                    then { onSnooze(option) }
+                },
+                onCustom = { then(onCustom) },
+            )
         }
     }
 }
 
 private class SheetItem(val label: String, val icon: Int, val accent: Boolean = false, val onClick: () -> Unit)
 
-/** The five snooze lengths as one row of shape-morphing tonal buttons. */
+/** The snooze presets as one row of shape-morphing tonal buttons, then Custom… beneath. */
 @Composable
-fun SnoozeChoices(onPick: (SnoozeOption) -> Unit) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        for (option in SnoozeOptions) {
-            FilledTonalButton(
-                onClick = { onPick(option) },
-                shapes = ButtonDefaults.shapes(),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 14.dp),
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 56.dp)
-                    .semantics { contentDescription = "Snooze ${option.label}" },
-            ) { Text(option.short, style = MaterialTheme.typography.titleMediumEmphasized) }
+fun SnoozeChoices(onPick: (SnoozeOption) -> Unit, onCustom: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (option in SnoozeOptions) {
+                FilledTonalButton(
+                    onClick = { onPick(option) },
+                    shapes = ButtonDefaults.shapes(),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 14.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 56.dp)
+                        .semantics { contentDescription = "Snooze ${option.label}" },
+                ) { Text(option.short, style = MaterialTheme.typography.titleMediumEmphasized) }
+            }
+        }
+        // Full width, so the label reads at any font scale.
+        OutlinedButton(
+            onClick = onCustom,
+            shapes = ButtonDefaults.shapes(),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        ) {
+            ZIcon(ZIcons.Effort, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Custom…")
         }
     }
+}
+
+/**
+ * Custom… snooze: a whole number and Minutes / Hours / Days. Snooze stays
+ * disabled until it's 1 or more and fits the core's u32 seconds.
+ */
+@Composable
+fun CustomSnoozeDialog(onDismiss: () -> Unit, onSnooze: (SnoozeOption) -> Unit) {
+    var amount by rememberSaveable { mutableStateOf("") }
+    var unit by rememberSaveable { mutableStateOf(SnoozeUnit.Hours) }
+    val option = customSnooze(amount, unit)
+    val invalid = amount.isNotEmpty() && option == null
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    fun confirm() {
+        val picked = option ?: return
+        onDismiss()
+        onSnooze(picked)
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { ZIcon(ZIcons.Snooze, null) },
+        title = { Text("Snooze for…") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    amount,
+                    // Digits only; ten is more than any unit allows, and the check below says so.
+                    { typed -> amount = typed.filter { it in '0'..'9' }.take(10) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    label = { Text("Amount") },
+                    isError = invalid,
+                    supportingText = {
+                        Text(
+                            when {
+                                invalid -> "Enter 1 to ${unit.max} ${unit.label.lowercase()}"
+                                option != null -> "Wakes in ${option.label}"
+                                else -> "How long to keep it out of the inbox"
+                            },
+                        )
+                    },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { confirm() }),
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween)) {
+                    val units = SnoozeUnit.entries
+                    units.forEachIndexed { index, u ->
+                        ToggleButton(
+                            checked = unit == u,
+                            onCheckedChange = { unit = u },
+                            modifier = Modifier.weight(1f).semantics { role = Role.RadioButton },
+                            shapes = when (index) {
+                                0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
+                                units.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
+                                else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
+                            },
+                        ) { Text(u.label, maxLines = 1) }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = ::confirm, enabled = option != null) { Text("Snooze") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /** "Snoozed · Wakes in 42m" atop the sheet for a snoozed row (sending to the thread un-snoozes it). */
