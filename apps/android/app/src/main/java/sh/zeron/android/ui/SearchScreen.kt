@@ -52,6 +52,7 @@ fun SearchScreen(model: AppModel, onBack: () -> Unit, onOpen: (String) -> Unit) 
         archive = { model.archive(it.id) },
         sections = workspace?.front?.sections.orEmpty().map { it.id to it.name },
         newSection = { newSection = it },
+        mode = model.sidebarMode.collectAsState().value,
     )
     val results = remember(query, workspace) {
         val q = query.trim()

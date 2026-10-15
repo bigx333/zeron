@@ -242,6 +242,14 @@ impl CoreClient {
         Ok(self.client.unarchive_session(&chat_id)?)
     }
 
+    pub fn snooze_session(&self, chat_id: String, duration_secs: u32) -> CoreResult<()> {
+        Ok(self.client.snooze_session(&chat_id, duration_secs)?)
+    }
+
+    pub fn wake_session(&self, chat_id: String) -> CoreResult<()> {
+        Ok(self.client.wake_session(&chat_id)?)
+    }
+
     pub fn rename_session(&self, chat_id: String, title: String) -> CoreResult<()> {
         Ok(self.client.rename_session(&chat_id, &title)?)
     }
@@ -411,7 +419,11 @@ impl CoreClient {
                 .register_push_target(
                     &token,
                     &environment,
-                    zc::PushPrefs { done: prefs.done, input: prefs.input, failed: prefs.failed },
+                    zc::PushPrefs {
+                        done: prefs.done,
+                        input: prefs.input,
+                        failed: prefs.failed,
+                    },
                 )
                 .await
         })
@@ -445,7 +457,12 @@ impl CoreClient {
         query: String,
     ) -> CoreResult<Vec<FileMatch>> {
         let client = self.client.clone();
-        let files = on_runtime(async move { client.search_files(&device_id, chat_id, space_id, &query).await }).await?;
+        let files = on_runtime(async move {
+            client
+                .search_files(&device_id, chat_id, space_id, &query)
+                .await
+        })
+        .await?;
         Ok(files
             .into_iter()
             .map(|f| FileMatch {

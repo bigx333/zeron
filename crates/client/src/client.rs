@@ -757,6 +757,7 @@ impl Client {
             branch: new.branch,
             checkout_id: None,
             source_context: None,
+            snoozed_until: None,
             config: new.config,
             last_message_preview: None,
             last_message_at: None,
@@ -791,6 +792,23 @@ impl Client {
 
     pub fn unarchive_session(&self, chat_id: &str) -> Result<()> {
         self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, false))
+    }
+
+    /// Snooze via the synced registry, including while the host is offline.
+    pub fn snooze_session(&self, chat_id: &str, duration_secs: u32) -> Result<()> {
+        if duration_secs == 0 {
+            return Err(ClientError::InvalidArgument(
+                "snooze duration must be positive".into(),
+            ));
+        }
+        let until = Utc::now() + chrono::Duration::seconds(i64::from(duration_secs));
+        self.chat_write(chat_id, |doc| {
+            doc.set_chat_snoozed_until(chat_id, Some(until))
+        })
+    }
+
+    pub fn wake_session(&self, chat_id: &str) -> Result<()> {
+        self.chat_write(chat_id, |doc| doc.set_chat_snoozed_until(chat_id, None))
     }
 
     pub fn rename_session(&self, chat_id: &str, title: &str) -> Result<()> {

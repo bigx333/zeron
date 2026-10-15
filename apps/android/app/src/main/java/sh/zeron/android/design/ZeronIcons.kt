@@ -76,6 +76,11 @@ object ZIcons {
     val Worktree = R.drawable.zi_worktree
     val Restart = R.drawable.zi_restart
     val Command = R.drawable.zi_command
+    // T3 Mode: the inbox, snooze and settle.
+    val Inbox = R.drawable.zi_checklist
+    val Snooze = R.drawable.zi_clock_circle
+    val Settle = R.drawable.zi_queue_check
+    val Wake = R.drawable.zi_bell
 }
 
 @Composable

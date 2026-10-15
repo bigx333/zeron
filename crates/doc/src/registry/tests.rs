@@ -260,6 +260,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         branch: Some("main".into()),
         checkout_id: None,
         source_context: None,
+        snoozed_until: None,
         config: Some(ChatConfig {
             harness: HarnessId::Mock,
             model: Some("mock-1".into()),
@@ -536,6 +537,56 @@ fn field_mutators_round_trip() {
     assert_eq!(dev.cursor_sdk_version.as_deref(), Some("1.0.31"));
     assert_eq!(dev.name, "workstation");
     assert_eq!(dev.last_seen_at, Some(ts(6_000)));
+}
+
+#[test]
+fn snooze_syncs_survives_restart_and_clears_on_settlement_or_wake() {
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    a.upsert_chat(&chat("chat-1", "a")).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    let until = ts(20_000);
+    assert!(a.set_chat_snoozed_until("chat-1", Some(until)).unwrap());
+    // A concurrent title edit is not overwritten by parking.
+    b.rename_chat("chat-1", "Renamed elsewhere").unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    let mut restarted = RegistryDoc::from_bytes(&b.to_bytes().unwrap(), "b").unwrap();
+    let row = restarted.chat("chat-1").unwrap().unwrap();
+    assert_eq!(row.title.as_deref(), Some("Renamed elsewhere"));
+    assert_eq!(row.snoozed_until, Some(until));
+    assert!(row.is_snoozed(ts(19_999)));
+    assert!(
+        !row.is_snoozed(until),
+        "the deadline wakes without a writer"
+    );
+    restarted.set_chat_archived("chat-1", true).unwrap();
+    let row = restarted.chat("chat-1").unwrap().unwrap();
+    assert!(row.archived);
+    assert_eq!(row.snoozed_until, None);
+    restarted.set_chat_archived("chat-1", false).unwrap();
+    assert_eq!(
+        restarted.chat("chat-1").unwrap().unwrap().snoozed_until,
+        None
+    );
+    restarted
+        .set_chat_snoozed_until("chat-1", Some(until))
+        .unwrap();
+    restarted.set_chat_snoozed_until("chat-1", None).unwrap();
+    assert!(
+        !restarted
+            .chat("chat-1")
+            .unwrap()
+            .unwrap()
+            .is_snoozed(ts(10_000))
+    );
+    assert!(
+        !restarted
+            .set_chat_snoozed_until("missing", Some(until))
+            .unwrap()
+    );
+    assert!(restarted.chat("missing").unwrap().is_none());
 }
 
 #[test]

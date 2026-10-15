@@ -128,6 +128,7 @@ mod tests {
             branch: None,
             checkout_id: None,
             source_context: None,
+            snoozed_until: None,
             config: Some(zeron_proto::ChatConfig {
                 harness,
                 model: None,

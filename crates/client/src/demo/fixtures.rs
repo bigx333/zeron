@@ -424,6 +424,7 @@ pub(crate) fn seed(
                 .or_else(|| space.filter(|s| s.git_detected).map(|_| "main".to_owned())),
             checkout_id: source_context.as_ref().map(|s| s.checkout_id.clone()),
             source_context: source_context.clone(),
+            snoozed_until: None,
             config: Some(ChatConfig {
                 harness: demo.harness,
                 model: Some(demo.model.into()),

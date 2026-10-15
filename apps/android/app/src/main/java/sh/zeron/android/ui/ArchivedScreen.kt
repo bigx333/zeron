@@ -37,17 +37,20 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.SidebarMode
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import uniffi.zeron_core.SessionRow
 
-/** Archived sessions: open, unarchive (swipe or long press), rename. */
+/** Archived (T3: Settled) sessions: open, unarchive (swipe or long press), rename. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun ArchivedScreen(model: AppModel, onBack: () -> Unit, onOpen: (String) -> Unit) {
     val workspace by model.workspace.collectAsState()
     val rows = workspace?.archived.orEmpty()
+    val mode by model.sidebarMode.collectAsState()
     val list = rememberLazyListState()
     Box(Modifier.fillMaxSize()) {
         LazyColumn(state = list, contentPadding = PaddingValues(bottom = 32.dp), modifier = Modifier.fillMaxSize()) {
@@ -56,7 +59,7 @@ fun ArchivedScreen(model: AppModel, onBack: () -> Unit, onOpen: (String) -> Unit
                     Row(Modifier.padding(start = 12.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         TonalCircleButton(ZIcons.Back, "Back", onClick = onBack)
                     }
-                    ScreenHeader("Archived", if (rows.isEmpty()) null else "${rows.size} sessions")
+                    ScreenHeader(mode.settled, if (rows.isEmpty()) null else "${rows.size} sessions")
                 }
             }
             if (rows.isEmpty()) {
@@ -64,13 +67,13 @@ fun ArchivedScreen(model: AppModel, onBack: () -> Unit, onOpen: (String) -> Unit
                     Column(Modifier.fillMaxWidth().padding(48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         ZIcon(ZIcons.Archive, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.outline)
                         Spacer(Modifier.height(12.dp))
-                        Text("Nothing archived", style = MaterialTheme.typography.titleLarge)
+                        Text("Nothing ${mode.settled.lowercase()}", style = MaterialTheme.typography.titleLarge)
                     }
                 }
             }
             itemsIndexed(rows, key = { _, r -> r.id }) { i, row ->
                 Box(Modifier.animateItem().padding(horizontal = 16.dp).padding(bottom = ListItemDefaults.SegmentedGap)) {
-                    ArchivedRow(model, row, i, rows.size, onOpen)
+                    ArchivedRow(model, row, i, rows.size, mode, onOpen)
                 }
             }
         }
@@ -80,20 +83,24 @@ fun ArchivedScreen(model: AppModel, onBack: () -> Unit, onOpen: (String) -> Unit
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun ArchivedRow(model: AppModel, row: SessionRow, index: Int, count: Int, onOpen: (String) -> Unit) {
+private fun ArchivedRow(model: AppModel, row: SessionRow, index: Int, count: Int, mode: SidebarMode, onOpen: (String) -> Unit) {
     val state = rememberSwipeToDismissBoxState()
     val shape = segmentedShapes(index, count).shape
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     val haptics = LocalHapticFeedback.current
     SwipeToDismissBox(
         state = state,
         enableDismissFromStartToEnd = false,
-        onDismiss = { if (it == SwipeToDismissBoxValue.EndToStart) model.unarchive(row.id) },
+        onDismiss = {
+            // A failed unarchive slides the row back rather than leaving a gap.
+            if (it == SwipeToDismissBoxValue.EndToStart && !model.unarchive(row.id)) scope.launch { state.reset() }
+        },
         backgroundContent = {
             Surface(Modifier.fillMaxSize(), shape = shape, color = MaterialTheme.colorScheme.secondaryContainer) {
                 Box(Modifier.padding(end = 28.dp), contentAlignment = Alignment.CenterEnd) {
-                    ZIcon(ZIcons.Unarchive, "Unarchive", tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                    ZIcon(ZIcons.Unarchive, mode.unsettle, tint = MaterialTheme.colorScheme.onSecondaryContainer)
                 }
             }
         },
@@ -117,7 +124,7 @@ private fun ArchivedRow(model: AppModel, row: SessionRow, index: Int, count: Int
                 menu,
                 { menu = false },
                 listOf(
-                    MenuAction("Unarchive", ZIcons.Unarchive) { model.unarchive(row.id) },
+                    MenuAction(mode.unsettle, ZIcons.Unarchive) { model.unarchive(row.id) },
                     MenuAction("Rename…", ZIcons.Rename) { renaming = true },
                 ),
             )

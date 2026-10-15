@@ -182,5 +182,55 @@ async fn sending_a_message_unarchives_the_chat() {
         "an interrupt is not a message and must not unarchive"
     );
 
+    // Snooze uses the same durable row path through RPC and a new message
+    // wakes synchronously; an interrupt leaves its timer alone.
+    let until = chrono::Utc::now() + chrono::TimeDelta::hours(1);
+    client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "setChatSnoozedUntil", "chatId": CHAT, "until": until,
+            }),
+        )
+        .await
+        .expect("snooze through RPC");
+    let row = core.workspace.chat(CHAT).unwrap().unwrap();
+    assert!(!row.archived);
+    assert!(row.is_snoozed(chrono::Utc::now()));
+    core.doc_host
+        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .unwrap();
+    assert!(
+        core.workspace
+            .chat(CHAT)
+            .unwrap()
+            .unwrap()
+            .is_snoozed(chrono::Utc::now())
+    );
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-wake-2"))
+        .unwrap();
+    assert_eq!(
+        core.workspace.chat(CHAT).unwrap().unwrap().snoozed_until,
+        None
+    );
+    wait_for(
+        || complete_assistant_count(&core) == 2,
+        "second turn to complete",
+    )
+    .await;
+    let expired = chrono::Utc::now() - chrono::TimeDelta::minutes(1);
+    assert!(
+        client
+            .call(
+                zeron_rpc::methods::MUTATE,
+                serde_json::json!({
+                    "op": "setChatSnoozedUntil", "chatId": CHAT, "until": expired,
+                })
+            )
+            .await
+            .is_err()
+    );
+
     core.shutdown().await;
 }
