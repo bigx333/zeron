@@ -9,14 +9,17 @@
 //! The server is hand-rolled rather than an SDK: the MCP surface a stdio
 //! tool server needs is five methods (`initialize`, `ping`, `tools/list`,
 //! `tools/call`, and the `initialized` notification), and the repo already
-//! owns JSON-RPC framing for the Codex and ACP drivers. Zero new crates.
+//! owns JSON-RPC framing for the Codex and ACP drivers. The optional HTTP
+//! transport uses Axum and shares the same dispatcher and tool catalog.
 //!
 //! When the engine launches a harness it can inject this server into the
 //! agent's MCP config with `ZERON_CHAT_ID` / `ZERON_DEVICE_ID` in the
 //! environment. Every send from such an agent is then attributed to its
 //! originating chat, and a chat can never message itself.
 
+mod http;
 mod jsonrpc;
+pub use http::{HttpConfig, run as run_http, serve_http};
 mod tools;
 mod transcript;
 mod zeron;
@@ -52,7 +55,12 @@ impl McpConfig {
 
 /// Run the MCP server on this process's stdin/stdout until stdin closes.
 pub async fn run(config: McpConfig) -> anyhow::Result<()> {
+    let label = if config.origin.chat_id.is_none() {
+        std::env::var("ZERON_MCP_SENDER_LABEL").ok()
+    } else {
+        None
+    };
     let zeron = Zeron::new(format!("ws://127.0.0.1:{}", config.ipc_port), config.origin);
-    let tools = Tools::new(std::sync::Arc::new(zeron));
+    let tools = Tools::new(std::sync::Arc::new(zeron)).with_sender_label(label)?;
     serve_stdio(std::sync::Arc::new(tools)).await
 }

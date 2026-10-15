@@ -123,6 +123,9 @@ name (default: the local engine's device).
 | `read_chat`        | `WatchDocMessages` opening `reset` frame, rendered        |
 | `send_message`     | `QueueCommand` Run / Steer, or `QueueMessage`             |
 | `wait_for_turn`    | `WatchSessions` until the chat settles                    |
+| `wait_for_any`     | Concurrent waits across up to 32 chats                    |
+| `list_pending_inputs` | `WatchSessions` + waiting chats’ transcripts          |
+| `notify_controller` | `NotifyController` → configured webhook                 |
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
@@ -347,3 +350,146 @@ The `mcp_standalone_session_executes_on_the_selected_device` test in
 `device_routing` additionally runs two engines with a shared registry and device
 relay, verifies execution on the selected host (and absence of execution on the
 caller), and retrieves responses through MCP.
+
+## External controllers
+
+External agents use the same tools as injected agents. No bot-specific transport,
+identity, or inbound callback is required. A controller can create chats, send
+work, receive signed events, discover pending questions and approvals, and answer
+through `respond_to_input` or continue the conversation through `send_message`.
+
+### Configuration
+
+The binary reads `~/.zeron/env` at startup on all platforms, including launchd;
+Windows uses `%USERPROFILE%\.zeron\env`, with `HOME` as a fallback. Explicit
+process environment variables take precedence. This file is dotenv
+syntax, not a shell script. Keep it private (mode `0600`). Restart the daemon
+after changing it. All integrations below are disabled until configured.
+
+| Variable | Meaning |
+| --- | --- |
+| `ZERON_WEBHOOK_URL` | HTTP(S) endpoint receiving controller events. |
+| `ZERON_WEBHOOK_SECRET` | HMAC signing secret, at least 32 bytes. Required together with the URL. |
+| `ZERON_MCP_HTTP_BIND` | Specific local IP and port enabling HTTP in `zeron headless` (and the installed daemon), for example `127.0.0.1:27655`. To reach it over a tailnet, use this host's current tailnet IP. Wildcard binds are refused. |
+| `ZERON_MCP_HTTP_TOKEN` | Bearer token, at least 32 printable non-space ASCII bytes. Required for HTTP. Generate a random token independently of the webhook secret. |
+| `ZERON_MCP_SENDER_LABEL` | Optional display identity, e.g. `Build Controller`. Messages appear as “Message from Build Controller” in transcripts. Applies to external MCP connections; engine-injected chat agents keep their chat attribution. It is presentation metadata, not an authentication identity. |
+| `ZERON_APPROVAL_MODE` | `prompt` opts Claude and Codex into native permission prompts. Omit to preserve unattended operation. Explicit `auto_approve` runs still bypass prompts. |
+
+Do not enable both the daemon HTTP listener and a separate proxy on the same
+address. For a standalone proxy to an already running engine:
+
+```sh
+zeron mcp --http --bind 127.0.0.1:27655
+```
+
+The token is read from the environment/config file, never a CLI argument. The
+stdio form remains `zeron mcp`. HTTP exposes `/mcp` using
+[Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports):
+POST JSON-RPC with `Authorization: Bearer <token>` and
+`Accept: application/json, text/event-stream`. Initialize first, retain the
+returned `Mcp-Session-Id`, and send it with subsequent requests (including
+notifications). Send `MCP-Protocol-Version: 2025-06-18`. Notifications return empty
+202 responses; requests return JSON. GET returns 405 (no unsolicited SSE stream),
+and DELETE closes a session and cancels its active requests. Cancellation
+notifications identify a request with `params.requestId` and release its waits
+and subscriptions; they remain available when the request limit is saturated.
+Sessions expire after 24 hours without a request;
+unknown/expired session IDs return 404 and require reinitialization. Each session
+has independent send/wait tracking. The listener limits sessions, request bodies
+and concurrent requests. Browser Origin headers are rejected. Bearer access
+controls the entire workspace tool surface; use a trusted private network or a
+TLS reverse proxy for transport confidentiality. Zeron does not discover or
+configure a tailnet, TLS, or network ACLs.
+
+### Events and controller notifications
+
+The engine emits `chat.created`, `turn.completed`, `turn.errored`, and
+`input.requested` events. A completed turn event follows transcript finalization
+and uses the same completion marker as session watches; internal steering
+handoffs do not produce completion events. Questions include the request ID,
+question IDs and option labels in `data`. Permission approvals use the same
+question schema. Chat creation events may have a null title until auto-titling
+or a later rename.
+
+Injected agents also get `notify_controller`:
+
+```json
+{"kind":"blocked","message":"Need a decision about the migration"}
+```
+
+`kind` accepts `question`, `done`, `blocked`, or `info`. The chat defaults to the
+injected origin; callers without an origin supply `chat`. This emits an
+`agent.notification` with `data.kind` and `data.message`; the result's
+`queued: true` means accepted into the local outbox. It does not change the chat
+status, create a pending input, or wait for a controller reply. The controller
+uses the ordinary `send_message` tool to respond. If no webhook is configured,
+the tool returns an error.
+
+Every event has this versioned shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "unique-event-id",
+  "type": "turn.completed",
+  "timestamp": "2026-10-15T10:00:00Z",
+  "chatId": "chat-id",
+  "deviceId": "host-device-id",
+  "title": "Implement migration",
+  "status": "idle",
+  "lastReply": "Migration implemented and verified.",
+  "data": {"turnId": "completed-assistant-entry-id"}
+}
+```
+
+`lastReply` is the latest available assistant text (or null). Reasoning and
+raw tool output are excluded. Events contain chat content, so configure only
+trusted receivers. Delivery headers are `X-Zeron-Event-Id`,
+`X-Zeron-Timestamp` (Unix seconds), and
+`X-Zeron-Signature: sha256=<hex>`. Verify HMAC-SHA256 over the exact bytes
+`timestamp + "." + request_body`, using the signing secret and a constant-time
+comparison. Reject timestamps outside your replay window (e.g. five minutes)
+and deduplicate by event ID.
+
+Delivery is best effort through a bounded 256-event memory queue, with up to
+three attempts for network errors, HTTP 429 and 5xx responses. Other failures
+are not retried. Retries keep the event ID/body and re-sign with a fresh request
+timestamp. Redirects are not followed. Queue overflow and exhausted delivery
+attempts are logged without endpoint credentials or message bodies. There is no
+durable replay after a restart; reconcile using `list_chats`, `read_chat` and
+`list_pending_inputs`. Each engine sends events for runs it hosts; chat creation
+is emitted by the engine handling the create operation. Configure a receiver on
+each engine you want to observe.
+
+### Pending inputs and waiting for several chats
+
+`list_pending_inputs {device?}` returns every chat currently awaiting input,
+including archived chats, with every unresolved request in `pendingInputs` (and the latest request in
+`pendingInput` for compatibility).
+Transcript failures appear per chat as `error`; other chats remain available.
+Use `respond_to_input {chat, request_id, answers}` with the returned question IDs
+and labels. Approval labels are `Yes` and `No`; a dropped approval resolver
+fails closed. When Claude or Codex withdraws a permission request, its input is
+resolved automatically; other pending approvals remain answerable.
+
+Claude previously auto-approved all tools except its question tool. Codex used
+`approvalPolicy: never` and a full-access sandbox. With
+`ZERON_APPROVAL_MODE=prompt`, Claude forwards `can_use_tool` permissions as
+questions; Codex preserves the requested sandbox and uses `on-request`
+approvals. This setting applies when creating a harness runtime, so restart
+existing runs to change it. Other harnesses retain their current permission
+policies; this does not promise approval coverage for ACP, Cursor, OpenCode or Pi.
+
+After launching work in multiple chats with `wait: false`, use:
+
+```json
+{"chats":["first-chat-id","second-chat-id"],"timeout_secs":600}
+```
+
+with `wait_for_any`. It returns the same `{chatId, title, turn}` result as
+`wait_for_turn` for the first ready chat and cancels the remaining subscriptions.
+It accepts 1–32 references, resolves all of them before waiting, and removes
+duplicate chats. Already idle chats return immediately; remove collected chats
+from the next wait. Pending sends tracked by the same MCP session retain the
+usual “wait for this new turn” semantics. A timed out wait leaves that tracking
+intact.

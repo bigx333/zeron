@@ -40,6 +40,7 @@ pub struct ToolDef {
 
 pub struct Tools {
     zeron: Arc<Zeron>,
+    sender_label: Option<String>,
     // Remember successful sends on this MCP connection so wait_for_turn after
     // wait:false also waits for a newly created chat with no session row yet.
     pending_turns: tokio::sync::Mutex<HashMap<String, Arc<PendingTurn>>>,
@@ -166,6 +167,28 @@ fn catalog() -> Vec<ToolDef> {
             input_schema: chat_key_schema(json!({
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
+        },
+        ToolDef {
+            name: "wait_for_any",
+            description: "Wait concurrently for the first of several chats to finish, error or request input. Returns the chat and turn; other waits are cancelled. Idle chats return immediately. Send all work before waiting.",
+            input_schema: json!({"type":"object","properties":{
+                "chats":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"string"}},
+                "timeout_secs":{"type":"integer","minimum":1,"maximum":3600,"default":600}
+            },"required":["chats"]}),
+        },
+        ToolDef {
+            name: "list_pending_inputs",
+            description: "Questions and permission approvals awaiting answers across chats, including archived chats. Returns request ids, question ids and option labels for respond_to_input. Failed transcript reads are reported per chat.",
+            input_schema: json!({"type":"object","properties":{"device":device_schema()}}),
+        },
+        ToolDef {
+            name: "notify_controller",
+            description: "Queue a question, done, blocked or info notification to the configured external controller webhook. Defaults to your origin chat. Queued acknowledges local acceptance, not delivery; replies arrive via send_message. Requires engine webhook configuration.",
+            input_schema: json!({"type":"object","properties":{
+                "chat":{"type":"string","description":"Chat id, prefix or title; defaults to origin chat."},
+                "kind":{"type":"string","enum":["question","done","blocked","info"],"default":"info"},
+                "message":{"type":"string","minLength":1,"maxLength":65536}
+            },"required":["message"]}),
         },
         ToolDef {
             name: "interrupt_chat",
@@ -556,6 +579,24 @@ struct WaitArgs {
 }
 
 #[derive(Deserialize)]
+struct WaitAnyArgs {
+    chats: Vec<String>,
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PendingInputsArgs {
+    device: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NotifyArgs {
+    chat: Option<String>,
+    kind: Option<String>,
+    message: String,
+}
+
+#[derive(Deserialize)]
 struct ArchiveArgs {
     chat: String,
     archived: Option<bool>,
@@ -583,6 +624,7 @@ fn wait_duration(secs: Option<u64>) -> Duration {
     secs.map(Duration::from_secs)
         .unwrap_or(DEFAULT_WAIT)
         .min(MAX_WAIT)
+        .max(Duration::from_secs(1))
 }
 
 #[cfg(test)]
@@ -648,6 +690,22 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
     })
 }
 
+fn pending_inputs(entries: &[zeron_doc::SessionMessageEntry]) -> Vec<Value> {
+    entries
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .filter_map(|part| match part {
+            zeron_doc::MessagePart::Input {
+                request_id,
+                questions,
+                resolved: false,
+                ..
+            } => Some(json!({"requestId":request_id,"questions":questions})),
+            _ => None,
+        })
+        .collect()
+}
+
 fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
     messages.iter().rev().find_map(|m| m.pending_input.clone())
 }
@@ -658,6 +716,7 @@ impl Tools {
     pub fn new(zeron: Arc<Zeron>) -> Self {
         Self {
             zeron,
+            sender_label: None,
             pending_turns: Default::default(),
         }
     }
@@ -691,6 +750,9 @@ impl Tools {
             "read_chat" => self.read_chat(parse(args)?).await,
             "send_message" => self.send_message(parse(args)?).await,
             "wait_for_turn" => self.wait_for_turn(parse(args)?).await,
+            "wait_for_any" => self.wait_for_any(parse(args)?).await,
+            "list_pending_inputs" => self.list_pending_inputs(parse(args)?).await,
+            "notify_controller" => self.notify_controller(parse(args)?).await,
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
@@ -750,6 +812,7 @@ impl Tools {
         Ok(json!({
             "chat": chat,
             "originDeviceId": origin.device_id,
+            "senderLabel": self.sender_label,
             "localDeviceId": local_device,
             "workspaceScope": engine.get("workspaceScope").cloned().unwrap_or(Value::Null),
             "note": if origin.chat_id.is_some() {
@@ -1197,6 +1260,87 @@ impl Tools {
         Ok(json!({ "chatId": chat.id, "title": chat.title, "turn": turn }))
     }
 
+    async fn wait_for_any(&self, args: WaitAnyArgs) -> anyhow::Result<Value> {
+        use futures::{StreamExt, stream::FuturesUnordered};
+        anyhow::ensure!(
+            !args.chats.is_empty() && args.chats.len() <= MAX_BATCH,
+            "chats must contain 1–32 references"
+        );
+        let all = self.zeron.chats().await?;
+        let mut chats = Vec::new();
+        for key in &args.chats {
+            anyhow::ensure!(!key.trim().is_empty(), "chat references must not be empty");
+            let chat = crate::zeron::resolve_chat_in(&all, key.trim())?;
+            if !chats.iter().any(|c: &Chat| c.id == chat.id) {
+                chats.push(chat);
+            }
+        }
+        let mut waits = chats
+            .into_iter()
+            .map(|chat| async move {
+                self.wait_for_turn(WaitArgs {
+                    chat: chat.id,
+                    timeout_secs: args.timeout_secs,
+                })
+                .await
+            })
+            .collect::<FuturesUnordered<_>>();
+        waits.next().await.context("no chats to wait for")?
+    }
+
+    async fn list_pending_inputs(&self, args: PendingInputsArgs) -> anyhow::Result<Value> {
+        use futures::{StreamExt, stream};
+        let (mut chats, spaces, sessions) = tokio::try_join!(
+            self.zeron.chats(),
+            self.zeron.spaces(),
+            self.zeron.sessions()
+        )?;
+        if args.device.is_some() {
+            let device = self.zeron.resolve_device_id(args.device.as_deref()).await?;
+            chats.retain(|chat| chat.device_id == device);
+        }
+        chats.retain(|chat| {
+            session_for(&sessions, chat).is_some_and(|s| s.status == SessionStatus::AwaitingInput)
+        });
+        chats.sort_by(|a, b| a.id.cmp(&b.id));
+        let inputs = stream::iter(chats.into_iter().map(|chat: Chat| {
+            let spaces = &spaces;
+            let sessions = &sessions;
+            async move {
+                let mut summary = summarize_chat(&chat, spaces, sessions);
+                match self
+                    .zeron
+                    .transcript_on(&chat.id, Some(&chat.device_id))
+                    .await
+                {
+                    Ok(entries) => {
+                        let pending = pending_inputs(&entries);
+                        summary["pendingInput"] = pending.last().cloned().unwrap_or(Value::Null);
+                        summary["pendingInputs"] = json!(pending);
+                    }
+                    Err(error) => summary["error"] = json!(error.to_string()),
+                }
+                summary
+            }
+        }))
+        .buffered(8)
+        .collect::<Vec<_>>()
+        .await;
+        Ok(json!({"total":inputs.len(),"inputs":inputs}))
+    }
+
+    async fn notify_controller(&self, args: NotifyArgs) -> anyhow::Result<Value> {
+        let key = args
+            .chat
+            .as_deref()
+            .or(self.zeron.origin().chat_id.as_deref())
+            .context("chat is required without an origin chat")?;
+        let chat = self.zeron.resolve_chat(key).await?;
+        self.zeron.call(zeron_rpc::methods::NOTIFY_CONTROLLER, json!({
+            "chatId":chat.id,"targetDeviceId":chat.device_id,"kind":args.kind.as_deref().unwrap_or("info"),"message":args.message
+        })).await
+    }
+
     async fn archive_chat(&self, args: ArchiveArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
         let archived = args.archived.unwrap_or(true);
@@ -1288,11 +1432,34 @@ impl Tools {
 
     // ---- shared pieces -------------------------------------------------------
 
+    /// A configured controller name is presentation metadata, never authorization.
+    pub fn with_sender_label(mut self, label: Option<String>) -> anyhow::Result<Self> {
+        self.sender_label = match label {
+            Some(label) => {
+                let label = label.trim();
+                anyhow::ensure!(
+                    !label.is_empty()
+                        && label.chars().count() <= 80
+                        && !label
+                            .chars()
+                            .any(|c| c.is_control() || matches!(c, '[' | ']')),
+                    "sender label must be 1–80 characters without control characters or brackets"
+                );
+                Some(label.to_owned())
+            }
+            None => None,
+        };
+        Ok(self)
+    }
+
     /// Prefix the sender's identity when this server speaks for a chat, so
     /// the receiving agent (and the human reading that transcript) can tell
     /// an agent-to-agent message from a typed one. Reply instructions always
     /// use the full id: display prefixes need not uniquely identify a chat.
     async fn attribute(&self, target: &Chat, text: &str) -> String {
+        if let Some(label) = &self.sender_label {
+            return format!("[Message from external controller {label}]\n\n{text}");
+        }
         let Some(origin_id) = self.zeron.origin().chat_id.as_deref() else {
             return text.to_owned();
         };
@@ -1534,6 +1701,8 @@ mod tests {
         beta_remote: bool,
         extra_chats: Vec<Value>,
         catalog_error: Option<&'static str>,
+        session_rows: Option<Value>,
+        transcript_frame: Option<Value>,
         reads: Mutex<Vec<(String, Value)>>,
     }
 
@@ -1594,7 +1763,9 @@ mod tests {
                         .extend(self.extra_chats.clone());
                     stream(chats)
                 }
-                methods::WATCH_SESSIONS => stream(json!([])),
+                methods::WATCH_SESSIONS => {
+                    stream(self.session_rows.clone().unwrap_or_else(|| json!([])))
+                }
                 methods::LIST_HARNESSES if remote => RpcReply::Value(json!([
                     {"id":"codex", "name":"Remote Codex", "installed":true},
                     {"id":"cursor", "name":"Disabled Cursor", "installed":true, "enabled":false}
@@ -1611,6 +1782,9 @@ mod tests {
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
                 ])),
+                methods::WATCH_DOC_MESSAGES if self.transcript_frame.is_some() => {
+                    stream(self.transcript_frame.clone().unwrap())
+                }
                 methods::WATCH_DOC_MESSAGES => stream(json!({ "reset": [
                     { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
                       "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
@@ -1625,7 +1799,10 @@ mod tests {
                         .push((method.to_owned(), params.clone()));
                     RpcReply::Value(json!({ "id": "v:1", "title": params["title"] }))
                 }
-                methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
+                methods::MUTATE
+                | methods::QUEUE_COMMAND
+                | methods::QUEUE_MESSAGE
+                | methods::NOTIFY_CONTROLLER => {
                     self.writes
                         .lock()
                         .unwrap()
@@ -1647,6 +1824,117 @@ mod tests {
     fn tools(world: Arc<World>, origin: Origin) -> Tools {
         let client = memory_client(world);
         Tools::new(Arc::new(Zeron::with_client(client, origin)))
+    }
+
+    #[tokio::test]
+    async fn controller_labels_and_notifications_are_provider_neutral() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: None,
+            },
+        )
+        .with_sender_label(Some("Example Controller".into()))
+        .unwrap();
+        tools
+            .call("send_message", json!({"chat":"alpha", "text":"continue"}))
+            .await
+            .unwrap();
+        let writes = world.writes.lock().unwrap().clone();
+        assert_eq!(
+            writes[0].1["command"]["request"]["prompt"],
+            "[Message from external controller Example Controller]\n\ncontinue"
+        );
+        tools
+            .call(
+                "notify_controller",
+                json!({"kind":"blocked","message":"Need a decision"}),
+            )
+            .await
+            .unwrap();
+        let writes = world.writes.lock().unwrap();
+        let (_, notification) = writes
+            .iter()
+            .find(|(method, _)| method == methods::NOTIFY_CONTROLLER)
+            .unwrap();
+        assert_eq!(notification["chatId"], "chat-beta-2");
+        assert_eq!(notification["kind"], "blocked");
+        assert_eq!(notification["targetDeviceId"], "dev-local");
+        drop(writes);
+        assert!(
+            Tools::new(Arc::new(Zeron::new(String::new(), Origin::default())))
+                .with_sender_label(Some("bad]\nlabel".into()))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_any_returns_ready_chat_without_waiting_on_busy_chat() {
+        let world = Arc::new(World {
+            session_rows: Some(json!([
+                {"chatId":"chat-alpha-1","deviceId":"dev-local","status":"working","updatedAt":chrono::Utc::now()}
+            ])),
+            ..World::default()
+        });
+        let tools = tools(world, Origin::default());
+        let ready = tokio::time::timeout(
+            Duration::from_secs(1),
+            tools.call(
+                "wait_for_any",
+                json!({"chats":["alpha","beta"],"timeout_secs":10}),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(ready["chatId"], "chat-beta-2");
+        assert_eq!(ready["turn"]["outcome"], "completed");
+        assert!(
+            tools
+                .call("wait_for_any", json!({"chats":[]}))
+                .await
+                .is_err()
+        );
+        assert!(
+            tools
+                .call("wait_for_any", json!({"chats":["alpha","missing"]}))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_inputs_include_archived_chats_and_can_be_answered() {
+        let world = Arc::new(World {
+            session_rows: Some(json!([
+                {"chatId":"archived-chat","deviceId":"dev-local","status":"awaitingInput","updatedAt":chrono::Utc::now()}
+            ])),
+            extra_chats: vec![
+                json!({"id":"archived-chat","deviceId":"dev-local","title":"Archived","archived":true,"createdAt":chrono::Utc::now()}),
+            ],
+            transcript_frame: Some(
+                json!({"reset":[{"id":"question-entry","role":"assistant","deviceId":"dev-local","createdAt":1,
+                "parts":[{"kind":"input","id":"input-part","requestId":"request-1","resolved":false,
+                    "questions":[{"id":"question-1","header":"Approve tool","question":"Allow it?","options":["Yes","No"]}]}]}]}),
+            ),
+            ..World::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        let pending = tools.call("list_pending_inputs", json!({})).await.unwrap();
+        assert_eq!(pending["total"], 1);
+        assert_eq!(
+            pending["inputs"][0]["pendingInput"]["requestId"],
+            "request-1"
+        );
+        assert_eq!(
+            pending["inputs"][0]["pendingInput"]["questions"][0]["options"][0],
+            "Yes"
+        );
+        tools.call("respond_to_input", json!({"chat":"archived-chat","answers":[{"question_id":"question-1","labels":["Yes"]}]})).await.unwrap();
+        let writes = world.writes.lock().unwrap();
+        assert_eq!(writes[0].1["command"]["requestId"], "request-1");
     }
 
     #[tokio::test]
