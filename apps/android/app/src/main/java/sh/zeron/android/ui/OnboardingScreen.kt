@@ -407,7 +407,7 @@ private fun AppearancePage(model: AppModel) {
 
 @Composable
 private fun SyncPage(model: AppModel) {
-    Heading("Sync your work", "Log in to keep your chats, projects and settings in step everywhere you use Zeron.")
+    Heading("Sync your work", "Log in to keep your chats, projects and settings in step everywhere you use Zeron Nova.")
     InfoRows(
         listOf(
             Triple(ZIcons.Phone, "On every device", "Pick up a chat on your phone or another computer, right where you left it."),
@@ -478,9 +478,9 @@ private fun AgentsPage(model: AppModel, cloudWithheld: Boolean) {
     val names = found.values.filterNotNull().flatten().distinct()
     val detail = when {
         cloudShown -> "Cloud runs ${join(CloudStore.agents.map { it.name })} with your own subscriptions. Sign in to any you'd like to use."
-        hosts.isEmpty() -> "Zeron runs the coding agents you already use. Install Zeron on a computer and they'll show up here."
+        hosts.isEmpty() -> "Zeron Nova runs the coding agents you already use. Install Zeron Nova on a computer and they'll show up here."
         found.values.any { it == null } -> "Looking for coding agents…"
-        names.isEmpty() -> "Zeron runs the coding agents you already use, and none are on your computers yet."
+        names.isEmpty() -> "Zeron Nova runs the coding agents you already use, and none are on your computers yet."
         else -> "Found ${if (names.size > 3) "${names.size} agents" else join(names)} on your computers. Turn them on or off any time in Settings → Providers."
     }
     Heading("Your agents", detail)

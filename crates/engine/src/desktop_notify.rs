@@ -316,7 +316,7 @@ impl Notifier {
         }
         let body = match state {
             ConnectivityState::Offline => "Your device is offline",
-            _ => "Zeron is trying to reconnect",
+            _ => "Zeron Nova is trying to reconnect",
         };
         (self.post)("Connection unavailable", body, None);
     }

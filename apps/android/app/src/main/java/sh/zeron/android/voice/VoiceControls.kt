@@ -270,7 +270,7 @@ fun VoiceHostPicker(controller: VoiceController, onDismiss: () -> Unit, onStarte
             Spacer(Modifier.size(4.dp))
             Text(
                 if (hosts.isEmpty()) {
-                    "No online device can host Codex voice. Start Zeron with remote voice enabled on your Mac or server."
+                    "No online device can host Codex voice. Start Zeron Nova with remote voice enabled on your Mac or server."
                 } else {
                     "Audio stays on this phone. Codex and its tools run on the device you pick."
                 },

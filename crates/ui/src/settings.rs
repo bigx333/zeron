@@ -461,7 +461,7 @@ impl PullRequestDestination {
     pub fn description(self) -> &'static str {
         match self {
             Self::Native => {
-                "Inspect them in Zeron, beside the conversation or the Pull requests board."
+                "Inspect them in Zeron Nova, beside the conversation or the Pull requests board."
             }
             Self::Browser => {
                 "Open them in a Browser tab beside the conversation, or in the default browser when none is shown."
@@ -606,7 +606,7 @@ fn install_staged_background(
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to save the image. Restart Zeron and try again.".to_string())?;
+        .ok_or_else(|| "Unable to save the image. Restart Zeron Nova and try again.".to_string())?;
     let prepared = prepare_background_file(staged, &data_dir)?;
     commit_background(source, prepared, color, cx)
 }
@@ -675,7 +675,7 @@ fn commit_background(
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to save the image. Restart Zeron and try again.".to_string())?;
+        .ok_or_else(|| "Unable to save the image. Restart Zeron Nova and try again.".to_string())?;
     let backgrounds_dir = data_dir.join(NEW_THREAD_BACKGROUND_DIR);
     let replacement = prepared.0.as_ref().unwrap().clone();
     let mut next = current(cx);
@@ -710,7 +710,7 @@ pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String>
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to remove the image. Restart Zeron and try again.".to_string())?;
+        .ok_or_else(|| "Unable to remove the image. Restart Zeron Nova and try again.".to_string())?;
     let mut next = current(cx);
     let previous = next.new_thread_composer_background.take();
     next.wallpaper_source = None;

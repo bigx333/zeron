@@ -54,7 +54,7 @@ fun SignInScreen(model: AppModel) {
             Modifier.size(148.dp).clip(MaterialShapes.Cookie12Sided.toShape()),
         )
         Spacer(Modifier.height(32.dp))
-        Text("Zeron", style = MaterialTheme.typography.displayMedium)
+        Text("Zeron Nova", style = MaterialTheme.typography.displayMedium)
         Spacer(Modifier.height(10.dp))
         Text(
             "Follow and steer your coding agents from anywhere.",

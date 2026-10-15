@@ -739,7 +739,7 @@ impl CloudPage {
             Loadable::Idle | Loadable::Loading => return None,
             Loadable::Error(error) => {
                 let copy = if error.starts_with("unknown method") {
-                    "This version of Zeron can't manage Cloud yet.".to_string()
+                    "This version of Zeron Nova can't manage Cloud yet.".to_string()
                 } else {
                     format!("Couldn't check Cloud: {error}")
                 };
