@@ -137,6 +137,8 @@ private fun Widget(state: TranscriptState, model: RowModel, w: Widget, palette: 
             state.toggleDetail(key, kind.detail, kind.open)
         }
         WidgetKind.Shimmer -> Shimmer(state, model, w, palette)
+        // Agent visuals have no Android renderer yet; the row keeps its space, as on iOS without a session.
+        is WidgetKind.Visual -> Unit
     }
 }
 
