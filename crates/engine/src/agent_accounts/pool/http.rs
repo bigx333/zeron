@@ -679,7 +679,13 @@ pub(super) fn observe(
         for (bucket, label) in buckets {
             let prefix = format!("anthropic-ratelimit-unified-{bucket}");
             let used = number(headers, &format!("{prefix}-utilization"));
-            let resets_at = reset(headers, &format!("{prefix}-reset"));
+            let resets_at = reset(headers, &format!("{prefix}-reset")).or_else(|| {
+                observation
+                    .quota_resets
+                    .get(&label)
+                    .copied()
+                    .filter(|at| at.timestamp_millis() > now_ms())
+            });
             let rejected = headers
                 .get(format!("{prefix}-status"))
                 .is_some_and(|s| s == "rejected");
@@ -724,6 +730,7 @@ pub(super) fn observe(
                 if previous != label {
                     windows.retain(|window| window.label != previous);
                     observation.replaced_window_labels.insert(previous);
+                    observation.quota_resets.remove(&format!("codex:{bucket}"));
                     changed = true;
                 }
             } else {
@@ -742,6 +749,7 @@ pub(super) fn observe(
                     .quota_resets
                     .get(&format!("codex:{bucket}"))
                     .copied()
+                    .filter(|at| at.timestamp_millis() > now_ms())
             });
             if let Some(reset) = resets_at {
                 changed |= observation

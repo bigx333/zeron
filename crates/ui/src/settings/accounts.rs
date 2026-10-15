@@ -1620,7 +1620,7 @@ impl AccountsPage {
             return;
         };
         let params = self.params(serde_json::json!({ "harness": harness, "config": config }));
-        let plain = self.params(serde_json::json!({ "forceUsage": false }));
+        let plain = self.params(serde_json::json!({}));
         let seq = self.pool_seq;
         self.pool_task = Some(cx.spawn(async move |this, cx| {
             let decode = |value| {
@@ -1633,18 +1633,20 @@ impl AccountsPage {
                 .await
                 .map_err(|err| err.to_string())
                 .and_then(decode);
-            let (snapshot, error) = match result {
-                Ok(snapshot) => (Some(snapshot), None),
+            let (snapshot, recovered_pool, error) = match result {
+                Ok(snapshot) => (Some(snapshot), None, None),
                 Err(error) => {
-                    // A timeout/disconnect may follow a committed write. Even a
-                    // normal rejection must reconcile all earlier acknowledgements.
-                    let snapshot = engine
+                    // Configuration may have committed before account discovery
+                    // failed. Read the pool independently of that discovery.
+                    let pool = engine
                         .client()
-                        .call(methods::LIST_AGENT_ACCOUNTS, plain)
+                        .call(methods::GET_ACCOUNT_POOL, plain)
                         .await
                         .ok()
-                        .and_then(|value| decode(value).ok());
-                    (snapshot, Some(error))
+                        .and_then(|value| {
+                            serde_json::from_value::<zeron_proto::AccountPoolSnapshot>(value).ok()
+                        });
+                    (None, pool, Some(error))
                 }
             };
             this.update(cx, |page, cx| {
@@ -1652,8 +1654,37 @@ impl AccountsPage {
                     return;
                 }
                 page.pool_task = None;
-                let confirmed = snapshot.or_else(|| page.pool_baseline.clone());
+                let confirmed = snapshot.or_else(|| {
+                    // Keep current usage and unrelated account data. If the read
+                    // also failed, retain the pending view rather than claim an
+                    // old baseline is authoritative after an ambiguous write.
+                    let mut current = cx
+                        .default_global::<AccountsSnapshotCache>()
+                        .0
+                        .get(&page.target_device)
+                        .cloned()
+                        .or_else(|| page.snapshot.ready().cloned())?;
+                    if let Some(pool) = recovered_pool {
+                        current.pool = pool;
+                        for harness in [HarnessId::ClaudeCode, HarnessId::Codex] {
+                            let order = pool_config(&current, harness)?.account_order.clone();
+                            apply_pool_order(&mut current, harness, &order);
+                        }
+                    }
+                    Some(current)
+                });
                 if let Some(mut confirmed) = confirmed {
+                    // Bypass mutations have their own serialized composer queue.
+                    // This provider edit must not overwrite a newer chat flag
+                    // with one captured by its earlier snapshot/read response.
+                    if let Some(current) = cx
+                        .default_global::<AccountsSnapshotCache>()
+                        .0
+                        .get(&page.target_device)
+                    {
+                        confirmed.pool.config.bypassed_chat_ids =
+                            current.pool.config.bypassed_chat_ids.clone();
+                    }
                     page.pool_baseline = (!page.pool_queue.is_empty()).then(|| confirmed.clone());
                     for (harness, config) in &page.pool_queue {
                         apply_pool_order(&mut confirmed, *harness, &config.account_order);
@@ -5300,16 +5331,12 @@ mod tests {
         pump(cx);
         let reconcile: zeron_rpc::ClientFrame =
             serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
-        assert_eq!(
-            reconcile.method.as_deref(),
-            Some(methods::LIST_AGENT_ACCOUNTS)
-        );
-        assert_eq!(reconcile.params["forceUsage"], false);
+        assert_eq!(reconcile.method.as_deref(), Some(methods::GET_ACCOUNT_POOL));
         replies
             .try_send(
                 serde_json::to_string(&zeron_rpc::ServerFrame {
                     id: reconcile.id,
-                    ok: Some(serde_json::to_value(&confirmed).unwrap()),
+                    ok: Some(serde_json::to_value(&confirmed.pool).unwrap()),
                     ..Default::default()
                 })
                 .unwrap(),
@@ -5331,6 +5358,110 @@ mod tests {
                     .config
                     .claude,
                 *config
+            );
+        });
+        // A later write commits but its discovery phase fails. The pool-only
+        // read restores committed routing/order without replacing newer usage.
+        page.update(cx, |page, cx| {
+            page.configure_pool(
+                HarnessId::ClaudeCode,
+                |snapshot| {
+                    snapshot.pool.config.claude.enabled = false;
+                    apply_pool_order(
+                        snapshot,
+                        HarnessId::ClaudeCode,
+                        &["c".into(), "a".into(), "b".into()],
+                    );
+                },
+                cx,
+            );
+            cx.default_global::<AccountsSnapshotCache>()
+                .0
+                .get_mut(&None)
+                .unwrap()
+                .accounts
+                .iter_mut()
+                .find(|row| row.id == "a")
+                .unwrap()
+                .usage_windows[0]
+                .used_fraction = 0.55;
+            cx.default_global::<AccountsSnapshotCache>()
+                .0
+                .get_mut(&None)
+                .unwrap()
+                .pool
+                .config
+                .bypassed_chat_ids
+                .push("another-chat".into());
+        });
+        pump(cx);
+        let committed: zeron_rpc::ClientFrame =
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            committed.method.as_deref(),
+            Some(methods::CONFIGURE_ACCOUNT_POOL)
+        );
+        assert_eq!(committed.params["config"]["enabled"], false);
+        replies
+            .try_send(
+                serde_json::to_string(&zeron_rpc::ServerFrame {
+                    id: committed.id,
+                    err: Some("Configuration saved; account discovery failed".into()),
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        pump(cx);
+        let recovery: zeron_rpc::ClientFrame =
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(recovery.method.as_deref(), Some(methods::GET_ACCOUNT_POOL));
+        confirmed.pool.config.claude.enabled = false;
+        confirmed.pool.config.claude.account_order = vec!["c".into(), "a".into(), "b".into()];
+        replies
+            .try_send(
+                serde_json::to_string(&zeron_rpc::ServerFrame {
+                    id: recovery.id,
+                    ok: Some(serde_json::to_value(&confirmed.pool).unwrap()),
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        pump(cx);
+        page.read_with(cx, |page, cx| {
+            let snapshot = page.snapshot.ready().unwrap();
+            assert!(!snapshot.pool.config.claude.enabled);
+            assert_eq!(pool_order(snapshot, HarnessId::ClaudeCode), ["c", "a", "b"]);
+            assert_eq!(
+                snapshot
+                    .accounts
+                    .iter()
+                    .find(|row| row.id == "a")
+                    .unwrap()
+                    .usage_windows[0]
+                    .used_fraction,
+                0.55
+            );
+            assert!(
+                !cx.global::<AccountsSnapshotCache>().0[&None]
+                    .pool
+                    .config
+                    .claude
+                    .enabled
+            );
+            assert!(page.pool_baseline.is_none());
+            assert!(
+                snapshot
+                    .pool
+                    .config
+                    .bypassed_chat_ids
+                    .contains(&"another-chat".into())
+            );
+            assert!(
+                crate::toast::messages(cx)
+                    .iter()
+                    .any(|message| message.contains("account discovery failed"))
             );
         });
     }

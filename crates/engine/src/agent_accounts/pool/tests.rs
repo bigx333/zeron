@@ -14,11 +14,11 @@ use hyper_util::rt::TokioIo;
 use super::*;
 
 type TestBody = UnsyncBoxBody<Bytes, std::io::Error>;
-fn reply(status: u16, body: &'static str) -> Response<TestBody> {
+fn reply(status: u16, body: impl Into<Bytes>) -> Response<TestBody> {
     Response::builder()
         .status(status)
         .body(
-            Full::new(Bytes::from_static(body.as_bytes()))
+            Full::new(body.into())
                 .map_err(|never| match never {})
                 .boxed_unsync(),
         )
@@ -1099,6 +1099,12 @@ fn partial_codex_headers_preserve_bucket_identity_and_do_not_invent_weekly_windo
             .iter()
             .all(|window| window.label != "Month")
     );
+    assert!(
+        accounts.list_pool_test_windows(&saved)[0]
+            .resets_at
+            .is_none(),
+        "a changed bucket duration must not inherit the old period's reset"
+    );
     let unknown = slot(&accounts, HarnessId::Codex, "unknown-duration");
     let mut secondary = reqwest::header::HeaderMap::new();
     secondary.insert("x-codex-secondary-used-percent", "80".parse().unwrap());
@@ -1354,15 +1360,16 @@ async fn reset_only_metadata_routes_without_becoming_a_usage_measurement() {
         a.id
     );
     // A later full probe must supersede the older reset-only observations.
-    let observed_at = lock(&accounts.inner.pool.state).observations[&a.id].observed_at;
+    let probe = serde_json::json!({"seven_day": {
+        "utilization":20, "resets_at": (Utc::now() + chrono::Duration::hours(3)).to_rfc3339()
+    }});
+    let measured = claude_usage_windows(&probe).unwrap();
+    accounts.record_claude_pool_probe(&a, &probe, &measured);
     lock(&accounts.inner.usage).insert(
         usage_key(a.harness, &a.account_key),
         UsageEntry {
-            usage: Some(UsageSnapshot {
-                windows: vec![window("Week", 0.2, 3 * 60 * 60 * 1000)],
-                ..Default::default()
-            }),
-            fetched_at: Some(observed_at + 1),
+            usage: Some(measured),
+            fetched_at: Some(now_ms()),
             ..Default::default()
         },
     );
@@ -1370,6 +1377,125 @@ async fn reset_only_metadata_routes_without_becoming_a_usage_measurement() {
         accounts.pool_candidates(a.harness, "opus", None, &HashSet::new(), now_ms())[0].id,
         b.id
     );
+    let mut unrelated = reqwest::header::HeaderMap::new();
+    unrelated.insert(
+        "anthropic-ratelimit-unified-5h-utilization",
+        "0.1".parse().unwrap(),
+    );
+    http::observe(&accounts, &a, &unrelated, "opus");
+    assert_eq!(
+        accounts.pool_candidates(a.harness, "opus", None, &HashSet::new(), now_ms())[0].id,
+        b.id,
+        "an unrelated header must not revive the old family or shared reset"
+    );
+    accounts.flush_pool();
+    let restored = AgentAccounts::with_endpoints(
+        accounts.inner.config.clone(),
+        accounts.inner.endpoints.clone(),
+        Default::default(),
+    );
+    assert_eq!(
+        restored.pool_candidates(a.harness, "opus", None, &HashSet::new(), now_ms())[0].id,
+        b.id
+    );
+}
+
+#[test]
+fn a_utilization_only_claude_header_keeps_the_previously_observed_reset() {
+    let (_root, accounts) = fixture();
+    let saved = slot(&accounts, HarnessId::ClaudeCode, "reset-then-use");
+    enable(&accounts, saved.harness, &[&saved]);
+    let mut headers = reqwest::header::HeaderMap::new();
+    let reset = (now_ms() + 60_000) / 1000;
+    headers.insert(
+        "anthropic-ratelimit-unified-7d-reset",
+        reset.to_string().parse().unwrap(),
+    );
+    http::observe(&accounts, &saved, &headers, "other");
+    assert!(accounts.list_pool_test_windows(&saved).is_empty());
+    headers.clear();
+    headers.insert(
+        "anthropic-ratelimit-unified-7d-utilization",
+        "1".parse().unwrap(),
+    );
+    http::observe(&accounts, &saved, &headers, "other");
+    let windows = accounts.list_pool_test_windows(&saved);
+    assert_eq!(windows[0].used_fraction, 1.0);
+    assert_eq!(windows[0].resets_at.unwrap().timestamp(), reset);
+    assert!(
+        accounts
+            .pool_candidates(saved.harness, "other", None, &HashSet::new(), now_ms())
+            .is_empty()
+    );
+    assert_eq!(
+        accounts.pool_candidates(
+            saved.harness,
+            "other",
+            None,
+            &HashSet::new(),
+            reset * 1000 + 1
+        )[0]
+        .id,
+        saved.id
+    );
+    assert!(eligible(&windows, "other", 0.98, reset * 1000 + 1));
+}
+
+#[tokio::test]
+async fn reset_only_claude_probes_guide_routing_without_inventing_measurements() {
+    for session in [false, true] {
+        let (_root, initial) = fixture();
+        let mut body = serde_json::json!({
+            "seven_day":{"resets_at":(Utc::now() + chrono::Duration::hours(1)).to_rfc3339()},
+            "seven_day_opus":{"resets_at":(Utc::now() + chrono::Duration::minutes(30)).to_rfc3339()},
+            "limits":[{"kind":"weekly_scoped", "scope":{"model":{"display_name":"Sonnet"}},
+                "resets_at":(Utc::now() + chrono::Duration::minutes(45)).to_rfc3339()}]
+        });
+        if session {
+            body["five_hour"] = serde_json::json!({"utilization":25});
+        }
+        let source = upstream(move |_, _| reply(200, body.to_string())).await;
+        let mut endpoints = initial.inner.endpoints.clone();
+        endpoints.claude_usage = format!("{}/usage", source.url);
+        let accounts = AgentAccounts::with_endpoints(
+            initial.inner.config.clone(),
+            endpoints,
+            Default::default(),
+        );
+        let a = slot(&accounts, HarnessId::ClaudeCode, "probe-reset-only");
+        let b = slot(&accounts, a.harness, "later-reset");
+        enable(&accounts, a.harness, &[&b, &a]);
+        quota(&accounts, &b, vec![window("Week", 0.8, 2 * 60 * 60 * 1000)]);
+        accounts
+            .refresh_usage_scoped(&[(a.harness, &a, true)], false)
+            .await;
+        for family in ["other", "opus", "sonnet"] {
+            assert_eq!(
+                accounts.pool_candidates(a.harness, family, None, &HashSet::new(), now_ms())[0].id,
+                a.id
+            );
+        }
+        let windows = accounts.list_pool_test_windows(&a);
+        assert_eq!(windows.len(), usize::from(session));
+        assert!(
+            windows
+                .iter()
+                .all(|w| w.label == "Session" && w.used_fraction == 0.25)
+        );
+        let snapshot = accounts.list(false).await.unwrap();
+        let row = snapshot.accounts.iter().find(|row| row.id == a.id).unwrap();
+        assert_eq!(row.usage_windows.len(), usize::from(session));
+        assert!(
+            snapshot
+                .pool
+                .accounts
+                .iter()
+                .find(|row| row.account_id == a.id)
+                .unwrap()
+                .weekly_reset_at
+                .is_some()
+        );
+    }
 }
 
 #[tokio::test]

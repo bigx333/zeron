@@ -97,8 +97,9 @@ Remote settings changes are forwarded to the owning engine using the existing
 - `SetAccountPoolBypass { chatId, bypassed }` changes the device-local chat bypass
   and returns an `AccountPoolSnapshot` without running account discovery.
 - `GetAccountPool {}` returns the current `AccountPoolSnapshot` without provider
-  calls or credential writes. Composer bypass changes are serialized across
-  views and reconcile ambiguous failures through this read.
+  calls or credential writes. Settings edits and composer bypass changes
+  reconcile ambiguous failures through this read; bypass writes are serialized
+  across composer views.
 - `AddAccountPoolApiKey { harness: "claude-code", apiKey, label? }` saves an
   Anthropic key without switching the CLI login. Replies contain no key material.
 
@@ -110,7 +111,7 @@ loading, `bb pool` commands and BB parent-server proxying are not used by Zeron.
 Validated on macOS on 2026-10-15:
 
 - `cargo check --locked -p zeron` passed.
-- The engine pool suite passed all 32 tests, along with all 18
+- The engine account suite passed all 104 tests, including 34 pool tests, along with all 18
   account/upload/title integration tests, using isolated credentials and local
   mock upstreams.
 - `cargo test -p zeron-harness --lib --tests -- --test-threads=1` passed,

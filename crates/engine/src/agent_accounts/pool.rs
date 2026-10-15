@@ -177,6 +177,47 @@ fn validate_config(config: &AccountPoolProviderConfig) -> Result<(), EngineError
 }
 
 impl AgentAccounts {
+    pub(super) fn record_claude_pool_probe(
+        &self,
+        slot: &Slot,
+        body: &serde_json::Value,
+        snapshot: &UsageSnapshot,
+    ) {
+        let mut state = lock(&self.inner.pool.state);
+        let observation = state.observations.entry(slot.id.clone()).or_default();
+        let previous = self.pool_windows(slot, observation);
+        let labels: HashSet<_> = snapshot.windows.iter().map(|w| w.label.clone()).collect();
+        observation.replaced_window_labels.extend(
+            previous
+                .into_iter()
+                .map(|w| w.label)
+                .filter(|label| !labels.contains(label)),
+        );
+        observation
+            .replaced_window_labels
+            .retain(|label| !labels.contains(label));
+        // Full probes replace the complete metadata set, so unrelated later
+        // headers cannot revive an older shared or family reset date.
+        observation.quota_resets.clear();
+        for (label, _, reset) in claude_usage_buckets(body) {
+            if let Some(reset) = reset {
+                observation
+                    .quota_resets
+                    .entry(label)
+                    .and_modify(|current| *current = (*current).min(reset))
+                    .or_insert(reset);
+            }
+        }
+        for window in &snapshot.windows {
+            if let Some(reset) = window.resets_at {
+                observation.quota_resets.insert(window.label.clone(), reset);
+            }
+        }
+        observation.windows = snapshot.windows.clone();
+        observation.observed_at = now_ms();
+        self.persist_pool_state(&state, false);
+    }
+
     pub(super) fn codex_pool_labels(&self, slot: &Slot) -> HashMap<String, String> {
         lock(&self.inner.pool.state)
             .observations
@@ -828,15 +869,6 @@ impl AgentAccounts {
         observation: &Observation,
     ) -> Vec<AgentUsageWindow> {
         let mut windows = self.pool_windows(slot, observation);
-        if slot.harness == HarnessId::ClaudeCode
-            && lock(&self.inner.usage)
-                .get(&usage_key(slot.harness, &slot.account_key))
-                .and_then(|entry| entry.fetched_at)
-                .is_some_and(|at| at > observation.observed_at)
-        {
-            // A newer full probe supersedes older header-only reset metadata.
-            return windows;
-        }
         for (key, reset) in &observation.quota_resets {
             let label = match key.strip_prefix("codex:") {
                 Some(bucket) => observation

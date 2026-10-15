@@ -2738,7 +2738,7 @@ impl AgentAccounts {
             .get("claudeAiOauth")
             .ok_or(missing.clone())?;
         let access_token = str_field(oauth, "accessToken").ok_or(missing)?;
-        match self.claude_usage_request(&access_token).await {
+        match self.claude_usage_request(Some(slot), &access_token).await {
             // The stored expiry metadata can lie (a Claude Code regression
             // wrote `expiresAt: 0` for fresh logins), so probe with the
             // stored token first and rotate the slot-owned pair only after
@@ -2750,7 +2750,7 @@ impl AgentAccounts {
                 if !is_active && self.inner.endpoints.allow_slot_refresh =>
             {
                 match self.refresh_claude_slot(slot).await? {
-                    Some(fresh) => self.claude_usage_request(&fresh).await,
+                    Some(fresh) => self.claude_usage_request(Some(slot), &fresh).await,
                     // Refresh in flight elsewhere (single-flight) — report
                     // the original rejection; the next probe sees the result.
                     None => Err(ProbeError::Unauthorized { status }),
@@ -2761,7 +2761,11 @@ impl AgentAccounts {
     }
 
     /// One usage probe: GET the endpoint and parse windows.
-    async fn claude_usage_request(&self, access_token: &str) -> Result<UsageSnapshot, ProbeError> {
+    async fn claude_usage_request(
+        &self,
+        slot: Option<&Slot>,
+        access_token: &str,
+    ) -> Result<UsageSnapshot, ProbeError> {
         let body = probe_json(
             "claude-code",
             "usage",
@@ -2773,7 +2777,12 @@ impl AgentAccounts {
                 .header("Content-Type", "application/json"),
         )
         .await?;
-        claude_usage_windows(&body).ok_or_else(|| schema_error("claude-code", &body))
+        let snapshot =
+            claude_usage_windows(&body).ok_or_else(|| schema_error("claude-code", &body))?;
+        if let Some(slot) = slot {
+            self.record_claude_pool_probe(slot, &body, &snapshot);
+        }
+        Ok(snapshot)
     }
 
     async fn codex_usage(&self, slot: &Slot) -> Result<UsageSnapshot, ProbeError> {
@@ -3674,7 +3683,35 @@ fn codex_usage_snapshot_labeled(
 /// Windows from Claude's `/api/oauth/usage`: the 5-hour session and weekly
 /// buckets, each a 0-100 `utilization` with an RFC3339 `resets_at`.
 fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
-    let mut windows = Vec::new();
+    let buckets = claude_usage_buckets(body);
+    let mut windows: Vec<AgentUsageWindow> = Vec::new();
+    for (label, used, resets_at) in &buckets {
+        let Some(used_fraction) = used else { continue };
+        let window = AgentUsageWindow {
+            label: label.clone(),
+            used_fraction: *used_fraction,
+            resets_at: *resets_at,
+        };
+        if let Some(previous) = windows.iter_mut().find(|w| w.label == *label) {
+            if window.used_fraction > previous.used_fraction {
+                *previous = window;
+            }
+        } else {
+            windows.push(window);
+        }
+    }
+    (!buckets.is_empty()).then_some(UsageSnapshot {
+        windows,
+        plan_label: None,
+    })
+}
+
+/// Keep nullable utilization separate from reset metadata. Both full probes
+/// and header observations can know when a window resets without measuring it.
+fn claude_usage_buckets(
+    body: &serde_json::Value,
+) -> Vec<(String, Option<f32>, Option<DateTime<Utc>>)> {
+    let mut buckets = Vec::new();
     for (key, label) in [
         ("five_hour", "Session"),
         ("seven_day", "Week"),
@@ -3687,22 +3724,19 @@ fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
             let utilization = ["used_percentage", "utilization", "usedPercentage"]
                 .into_iter()
                 .find_map(|key| w.get(key).and_then(quota_number));
-            if utilization.is_none() && w["status"] != "rejected" {
-                continue;
+            let used = if w["status"] == "rejected" {
+                Some(1.0)
+            } else {
+                utilization.map(|u| (u / 100.0).clamp(0.0, 1.0) as f32)
+            };
+            let reset = parse_quota_reset(
+                w.get("resets_at")
+                    .or_else(|| w.get("reset_at"))
+                    .or_else(|| w.get("resetAt")),
+            );
+            if used.is_some() || reset.is_some() {
+                buckets.push((label.to_string(), used, reset));
             }
-            windows.push(AgentUsageWindow {
-                label: label.to_string(),
-                used_fraction: if w["status"] == "rejected" {
-                    1.0
-                } else {
-                    (utilization.unwrap() / 100.0).clamp(0.0, 1.0) as f32
-                },
-                resets_at: parse_quota_reset(
-                    w.get("resets_at")
-                        .or_else(|| w.get("reset_at"))
-                        .or_else(|| w.get("resetAt")),
-                ),
-            });
         }
     }
     for limit in body["limits"].as_array().into_iter().flatten() {
@@ -3720,30 +3754,17 @@ fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
             continue;
         }
         let used = limit.get("percent").and_then(quota_number);
-        if used.is_none() && limit["status"] != "rejected" {
-            continue;
-        }
-        let window = AgentUsageWindow {
-            label: format!("Week ({family})"),
-            used_fraction: if limit["status"] == "rejected" {
-                1.0
-            } else {
-                (used.unwrap() / 100.0).clamp(0.0, 1.0) as f32
-            },
-            resets_at: parse_quota_reset(limit.get("resets_at")),
-        };
-        if let Some(previous) = windows.iter_mut().find(|w| w.label == window.label) {
-            if window.used_fraction > previous.used_fraction {
-                *previous = window;
-            }
+        let used = if limit["status"] == "rejected" {
+            Some(1.0)
         } else {
-            windows.push(window);
+            used.map(|u| (u / 100.0).clamp(0.0, 1.0) as f32)
+        };
+        let reset = parse_quota_reset(limit.get("resets_at"));
+        if used.is_some() || reset.is_some() {
+            buckets.push((format!("Week ({family})"), used, reset));
         }
     }
-    (!windows.is_empty()).then_some(UsageSnapshot {
-        windows,
-        plan_label: None,
-    })
+    buckets
 }
 
 fn quota_number(value: &serde_json::Value) -> Option<f64> {

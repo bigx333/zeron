@@ -270,7 +270,7 @@ impl AgentAccounts {
             }
             Some(Upstream::Anthropic) => {
                 let access = str_field(creds, "access").ok_or(missing)?;
-                self.claude_usage_request(&access).await
+                self.claude_usage_request(None, &access).await
             }
             Some(Upstream::Copilot) => {
                 let token = str_field(creds, "refresh").ok_or(missing)?;
