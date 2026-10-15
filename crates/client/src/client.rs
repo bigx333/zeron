@@ -851,16 +851,6 @@ impl Client {
         Ok(())
     }
 
-    /// Shared across the account; absent until explicitly chosen on any device.
-    pub fn queue_send_mode(&self) -> Option<zeron_proto::QueueSendMode> {
-        self.workspace().queue_send_mode
-    }
-
-    pub fn set_queue_send_mode(&self, mode: zeron_proto::QueueSendMode) -> Result<()> {
-        self.inner
-            .registry_write(|doc| doc.set_queue_send_mode(mode))
-    }
-
     fn pin_change(&self, change: SidebarPinChange) -> Result<()> {
         if !self.workspace().pins_ready {
             return Err(ClientError::Unsupported("pins are not synced yet".into()));

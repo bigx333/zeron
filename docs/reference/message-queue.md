@@ -24,7 +24,8 @@ mutex serializes drains, explicit delivery, removal and protected edits.
 | State | Automatic delivery |
 | --- | --- |
 | Idle | Start the head as the next turn. |
-| Working or awaiting input | Keep the head queued until the turn ends. |
+| Working or awaiting input, mid-turn steering supported | Steer a text-only head unless it is held for turn end. |
+| Working or awaiting input, steering unavailable | Keep the head queued until the turn ends. |
 | Head has attachments | Wait for a new turn that can accept files. |
 | Head has an editing or review gate | Block delivery; do not skip the head. |
 | Queue paused after Cancel or snapshot recovery | Wait for a successful explicit prompt or queue delivery. |
@@ -55,19 +56,8 @@ the edited row retains its place in the queue.
 
 ## Composer and compatibility
 
-Desktop defaults to **Queue** mode, holding messages until the turn ends.
-Settings → General → **Steer mode** switches busy-chat submissions to explicit
-Steer commands, delivered into the active turn without an additional action or
-confirmation. The preference persists across restarts and applies to the send
-button, Enter and Cmd/Ctrl+Enter. Agents that cannot steer hold the message for
-the next turn without interrupting. Idle chats still start a normal turn and
-queue edits still save to their existing row. iOS exposes the same toggle in
-Settings → Messages and applies it to its composer's primary send action.
-The choice is an account-wide `preferences/composer.queueSendMode` registry
-field: it persists offline and propagates between mobile and desktop on sync.
-Desktop watches the engine's `WatchQueueSendMode` stream; mobile observes its
-workspace projection. Older engines retain the desktop's local setting.
-iOS also offers explicit steering through the send button menu.
+Desktop defaults to automatic steering when supported; iOS defaults to holding
+messages until turn end. Both expose a persisted Queue/Steer preference.
 Cmd/Ctrl+Enter on desktop submits content, saves an active edit, or activates
 the most recently added queue row when the composer is empty. Command+Return on
 iOS activates the queue head. A blocked shortcut target is never skipped and an

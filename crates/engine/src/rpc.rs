@@ -588,9 +588,6 @@ enum MutateParams {
     SetChatHost { chat_id: String, device_id: String },
     #[serde(rename_all = "camelCase")]
     SetChatArchived { chat_id: String, archived: bool },
-    /// Set the account-wide composer delivery policy.
-    #[serde(rename_all = "camelCase")]
-    SetQueueSendMode { mode: zeron_proto::QueueSendMode },
     /// Change one pin without replacing another device's edits.
     #[serde(rename_all = "camelCase")]
     ChangeSidebarPin {
@@ -1250,9 +1247,6 @@ impl EngineRpc {
                 .set_chat_archived(&chat_id, archived)
                 .map_err(failed)
                 .map(drop),
-            MutateParams::SetQueueSendMode { mode } => {
-                self.workspace.set_queue_send_mode(mode).map_err(failed)
-            }
             MutateParams::ChangeSidebarPin { change } => {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)
             }
@@ -2407,9 +2401,6 @@ impl RpcService for EngineRpc {
             methods::WATCH_CHATS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_chats())))
             }
-            methods::WATCH_QUEUE_SEND_MODE => Ok(RpcReply::Stream(watch_stream(
-                self.workspace.watch_queue_send_mode(),
-            ))),
             methods::WATCH_SIDEBAR_PREFERENCES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_sidebar_preferences(),
             ))),

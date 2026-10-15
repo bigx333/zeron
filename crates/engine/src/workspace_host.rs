@@ -183,7 +183,6 @@ struct WorkspaceHostInner {
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
     sidebar_preferences_tx: watch::Sender<SidebarPreferencesState>,
-    queue_send_mode_tx: watch::Sender<Option<zeron_proto::QueueSendMode>>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// Bumped on every registry change (local mutation or applied server
     /// frame) — drives republish + the snapshot debounce in `workspace_task`.
@@ -323,7 +322,6 @@ impl WorkspaceHost {
                 .map(|preferences| preferences.pinned_session_ids)
                 .unwrap_or_default(),
         });
-        let (queue_send_mode_tx, _) = watch::channel(doc.queue_send_mode());
         let (changed_tx, changed_rx) = watch::channel(0u64);
 
         let host = Self {
@@ -336,7 +334,6 @@ impl WorkspaceHost {
                 sessions_tx,
                 spaces_tx,
                 sidebar_preferences_tx,
-                queue_send_mode_tx,
                 room: Mutex::new(None),
                 changed_tx,
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
@@ -735,14 +732,6 @@ impl WorkspaceHost {
 
     pub fn watch_spaces(&self) -> watch::Receiver<Vec<Space>> {
         self.inner.spaces_tx.subscribe()
-    }
-
-    pub fn watch_queue_send_mode(&self) -> watch::Receiver<Option<zeron_proto::QueueSendMode>> {
-        self.inner.queue_send_mode_tx.subscribe()
-    }
-
-    pub fn set_queue_send_mode(&self, mode: zeron_proto::QueueSendMode) -> Result<(), EngineError> {
-        self.mutate(|doc| Ok(doc.set_queue_send_mode(mode)?))
     }
 
     pub fn watch_sidebar_preferences(&self) -> watch::Receiver<SidebarPreferencesState> {
@@ -1274,14 +1263,6 @@ impl WorkspaceHostInner {
                 Err(error) => tracing::warn!(%error, "sidebar pin cleanup failed"),
             }
             self.publish_sidebar_preferences(&doc, registry_synced);
-            let mode = doc.queue_send_mode();
-            self.queue_send_mode_tx.send_if_modified(|current| {
-                if *current == mode {
-                    return false;
-                }
-                *current = mode;
-                true
-            });
             doc.read_all()
         };
         match snapshot {
@@ -1862,35 +1843,6 @@ mod tests {
             host.watch_spaces().borrow()[0].name.as_deref(),
             Some("Renamed")
         );
-    }
-
-    #[tokio::test]
-    async fn queue_send_mode_watch_publishes_shared_changes() {
-        use super::*;
-        use zeron_proto::QueueSendMode::{Queue, Steer};
-        let directory = tempfile::tempdir().unwrap();
-        let host = WorkspaceHost::open(
-            Arc::new(DocsStore::open(directory.path()).unwrap()),
-            WorkspaceHostConfig {
-                device_id: "desktop".into(),
-                device_name: "Desktop".into(),
-                platform: "macos".into(),
-                org_id: "test-org".into(),
-                user_id: "test-user".into(),
-                edge: None,
-                local_only: true,
-            },
-        )
-        .unwrap();
-        let mut watch = host.watch_queue_send_mode();
-        assert_eq!(*watch.borrow_and_update(), None);
-        host.set_queue_send_mode(Steer).unwrap();
-        host.inner.publish();
-        assert!(watch.has_changed().unwrap());
-        assert_eq!(*watch.borrow_and_update(), Some(Steer));
-        host.set_queue_send_mode(Queue).unwrap();
-        host.inner.publish();
-        assert_eq!(*watch.borrow_and_update(), Some(Queue));
     }
 
     #[tokio::test]

@@ -32,19 +32,6 @@ final class AppModel {
         }
     }
 
-    /// Stored in the shared registry, including while this device is offline.
-    var steerMode: Bool {
-        get { client?.steerMode() ?? false }
-        set {
-            do {
-                try client?.setSteerMode(enabled: newValue)
-                refreshWorkspace()
-            } catch {
-                NSLog("Could not save steer mode: %@", String(describing: error))
-            }
-        }
-    }
-
     struct LiveCounts: Equatable {
         var working = 0
         var awaiting = 0
@@ -60,7 +47,6 @@ final class AppModel {
     private var rows: [String: SessionRow] = [:]
     private var rawProjects: [ProjectView] = []
     private var lastHosts: [HostOption] = []
-    private var lastSteerMode = false
     private var workspaceRevision: UInt64 = 0
     private var observers: [UUID: () -> Void] = [:]
     private var sessionObservers: [String: [UUID: () -> Void]] = [:]
@@ -415,9 +401,8 @@ final class AppModel {
         rows = all
         // Devices coming and going (Settings, host pickers) count as changes.
         let hosts = hostOptions
-        let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts || steerMode != lastSteerMode
+        let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
         lastHosts = hosts
-        lastSteerMode = steerMode
         live = counts
         frontPage = page
         archived = archivedVMs

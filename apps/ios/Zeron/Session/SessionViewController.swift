@@ -48,7 +48,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         let menu = navigationItem.rightBarButtonItem!
         let syncVoice = { [weak self, weak voiceBar] in
             guard let self, let voiceBar else { return }
-            self.composer.preferredDelivery = self.app.steerMode ? .steer : .queue
             let items = voiceBar.visible ? [menu, voiceBar.item] : [menu]
             if self.navigationItem.rightBarButtonItems?.count != items.count {
                 self.navigationItem.setRightBarButtonItems(items, animated: self.view.window != nil)
@@ -485,7 +484,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         list.uploadProgress = c.uploadProgress
         composer.running = c.running
         composer.canSteer = c.canSteer
-        composer.preferredDelivery = app.steerMode ? .steer : .queue
         composer.placeholder = c.placeholder
         composer.chips = c.chips
         composer.chipMenus = Dictionary(uniqueKeysWithValues: c.chips.map { chip in

@@ -144,10 +144,6 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
     }
 
     private func toggled(_ id: String, _ on: Bool) {
-        if id == "steerMode" {
-            app.steerMode = on
-            return reload()
-        }
         if id == "groupByProject" {
             app.groupByProject = on
             return
@@ -196,10 +192,6 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             s.appendSections(["Voice"])
             s.appendItems([Row(id: "voice", title: "Voice", subtitle: app.voice.selectedStyle.map { "Codex voice · \($0.capitalized)" } ?? "Codex voice device and style", symbol: "waveform")])
         }
-        s.appendSections(["Messages"])
-        s.appendItems([
-            Row(id: "steerMode", title: "Steer mode", subtitle: "Send into the active turn without confirmation.", symbol: "arrow.turn.down.right", accessory: .toggle(app.steerMode)),
-        ])
         s.appendSections(["Notifications"])
         s.appendItems(notificationRows())
         s.appendSections(["Appearance"])

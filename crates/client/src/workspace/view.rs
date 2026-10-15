@@ -194,7 +194,6 @@ pub struct WorkspaceSnapshot {
     /// Sidebar preferences are known (cached or synced) — pin/section edits
     /// are allowed. False on a fresh install before the first registry sync.
     pub pins_ready: bool,
-    pub queue_send_mode: Option<zeron_proto::QueueSendMode>,
     /// The registry has reached this device at least once (or demo).
     pub synced: bool,
     pub front: FrontPage,
@@ -715,7 +714,6 @@ pub(crate) fn derive(
         revision: 0,
         computed_at_ms: now_ms,
         pins_ready: prefs.is_some(),
-        queue_send_mode: None,
         synced: cx.synced,
         front: FrontPage {
             pinned,

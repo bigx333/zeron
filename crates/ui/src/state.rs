@@ -782,7 +782,6 @@ pub struct AppState {
     /// Synced user/org sidebar pin state. Local workspaces deliberately ignore
     /// this and continue reading their device-local settings entry.
     pub sidebar_preferences: SidebarPreferencesState,
-    pub queue_send_mode: Option<zeron_proto::QueueSendMode>,
     session_presentation: Option<Vec<Session>>,
     /// The project the new-session canvas mints into. Healed by
     /// [`Self::apply_spaces`] when the row vanishes; selecting a chat implies
@@ -941,7 +940,6 @@ impl AppState {
             unsaved_side_chat: false,
             sessions: Vec::new(),
             sidebar_preferences: SidebarPreferencesState::default(),
-            queue_send_mode: None,
             session_presentation: None,
             selected_space: None,
             no_project: false,
@@ -1145,14 +1143,6 @@ impl AppState {
     }
 
     // ---- reducers (pure) ----
-
-    fn apply_queue_send_mode(&mut self, mode: Option<zeron_proto::QueueSendMode>) -> bool {
-        if self.queue_send_mode == mode {
-            return false;
-        }
-        self.queue_send_mode = mode;
-        true
-    }
 
     pub(crate) fn apply_sidebar_preferences(&mut self, value: SidebarPreferencesState) -> bool {
         if value.revision < self.sidebar_preferences.revision || value == self.sidebar_preferences {
@@ -2414,7 +2404,6 @@ impl AppState {
         self.unsaved_side_chat = false;
         self.sessions.clear();
         self.sidebar_preferences = SidebarPreferencesState::default();
-        self.queue_send_mode = None;
         self.session_presentation = None;
         self.selected_space = None;
         self.no_project = false;
@@ -2603,12 +2592,6 @@ impl AppState {
                 AppState::apply_sessions,
             ),
             spawn_chats_watch(cx, handle.clone()),
-            spawn_watch(
-                cx,
-                handle.clone(),
-                methods::WATCH_QUEUE_SEND_MODE,
-                AppState::apply_queue_send_mode,
-            ),
             spawn_watch(
                 cx,
                 handle.clone(),

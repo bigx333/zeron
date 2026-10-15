@@ -375,13 +375,6 @@ pub fn current(cx: &App) -> UiSettings {
         .unwrap_or_default()
 }
 
-/// The active-turn delivery preference, read on every composer render.
-pub fn queue_send_mode(cx: &App) -> QueueSendMode {
-    cx.try_global::<SettingsStore>()
-        .map(|store| store.current.queue_send_mode)
-        .unwrap_or_default()
-}
-
 /// Read the picker preference without cloning the full settings for each model row.
 pub fn compact_model_picker(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()
@@ -663,8 +656,6 @@ pub enum ComposerSendBehavior {
     ModEnter,
 }
 
-pub use zeron_proto::QueueSendMode;
-
 /// Persist the latest revision. Safe to call at shutdown.
 pub fn flush(cx: &mut App) {
     if !cx.has_global::<SettingsStore>() {
@@ -830,7 +821,6 @@ pub struct UiSettings {
     pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
     pub composer_send_behavior: ComposerSendBehavior,
-    pub queue_send_mode: QueueSendMode,
     /// Legacy global opt-in; per-harness preferences take precedence.
     pub skills_in_slash_menu: bool,
     pub skill_completion_by_harness:
@@ -1073,7 +1063,6 @@ impl Default for UiSettings {
             escape_stops_active_agent: false,
             settings_section: crate::shell::SettingsSection::default(),
             composer_send_behavior: ComposerSendBehavior::default(),
-            queue_send_mode: QueueSendMode::default(),
             skills_in_slash_menu: false,
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
@@ -1685,7 +1674,6 @@ impl UiSettings {
             dictation_input,
             window_geometry,
             composer_send_behavior,
-            queue_send_mode,
             skills_in_slash_menu,
             skill_completion_by_harness,
             compact_model_picker,
@@ -2068,26 +2056,6 @@ mod tests {
             assert_eq!(loaded.pull_request_destination, destination);
             assert_eq!(loaded.sidebar_width, 300.0);
         }
-    }
-
-    #[test]
-    fn queue_send_mode_defaults_to_queue_and_persists_steer() {
-        let directory = tempfile::tempdir().unwrap();
-        let legacy: UiSettings = serde_json::from_str(r#"{"sidebarWidth":300}"#).unwrap();
-        assert_eq!(legacy.queue_send_mode, QueueSendMode::Queue);
-        assert_eq!(UiSettings::default().queue_send_mode, QueueSendMode::Queue);
-        let mut edited = legacy.clone();
-        edited.queue_send_mode = QueueSendMode::Steer;
-        let current = UiSettings {
-            sound_enabled: false,
-            ..legacy.clone()
-        };
-        let merged = UiSettings::merge_changes(&legacy, &edited, current);
-        assert!(!merged.sound_enabled);
-        merged.save(directory.path()).unwrap();
-        let loaded = UiSettings::load(directory.path());
-        assert_eq!(loaded.queue_send_mode, QueueSendMode::Steer);
-        assert_eq!(loaded.sidebar_width, 300.0);
     }
 
     #[test]
@@ -2800,7 +2768,6 @@ mod tests {
             escape_stops_active_agent: true,
             settings_section: crate::shell::SettingsSection::Shortcuts,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
-            queue_send_mode: QueueSendMode::Steer,
             skills_in_slash_menu: true,
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,

@@ -155,11 +155,7 @@ impl WorkspaceStore {
                 previous: Some(&previous),
             },
         );
-        next.queue_send_mode = lock(&self.doc).queue_send_mode();
-        if previous.revision > 0
-            && next.content_hash() == previous.content_hash()
-            && next.queue_send_mode == previous.queue_send_mode
-        {
+        if previous.revision > 0 && next.content_hash() == previous.content_hash() {
             return None;
         }
         let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
