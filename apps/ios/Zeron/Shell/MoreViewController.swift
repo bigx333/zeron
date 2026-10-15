@@ -156,6 +156,10 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             MathSettings.render = on
             return reload()
         }
+        if id == "t3Mode" {
+            app.t3Mode = on
+            return reload()
+        }
         let push = PushNotifications.shared
         if id == "notify:enabled" {
             guard on else {
@@ -232,7 +236,8 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         s.appendSections(["Sessions"])
         s.appendItems([
             Row(id: "groupByProject", title: "Group by Project", subtitle: "Sessions outside your sections, under their project", symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject)),
-            Row(id: "archived", title: "Archived Sessions", symbol: "archivebox"),
+            Row(id: "t3Mode", title: "T3 Mode", subtitle: "An inbox first; Working, Snoozed and Settled shelves below", symbol: "tray.full", accessory: .toggle(app.t3Mode)),
+            Row(id: "archived", title: app.t3Mode ? "Settled Sessions" : "Archived Sessions", symbol: app.t3Mode ? "checkmark.circle" : "archivebox"),
         ])
         s.appendSections([" "])
         s.appendItems([Row(id: "signout", title: "Sign Out", symbol: "rectangle.portrait.and.arrow.right", accessory: .none, destructive: true)])
@@ -290,7 +295,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         case "wallpaper:remove":
             WallpaperStore.remove()
         case "archived":
-            navigationController?.pushViewController(FolderViewController(app: app, folder: FolderRowVM(id: "archived", name: "Archived", count: 0, symbol: "archivebox")), animated: true)
+            navigationController?.pushViewController(FolderViewController(app: app, folder: .archived(t3: app.t3Mode)), animated: true)
         case "signout":
             let alert = UIAlertController(title: "Sign out?", message: "Local drafts stay on this device.", preferredStyle: .actionSheet)
             alert.addAction(UIAlertAction(title: "Sign Out", style: .destructive) { [weak self] _ in self?.app.signOut() })
