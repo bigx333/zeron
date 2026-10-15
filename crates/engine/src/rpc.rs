@@ -1536,6 +1536,7 @@ fn forwardable(method: &str) -> bool {
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
             | methods::CONFIGURE_ACCOUNT_POOL
+            | methods::GET_ACCOUNT_POOL
             | methods::ADD_ACCOUNT_POOL_API_KEY
             | methods::SET_ACCOUNT_POOL_BYPASS
             | methods::ACTIVATE_AGENT_ACCOUNT
@@ -3636,6 +3637,7 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&snapshot)
             }
+            methods::GET_ACCOUNT_POOL => RpcReply::value(&self.agent_accounts.pool_snapshot()),
             methods::ADD_ACCOUNT_POOL_API_KEY => {
                 let p: AddAccountPoolApiKeyParams = parse_params(params)?;
                 RpcReply::value(
@@ -3652,13 +3654,7 @@ impl RpcService for EngineRpc {
                     .set_pool_bypass(&p.chat_id, p.bypassed)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(
-                    &self
-                        .agent_accounts
-                        .list(false)
-                        .await
-                        .map_err(|e| RpcError::Failed(e.to_string()))?,
-                )
+                RpcReply::value(&self.agent_accounts.pool_snapshot())
             }
             methods::ACTIVATE_AGENT_ACCOUNT => {
                 self.voice.retire();

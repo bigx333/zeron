@@ -61,6 +61,10 @@ an unblock time is known. Short temporary rate limits wait once on the same
 account, for up to 20 seconds; longer limits hold that account while others can
 serve requests.
 
+Reset dates without utilization still guide routing, but never become zero-use
+measurements. Full usage probes replace obsolete Codex buckets, including absent
+windows, so later partial headers cannot revive a limit that was removed.
+
 Fallback happens before the hub commits a response. Once streaming begins,
 the hub never replays that request on another account. An interrupted SSE stream
 ends with an error event. Closing the client stream drops the upstream request.
@@ -72,6 +76,9 @@ after rejection; an expired live login is skipped until the CLI renews it.
 Temporary token-endpoint failures back off and can continue using an unexpired
 access token. Freshly rotated credentials are retained in memory if a slot write
 temporarily fails, with persistence retried in the background and at shutdown.
+Refreshes finish saving replacement credentials even if the requesting client
+disconnects, and engine shutdown drains outstanding refreshes. Authentication
+failures from an older credential version cannot invalidate a newer slot.
 
 Settings and non-secret observations live under the existing device-local
 `agent-accounts` directory, in `pool.json` and `pool-state.json`. Credential slots
@@ -87,7 +94,11 @@ Remote settings changes are forwarded to the owning engine using the existing
   `enabled`, `routingMode` (`weekly-reset` or `sequential`), `switchThreshold`,
   `accountOrder`, and `disabledAccountIds`. A nonempty order must name every
   saved account for that provider exactly once.
-- `SetAccountPoolBypass { chatId, bypassed }` changes the device-local chat bypass.
+- `SetAccountPoolBypass { chatId, bypassed }` changes the device-local chat bypass
+  and returns an `AccountPoolSnapshot` without running account discovery.
+- `GetAccountPool {}` returns the current `AccountPoolSnapshot` without provider
+  calls or credential writes. Composer bypass changes are serialized across
+  views and reconcile ambiguous failures through this read.
 - `AddAccountPoolApiKey { harness: "claude-code", apiKey, label? }` saves an
   Anthropic key without switching the CLI login. Replies contain no key material.
 
@@ -99,13 +110,12 @@ loading, `bb pool` commands and BB parent-server proxying are not used by Zeron.
 Validated on macOS on 2026-10-15:
 
 - `cargo check --locked -p zeron` passed.
-- The engine library suite passed (524 tests, 2 ignored), along with all 17
-  account/upload/title integration tests. Follow-up pool tests passed after
-  adding model-family picks, legacy metadata handling and zero-expiry handling:
-  20 pool tests in total.
+- The engine pool suite passed all 32 tests, along with all 18
+  account/upload/title integration tests, using isolated credentials and local
+  mock upstreams.
 - `cargo test -p zeron-harness --lib --tests -- --test-threads=1` passed,
-  including all 322 library tests and the native Claude/Codex protocol fixtures.
-- All 1,785 UI library tests passed with `--test-threads=1`; the parallel UI run
+  including all 327 library tests and the native Claude/Codex protocol fixtures.
+- All 1,796 UI library tests passed with `--test-threads=1`; the parallel UI run
   aborted without naming a failing test. The serial run covers the changed UI.
 - The installed Codex 0.162.1 accepted the pool provider settings with strict
   config validation. A local rollout test exposed the missing-provider resume

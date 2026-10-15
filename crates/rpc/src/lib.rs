@@ -221,6 +221,7 @@ pub mod methods {
     // Agent accounts (ControlRpc, relay-forwardable — CLI logins are per-device).
     pub const LIST_AGENT_ACCOUNTS: &str = "ListAgentAccounts";
     pub const CONFIGURE_ACCOUNT_POOL: &str = "ConfigureAccountPool";
+    pub const GET_ACCOUNT_POOL: &str = "GetAccountPool";
     pub const ADD_ACCOUNT_POOL_API_KEY: &str = "AddAccountPoolApiKey";
     pub const SET_ACCOUNT_POOL_BYPASS: &str = "SetAccountPoolBypass";
     pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";

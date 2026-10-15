@@ -52,8 +52,10 @@ where
                     async move {
                         let (parts, body) = request.into_parts();
                         // Local service discovery can probe newly opened test
-                        // ports. Only fixture POSTs belong to the test workload.
-                        if parts.method != hyper::Method::POST {
+                        // ports. Accept only explicit fixture endpoints.
+                        if parts.method != hyper::Method::POST
+                            && !(parts.method == hyper::Method::GET && parts.uri.path() == "/usage")
+                        {
                             return Ok::<_, Infallible>(reply(404, "not a fixture request"));
                         }
                         let body = body.collect().await.unwrap().to_bytes();
@@ -1151,7 +1153,8 @@ async fn live_expiry_can_recover_after_ownership_changes_without_clearing_auth_f
         &accounts,
         &a,
         "Live login expired; sign in again in the CLI",
-    );
+    )
+    .await;
     assert_eq!(
         accounts.pool_candidates(a.harness, "other", None, &HashSet::new(), now_ms())[0].id,
         b.id
@@ -1165,7 +1168,7 @@ async fn live_expiry_can_recover_after_ownership_changes_without_clearing_auth_f
         accounts.pool_candidates(a.harness, "other", None, &HashSet::new(), now_ms())[0].id,
         a.id
     );
-    http::mark_error(&accounts, &a, "Needs sign-in");
+    http::mark_error(&accounts, &a, "Needs sign-in").await;
     assert_eq!(
         accounts.pool_candidates(a.harness, "other", None, &HashSet::new(), now_ms())[0].id,
         b.id
@@ -1255,4 +1258,176 @@ fn reset_only_headers_do_not_carry_exhaustion_into_a_new_period() {
     );
     http::observe(&accounts, &saved, &headers, "opus");
     assert!(accounts.list_pool_test_windows(&saved).is_empty());
+}
+
+#[tokio::test]
+async fn a_full_codex_probe_removes_absent_buckets_before_later_partial_headers() {
+    for response in [
+        "{\"rate_limit\":{\"primary_window\":{\"used_percent\":10,\"limit_window_seconds\":18000},\"secondary_window\":null}}",
+        "{\"rate_limit\":{\"primary_window\":{\"used_percent\":10,\"limit_window_seconds\":18000}}}",
+    ] {
+        let (_root, initial) = fixture();
+        let source = upstream(move |_, _| reply(200, response)).await;
+        let mut endpoints = initial.inner.endpoints.clone();
+        endpoints.codex_usage = format!("{}/usage", source.url);
+        let accounts = AgentAccounts::with_endpoints(
+            initial.inner.config.clone(),
+            endpoints,
+            Default::default(),
+        );
+        let saved = slot(&accounts, HarnessId::Codex, "probe-removal");
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-codex-secondary-window-minutes", "10080".parse().unwrap());
+        headers.insert("x-codex-secondary-used-percent", "100".parse().unwrap());
+        http::observe(&accounts, &saved, &headers, "other");
+        accounts
+            .refresh_usage_scoped(&[(saved.harness, &saved, true)], false)
+            .await;
+        let mut partial = reqwest::header::HeaderMap::new();
+        partial.insert("x-codex-primary-used-percent", "20".parse().unwrap());
+        http::observe(&accounts, &saved, &partial, "other");
+        let windows = accounts.list_pool_test_windows(&saved);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Session");
+        assert_eq!(windows[0].used_fraction, 0.2);
+        assert!(eligible(&windows, "other", 0.98, now_ms()));
+    }
+}
+
+#[tokio::test]
+async fn reset_only_metadata_routes_without_becoming_a_usage_measurement() {
+    let (_root, accounts) = fixture();
+    let a = slot(&accounts, HarnessId::ClaudeCode, "reset-only");
+    let b = slot(&accounts, a.harness, "measured");
+    enable(&accounts, a.harness, &[&b, &a]);
+    quota(&accounts, &b, vec![window("Week", 0.8, 2 * 60 * 60 * 1000)]);
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "anthropic-ratelimit-unified-7d-reset",
+        ((now_ms() + 60 * 60 * 1000) / 1000)
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
+    headers.insert(
+        "anthropic-ratelimit-unified-7d_opus-reset",
+        ((now_ms() + 30 * 60 * 1000) / 1000)
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
+    http::observe(&accounts, &a, &headers, "opus");
+    for family in ["sonnet", "opus"] {
+        assert_eq!(
+            accounts.pool_candidates(a.harness, family, None, &HashSet::new(), now_ms())[0].id,
+            a.id
+        );
+    }
+    let snapshot = accounts.list(false).await.unwrap();
+    assert!(
+        snapshot
+            .accounts
+            .iter()
+            .find(|account| account.id == a.id)
+            .unwrap()
+            .usage_windows
+            .is_empty()
+    );
+    assert_eq!(
+        snapshot
+            .accounts
+            .iter()
+            .find(|account| account.id == b.id)
+            .unwrap()
+            .usage_windows[0]
+            .used_fraction,
+        0.8
+    );
+    accounts.flush_pool();
+    let restored = AgentAccounts::with_endpoints(
+        accounts.inner.config.clone(),
+        accounts.inner.endpoints.clone(),
+        Default::default(),
+    );
+    assert_eq!(
+        restored.pool_candidates(a.harness, "opus", None, &HashSet::new(), now_ms())[0].id,
+        a.id
+    );
+    // A later full probe must supersede the older reset-only observations.
+    let observed_at = lock(&accounts.inner.pool.state).observations[&a.id].observed_at;
+    lock(&accounts.inner.usage).insert(
+        usage_key(a.harness, &a.account_key),
+        UsageEntry {
+            usage: Some(UsageSnapshot {
+                windows: vec![window("Week", 0.2, 3 * 60 * 60 * 1000)],
+                ..Default::default()
+            }),
+            fetched_at: Some(observed_at + 1),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        accounts.pool_candidates(a.harness, "opus", None, &HashSet::new(), now_ms())[0].id,
+        b.id
+    );
+}
+
+#[tokio::test]
+async fn an_obsolete_auth_failure_cannot_poison_newer_credentials() {
+    for harness in [HarnessId::ClaudeCode, HarnessId::Codex] {
+        let (_root, accounts) = fixture();
+        let old = slot(&accounts, harness, "credential-version");
+        enable(&accounts, harness, &[&old]);
+        let mut fresh = old.clone();
+        if harness == HarnessId::ClaudeCode {
+            fresh.credentials["claudeAiOauth"]["accessToken"] = "newer-valid".into();
+        } else {
+            fresh.credentials["tokens"]["access_token"] = "newer-valid".into();
+        }
+        accounts.write_slot(&fresh).unwrap();
+        http::mark_error(&accounts, &old, "Needs sign-in").await;
+        assert_eq!(
+            accounts
+                .pool_candidates(harness, "other", None, &HashSet::new(), now_ms())
+                .len(),
+            1
+        );
+        http::mark_error(&accounts, &fresh, "Needs sign-in").await;
+        assert!(
+            accounts
+                .pool_candidates(harness, "other", None, &HashSet::new(), now_ms())
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_expired_cached_live_token_rereads_the_cli_renewal_without_refreshing() {
+    let (_root, accounts) = fixture();
+    let mut old = slot(&accounts, HarnessId::ClaudeCode, "renewed-live");
+    old.credentials["claudeAiOauth"]["expiresAt"] = (now_ms() - 1000).into();
+    accounts.write_slot(&old).unwrap();
+    let config = &accounts.inner.config;
+    std::fs::create_dir_all(&config.claude_config_dir).unwrap();
+    std::fs::write(&config.claude_config_file,serde_json::json!({"oauthAccount":{"accountUuid":"renewed-live","emailAddress":"live@example.com"}}).to_string()).unwrap();
+    std::fs::write(config.claude_creds_file(), old.credentials.to_string()).unwrap();
+    accounts.detect_claude().await;
+    let mut renewed = old.credentials.clone();
+    renewed["claudeAiOauth"]["accessToken"] = "renewed-by-cli".into();
+    renewed["claudeAiOauth"]["expiresAt"] = (now_ms() + 60 * 60 * 1000).into();
+    std::fs::write(config.claude_creds_file(), renewed.to_string()).unwrap();
+    let before = std::fs::read(config.claude_creds_file()).unwrap();
+    let fresh = accounts.pool_secret(&old, false).await.unwrap();
+    assert_eq!(
+        fresh.credentials["claudeAiOauth"]["accessToken"],
+        "renewed-by-cli"
+    );
+    assert_eq!(std::fs::read(config.claude_creds_file()).unwrap(), before);
+    assert!(
+        accounts
+            .pool_snapshot()
+            .accounts
+            .iter()
+            .all(|status| status.status != AccountPoolStatus::LiveExpired)
+    );
 }

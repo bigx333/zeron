@@ -222,7 +222,7 @@ async fn forward(
         slot = match accounts.pool_secret(&slot, false).await {
             Ok(slot) => slot,
             Err(error) => {
-                secret_failure(&accounts, &slot, error);
+                secret_failure(&accounts, &slot, error).await;
                 continue;
             }
         };
@@ -279,19 +279,19 @@ async fn forward(
                         continue;
                     }
                     Ok(_) => {
-                        mark_error(&accounts, &slot, "Needs sign-in");
+                        mark_error(&accounts, &slot, "Needs sign-in").await;
                         failure = StatusCode::BAD_GATEWAY;
                         break;
                     }
                     Err(error) => {
-                        secret_failure(&accounts, &slot, error);
+                        secret_failure(&accounts, &slot, error).await;
                         failure = StatusCode::BAD_GATEWAY;
                         break;
                     }
                 }
             }
             if status == StatusCode::UNAUTHORIZED {
-                mark_error(&accounts, &slot, "Needs sign-in");
+                mark_error(&accounts, &slot, "Needs sign-in").await;
                 failure = StatusCode::BAD_GATEWAY;
                 break;
             }
@@ -502,15 +502,25 @@ fn session_id(
     id.filter(|id| !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control))
 }
 
-pub(super) fn mark_error(accounts: &AgentAccounts, slot: &Slot, message: &str) {
-    let current = accounts
-        .read_slot(slot.harness, &slot.id)
-        .unwrap_or_else(|| slot.clone());
+pub(super) async fn mark_error(accounts: &AgentAccounts, slot: &Slot, message: &str) {
+    let refresh = lock(&accounts.inner.pool.refreshes)
+        .entry(slot.id.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _single = refresh.lock().await;
+    let _ops = accounts.inner.ops.lock().await;
+    let Some(current) = accounts.read_slot(slot.harness, &slot.id) else {
+        return;
+    };
+    let failed = credentials_fingerprint(&slot.credentials);
+    if credentials_fingerprint(&current.credentials) != failed {
+        return;
+    }
     let mut state = lock(&accounts.inner.pool.state);
     let observation = state.observations.entry(slot.id.clone()).or_default();
     observation.error = Some(message.into());
     observation.error_at = now_ms();
-    observation.error_credentials = Some(credentials_fingerprint(&current.credentials));
+    observation.error_credentials = Some(failed);
     accounts.save_pool_state(&state);
 }
 
@@ -524,14 +534,14 @@ fn hold(accounts: &AgentAccounts, slot: &Slot, delay: i64) {
     accounts.save_pool_state(&state);
 }
 
-fn secret_failure(accounts: &AgentAccounts, slot: &Slot, error: SecretError) {
+async fn secret_failure(accounts: &AgentAccounts, slot: &Slot, error: SecretError) {
     tracing::debug!(
         provider = harness_slug(slot.harness),
         reason = error.message(),
         "account pool credential attempt deferred"
     );
     match error {
-        SecretError::Authentication(message) => mark_error(accounts, slot, message),
+        SecretError::Authentication(message) => mark_error(accounts, slot, message).await,
         SecretError::Temporary(_) => hold(accounts, slot, 30_000),
     }
 }
@@ -673,6 +683,9 @@ pub(super) fn observe(
             let rejected = headers
                 .get(format!("{prefix}-status"))
                 .is_some_and(|s| s == "rejected");
+            if let Some(reset) = resets_at {
+                changed |= observation.quota_resets.insert(label.clone(), reset) != Some(reset);
+            }
             changed |= update_window(
                 &mut windows,
                 label,
@@ -724,6 +737,18 @@ pub(super) fn observe(
             });
             let used =
                 number(headers, &format!("{prefix}-used-percent")).map(|u| (u / 100.0) as f32);
+            let resets_at = resets_at.or_else(|| {
+                observation
+                    .quota_resets
+                    .get(&format!("codex:{bucket}"))
+                    .copied()
+            });
+            if let Some(reset) = resets_at {
+                changed |= observation
+                    .quota_resets
+                    .insert(format!("codex:{bucket}"), reset)
+                    != Some(reset);
+            }
             let rejected = headers
                 .get(format!("{prefix}-over-limit"))
                 .is_some_and(|v| v == "true");

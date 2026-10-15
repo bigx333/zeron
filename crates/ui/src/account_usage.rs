@@ -9,6 +9,7 @@
 //! bypassing it, the ring combines its enabled accounts' usage, the card
 //! lists the pool (statuses, no click-to-switch), and its last row is the
 //! per-chat "Use account pool in this chat" switch.
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -25,7 +26,7 @@ use crate::settings::accounts::{
     self, AccountsSnapshotCache, UsageLevel, reports_usage, signs_in, usage_color, usage_level,
 };
 use crate::settings::widgets;
-use crate::state::AppState;
+use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 
 /// Forced probes hit the provider; the engine throttles them too, but the
@@ -233,6 +234,29 @@ pub fn ring_reading(
     }
 }
 
+fn patch_bypass(snapshot: &mut AgentAccountsSnapshot, chat: &str, bypassed: bool) {
+    let ids = &mut snapshot.pool.config.bypassed_chat_ids;
+    ids.retain(|id| id != chat);
+    if bypassed {
+        ids.push(chat.into());
+    }
+}
+
+struct BypassEdit {
+    target: Option<String>,
+    chat: String,
+    bypassed: bool,
+    engine: EngineHandle,
+    origin: gpui::WeakEntity<AccountUsage>,
+}
+
+#[derive(Default)]
+struct BypassQueue {
+    pending: VecDeque<BypassEdit>,
+    worker: Option<Task<()>>,
+}
+impl gpui::Global for BypassQueue {}
+
 /// Loads (and switches) the accounts of the composer's target device.
 pub struct AccountUsage {
     state: Entity<AppState>,
@@ -253,7 +277,6 @@ pub struct AccountUsage {
     error: Option<SharedString>,
     load_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
-    bypass_task: Option<Task<()>>,
     popup: popover::Popup<FooterCard>,
     _poll: Task<()>,
     _cache: Subscription,
@@ -321,7 +344,6 @@ impl AccountUsage {
             error: None,
             load_task: None,
             action_task: None,
-            bypass_task: None,
             popup: popover::Popup::default(),
             _poll: poll,
             // Settings → Accounts writes the same cache.
@@ -487,9 +509,8 @@ impl AccountUsage {
         }
     }
 
-    /// The per-chat pool switch, optimistically: the cache flips at once
-    /// (every view of this device sees it) and the engine's reply replaces
-    /// it; a refusal restores it. Applies from the chat's next turn.
+    /// Queue across composer instances: already-sent mutations keep their
+    /// waiters, and acknowledgements patch only the chat they changed.
     fn set_bypass(&mut self, bypassed: bool, cx: &mut Context<Self>) {
         let Some(chat) = self.chat.clone() else {
             return;
@@ -498,43 +519,112 @@ impl AccountUsage {
             return;
         };
         let key = self.target.clone();
-        let cache = &mut cx.default_global::<AccountsSnapshotCache>().0;
-        let previous = cache.get(&key).cloned();
-        if let Some(snapshot) = cache.get_mut(&key) {
-            let ids = &mut snapshot.pool.config.bypassed_chat_ids;
-            ids.retain(|id| *id != chat);
-            if bypassed {
-                ids.push(chat.clone());
-            }
+        if let Some(snapshot) = cx.default_global::<AccountsSnapshotCache>().0.get_mut(&key) {
+            patch_bypass(snapshot, &chat, bypassed);
         }
         self.error = None;
-        let params = self.params(serde_json::json!({ "chatId": chat, "bypassed": bypassed }));
-        self.bypass_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::SET_ACCOUNT_POOL_BYPASS, params)
-                .await;
-            this.update(cx, |usage, cx| {
-                match result.map(serde_json::from_value::<AgentAccountsSnapshot>) {
-                    Ok(Ok(snapshot)) => {
-                        cx.default_global::<AccountsSnapshotCache>()
-                            .0
-                            .insert(key, snapshot);
-                    }
-                    Ok(Err(_)) => usage.load(false, cx),
-                    Err(err) => {
-                        if let Some(previous) = previous {
-                            cx.default_global::<AccountsSnapshotCache>()
-                                .0
-                                .insert(key, previous);
+        let edit = BypassEdit {
+            target: key,
+            chat,
+            bypassed,
+            engine,
+            origin: cx.weak_entity(),
+        };
+        let queue = cx.default_global::<BypassQueue>();
+        queue.pending.push_back(edit);
+        if queue.worker.is_none() {
+            let task = cx.spawn(async move |_, cx| {
+                loop {
+                    let edit = cx.update(|cx| {
+                        let queue = cx.default_global::<BypassQueue>();
+                        let next = queue.pending.pop_front();
+                        if next.is_none() {
+                            queue.worker = None;
                         }
-                        usage.error = Some(err.to_string().into());
-                    }
+                        next
+                    });
+                    let Some(edit) = edit else {
+                        break;
+                    };
+                    let target_params = |mut value: serde_json::Value| {
+                        if let Some(target) = &edit.target {
+                            value["targetDeviceId"] = target.clone().into();
+                        }
+                        value
+                    };
+                    let decode = |value| {
+                        serde_json::from_value::<zeron_proto::AccountPoolSnapshot>(value)
+                            .map_err(|err| err.to_string())
+                    };
+                    let result = edit
+                        .engine
+                        .client()
+                        .call(
+                            methods::SET_ACCOUNT_POOL_BYPASS,
+                            target_params(
+                                serde_json::json!({"chatId":edit.chat,"bypassed":edit.bypassed}),
+                            ),
+                        )
+                        .await
+                        .map_err(|err| err.to_string())
+                        .and_then(decode);
+                    let (confirmed, error) = match result {
+                        Ok(pool) => (Some(pool), None),
+                        Err(error) => {
+                            // This read never detects accounts or writes credential
+                            // snapshots, so unrelated discovery errors cannot hide
+                            // a bypass that was already committed.
+                            let pool = edit
+                                .engine
+                                .client()
+                                .call(
+                                    methods::GET_ACCOUNT_POOL,
+                                    target_params(serde_json::json!({})),
+                                )
+                                .await
+                                .ok()
+                                .and_then(|value| decode(value).ok());
+                            (pool, Some(error))
+                        }
+                    };
+                    cx.update(|cx| {
+                        let pending: Vec<_> = cx
+                            .default_global::<BypassQueue>()
+                            .pending
+                            .iter()
+                            .filter(|queued| {
+                                queued.target == edit.target && queued.chat == edit.chat
+                            })
+                            .map(|queued| queued.bypassed)
+                            .collect();
+                        if let Some(pool) = confirmed {
+                            let bypassed = pending.last().copied().unwrap_or_else(|| {
+                                pool.config.bypassed_chat_ids.contains(&edit.chat)
+                            });
+                            if let Some(snapshot) = cx
+                                .default_global::<AccountsSnapshotCache>()
+                                .0
+                                .get_mut(&edit.target)
+                            {
+                                patch_bypass(snapshot, &edit.chat, bypassed);
+                            }
+                        }
+                        // If even the authoritative read failed, retain the
+                        // pending view and surface the failure; never replace
+                        // unrelated accounts or chat settings with an old copy.
+                        if let Some(error) = error {
+                            edit.origin
+                                .update(cx, |usage, cx| {
+                                    usage.error = Some(error.into());
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    });
                 }
-                cx.notify();
-            })
-            .ok();
-        }));
+            });
+            cx.default_global::<BypassQueue>().worker = Some(task);
+        }
         cx.notify();
     }
 
@@ -1269,5 +1359,141 @@ mod tests {
             Some("Codex-true")
         );
         assert!(active_account(&snapshot, HarnessId::Cursor).is_none());
+    }
+    #[gpui::test]
+    fn bypass_mutations_reconcile_committed_writes_and_preserve_other_chats(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(Default::default(), dir.path(), cx);
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+            cx.default_global::<AccountsSnapshotCache>()
+                .0
+                .insert(None, pooled(true));
+        });
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(32);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(32);
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.set_test_engine(EngineHandle::from_test_client(zeron_rpc::RpcClient::new(
+                out, inbound,
+            )));
+            state
+        });
+        let first = cx.new(|cx| {
+            let mut usage = AccountUsage::new(state.clone(), cx);
+            usage.chat = Some("a".into());
+            usage
+        });
+        let second = cx.new(|cx| {
+            let mut usage = AccountUsage::new(state.clone(), cx);
+            usage.chat = Some("b".into());
+            usage
+        });
+        first.update(cx, |usage, cx| {
+            usage.set_bypass(true, cx);
+            usage.set_bypass(false, cx);
+        });
+        second.update(cx, |usage, cx| usage.set_bypass(true, cx));
+        cx.update(|cx| {
+            cx.default_global::<AccountsSnapshotCache>()
+                .0
+                .get_mut(&None)
+                .unwrap()
+                .accounts[0]
+                .usage_windows[0]
+                .used_fraction = 0.55
+        });
+        let pump = |cx: &mut gpui::TestAppContext| {
+            for _ in 0..20 {
+                runtime.block_on(async {
+                    tokio::task::yield_now().await;
+                });
+                cx.run_until_parked();
+            }
+        };
+        let send = |id, ok, err| {
+            replies
+                .try_send(
+                    serde_json::to_string(&zeron_rpc::ServerFrame {
+                        id,
+                        ok,
+                        err,
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                )
+                .unwrap()
+        };
+        pump(cx);
+        let a: zeron_rpc::ClientFrame =
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(a.method.as_deref(), Some(methods::SET_ACCOUNT_POOL_BYPASS));
+        assert_eq!(a.params["chatId"], "a");
+        assert_eq!(a.params["bypassed"], true);
+        assert!(
+            requests.try_recv().is_err(),
+            "all composers share one mutation queue"
+        );
+        // The first write committed, but its reply was lost.
+        send(a.id, None, Some("Lost committed reply".into()));
+        pump(cx);
+        let read: zeron_rpc::ClientFrame =
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(read.method.as_deref(), Some(methods::GET_ACCOUNT_POOL));
+        let mut committed = pooled(true).pool;
+        committed.config.bypassed_chat_ids = vec!["a".into()];
+        send(
+            read.id,
+            Some(serde_json::to_value(&committed).unwrap()),
+            None,
+        );
+        pump(cx);
+        let a_again: zeron_rpc::ClientFrame =
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(a_again.params["bypassed"], false);
+        // The second write failed before commit; reconcile to the first write.
+        send(a_again.id, None, Some("Rejected later write".into()));
+        pump(cx);
+        let read: zeron_rpc::ClientFrame =
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(read.method.as_deref(), Some(methods::GET_ACCOUNT_POOL));
+        send(
+            read.id,
+            Some(serde_json::to_value(&committed).unwrap()),
+            None,
+        );
+        pump(cx);
+        let b: zeron_rpc::ClientFrame =
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(b.params["chatId"], "b");
+        committed.config.bypassed_chat_ids.push("b".into());
+        send(b.id, Some(serde_json::to_value(&committed).unwrap()), None);
+        pump(cx);
+        cx.update(|cx| {
+            let cache = &cx.global::<AccountsSnapshotCache>().0[&None];
+            assert!(
+                chat_bypassed(cache, Some("a")),
+                "the committed first write survives the later failure"
+            );
+            assert!(
+                chat_bypassed(cache, Some("b")),
+                "another composer's setting is not overwritten"
+            );
+            assert_eq!(
+                cache.accounts[0].usage_windows[0].used_fraction, 0.55,
+                "a stale reply must not restore an old account snapshot"
+            );
+        });
+        assert!(first.read_with(cx, |usage, _| usage.error.is_some()));
+        assert!(requests.try_recv().is_err());
     }
 }

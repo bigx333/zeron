@@ -50,6 +50,8 @@ struct Observation {
     codex_window_labels: HashMap<String, String>,
     codex_windows: HashMap<String, AgentUsageWindow>,
     replaced_window_labels: HashSet<String>,
+    /// Reset metadata is useful for routing even without measured utilization.
+    quota_resets: HashMap<String, DateTime<Utc>>,
     #[serde(skip)]
     in_flight: usize,
 }
@@ -195,9 +197,16 @@ impl AgentAccounts {
             ("primary_window", "primary", "Primary"),
             ("secondary_window", "secondary", "Secondary"),
         ] {
-            let Some(window) = body.pointer(&format!("/rate_limit/{key}")) else {
+            let window = body.pointer(&format!("/rate_limit/{key}"));
+            if window.is_none_or(serde_json::Value::is_null) {
+                if let Some(old) = observation.codex_window_labels.remove(bucket) {
+                    observation.replaced_window_labels.insert(old);
+                }
+                observation.codex_windows.remove(bucket);
+                observation.quota_resets.remove(&format!("codex:{bucket}"));
                 continue;
-            };
+            }
+            let window = window.unwrap();
             let label = window["limit_window_seconds"]
                 .as_i64()
                 .filter(|span| *span > 0)
@@ -213,6 +222,13 @@ impl AgentAccounts {
                 observation.replaced_window_labels.insert(old);
             }
             observation.replaced_window_labels.remove(&label);
+            observation.codex_windows.remove(bucket);
+            observation.quota_resets.remove(&format!("codex:{bucket}"));
+            if let Some(reset) = parse_when(window.get("reset_at")) {
+                observation
+                    .quota_resets
+                    .insert(format!("codex:{bucket}"), reset);
+            }
             if let Some(used) = window.get("used_percent").and_then(quota_number) {
                 observation.codex_windows.insert(
                     bucket.into(),
@@ -474,8 +490,12 @@ impl AgentAccounts {
                             .trim_end_matches(')')
                             .to_owned()
                     }),
-                    weekly_reset_at: weekly_reset(&windows, "other", now)
-                        .and_then(DateTime::from_timestamp_millis),
+                    weekly_reset_at: weekly_reset(
+                        &self.pool_routing_windows(slot, &observation),
+                        "other",
+                        now,
+                    )
+                    .and_then(DateTime::from_timestamp_millis),
                     poolable: has_secret(slot),
                     unpoolable_reason: (!has_secret(slot))
                         .then(|| "This login has no readable credentials".into()),
@@ -802,6 +822,48 @@ impl AgentAccounts {
         windows
     }
 
+    fn pool_routing_windows(
+        &self,
+        slot: &Slot,
+        observation: &Observation,
+    ) -> Vec<AgentUsageWindow> {
+        let mut windows = self.pool_windows(slot, observation);
+        if slot.harness == HarnessId::ClaudeCode
+            && lock(&self.inner.usage)
+                .get(&usage_key(slot.harness, &slot.account_key))
+                .and_then(|entry| entry.fetched_at)
+                .is_some_and(|at| at > observation.observed_at)
+        {
+            // A newer full probe supersedes older header-only reset metadata.
+            return windows;
+        }
+        for (key, reset) in &observation.quota_resets {
+            let label = match key.strip_prefix("codex:") {
+                Some(bucket) => observation
+                    .codex_window_labels
+                    .get(bucket)
+                    .map(String::as_str)
+                    .unwrap_or(if bucket == "primary" {
+                        "Primary"
+                    } else {
+                        "Secondary"
+                    }),
+                None => key,
+            };
+            if !windows
+                .iter()
+                .any(|window| window.label == label && window.resets_at == Some(*reset))
+            {
+                windows.push(AgentUsageWindow {
+                    label: label.into(),
+                    used_fraction: 0.0,
+                    resets_at: Some(*reset),
+                });
+            }
+        }
+        windows
+    }
+
     fn pool_candidates(
         &self,
         harness: HarnessId,
@@ -862,7 +924,7 @@ impl AgentAccounts {
                 {
                     return None;
                 }
-                let windows = self.pool_windows(&slot, observation);
+                let windows = self.pool_routing_windows(&slot, observation);
                 eligible(&windows, family, settings.switch_threshold, now)
                     .then_some((slot, windows))
             })
@@ -1012,7 +1074,7 @@ impl AgentAccounts {
             tasks.spawn(async move {
                 let result = accounts.pool_secret_once(&slot, rejected).await;
                 if let Err(SecretError::Authentication(message)) = &result {
-                    http::mark_error(&accounts, &slot, message);
+                    http::mark_error(&accounts, &slot, message).await;
                 }
                 result
             })
@@ -1037,9 +1099,7 @@ impl AgentAccounts {
             // The CLI owns this refresh-token family. Re-read it, never rotate it.
             let detected = match slot.harness {
                 HarnessId::ClaudeCode => {
-                    if rejected {
-                        *lock(&self.inner.claude_credentials) = None;
-                    }
+                    *lock(&self.inner.claude_credentials) = None;
                     self.detect_claude().await.0
                 }
                 HarnessId::Codex => self.detect_codex(),
@@ -1207,9 +1267,10 @@ fn weekly_reset(windows: &[AgentUsageWindow], family: &str, now: i64) -> Option<
     [scoped.as_str(), "Week"].into_iter().find_map(|label| {
         windows
             .iter()
-            .find(|w| w.label.eq_ignore_ascii_case(label))
-            .and_then(|w| w.resets_at)
+            .filter(|w| w.label.eq_ignore_ascii_case(label))
+            .filter_map(|w| w.resets_at)
             .map(|at| at.timestamp_millis())
             .filter(|at| *at > now)
+            .min()
     })
 }
