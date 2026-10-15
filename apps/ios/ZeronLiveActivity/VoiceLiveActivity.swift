@@ -223,7 +223,7 @@ private enum Face {
 
 /// Zeron Dark/Light accents (`Palette`), as the app paints them.
 private enum Tone {
-    static let accent = Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: 0x8B7CF6) : UIColor(hex: 0x5B43E8) })
+    static let accent = Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: 0x57A8FF) : UIColor(hex: 0x105FD9) })
     static let warning = Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: 0xFACC15) : UIColor(hex: 0xA16207) })
 }
 
