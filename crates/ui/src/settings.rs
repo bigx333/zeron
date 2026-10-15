@@ -704,6 +704,14 @@ pub enum SidebarOrganization {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub enum SidebarMode {
+    #[default]
+    Default,
+    T3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub enum SidebarSort {
     #[default]
     LastUpdated,
@@ -844,6 +852,8 @@ pub struct UiSettings {
     pub sidebar_grouped: bool,
     /// How active sessions are partitioned in the sidebar.
     pub sidebar_organization: SidebarOrganization,
+    /// Default session list or an inbox with Working, Snoozed and Settled shelves.
+    pub sidebar_mode: SidebarMode,
     /// Timestamp used to order active sessions (newest first).
     pub sidebar_sort: SidebarSort,
     /// Optional harness branding and repository metadata shown below each
@@ -1041,6 +1051,7 @@ impl Default for UiSettings {
             sidebar_collapsed: false,
             sidebar_grouped: false,
             sidebar_organization: SidebarOrganization::InOneList,
+            sidebar_mode: SidebarMode::Default,
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_show_project_label: true,
             sidebar_compact: true,
@@ -1711,6 +1722,7 @@ impl UiSettings {
             sidebar_collapsed,
             sidebar_grouped,
             sidebar_organization,
+            sidebar_mode,
             sidebar_sort,
             sidebar_show_project_label,
             sidebar_compact,
@@ -2785,6 +2797,7 @@ mod tests {
             sidebar_collapsed: true,
             sidebar_grouped: true,
             sidebar_organization: SidebarOrganization::ByDevice,
+            sidebar_mode: SidebarMode::T3,
             sidebar_sort: SidebarSort::Created,
             sidebar_compact: true,
             sidebar_show_project_icon: false,
@@ -3023,6 +3036,7 @@ mod tests {
         assert!(settings.sidebar_show_project_label);
         assert!(settings.sidebar_show_project_filter);
         assert!(settings.sidebar_show_archived);
+        assert_eq!(settings.sidebar_mode, SidebarMode::Default);
         let customized = UiSettings {
             sidebar_compact: false,
             sidebar_show_project_icon: false,
@@ -3030,6 +3044,7 @@ mod tests {
             sidebar_show_project_filter: false,
             sidebar_show_archived: false,
             sidebar_organization: SidebarOrganization::ByProject,
+            sidebar_mode: SidebarMode::T3,
             ..settings
         };
         let restored: UiSettings =
