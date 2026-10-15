@@ -39,13 +39,15 @@ Native fixture captures of the compact snooze card and its inline custom field.
 
 ## iOS
 
-These iOS captures predate the custom picker redesign. Native simulator captures from [the passing screenshot workflow](https://github.com/bigx333/zeron/actions/runs/38677893616).
+Native simulator captures of the redesigned snooze controls from [the passing screenshot workflow](https://github.com/bigx333/zeron/actions/runs/38717781894).
 
 | Screen | Dark | Light |
 | --- | --- | --- |
 | Inbox and visible row action buttons | [Open](ios-t3-dark-inbox-folded.png) | [Open](ios-t3-light-inbox-folded.png) |
 | Snooze and Settle actions | [Open](ios-t3-dark-row-actions.png) | [Open](ios-t3-light-row-actions.png) |
-| Snooze duration submenu | [Open](ios-t3-dark-row-snooze-menu.png) | [Open](ios-t3-light-row-snooze-menu.png) |
+| Snooze presets and wake-time choices | [Open](ios-t3-dark-row-snooze-menu.png) | [Open](ios-t3-light-row-snooze-menu.png) |
+| Native date-and-time picker | [Open](ios-t3-dark-snooze-until-picker.png) | [Open](ios-t3-light-snooze-until-picker.png) |
+| Working, Snoozed and Settled folded | [Open](ios-t3-dark-shelves-folded.png) | [Open](ios-t3-light-shelves-folded.png) |
 | Snoozed and Settled shelves expanded | [Open](ios-t3-dark-shelves-open-scrolled.png) | [Open](ios-t3-light-shelves-open-scrolled.png) |
 
 ![iOS T3 touch actions](ios-t3-light-row-actions.png)
