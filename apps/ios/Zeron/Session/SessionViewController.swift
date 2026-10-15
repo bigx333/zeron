@@ -815,20 +815,38 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 UIAction(title: "Fork Into Side Chat", image: UIImage(systemName: "arrow.triangle.branch")) { _ in self.fork() },
                 UIAction(title: "Terminal", image: UIImage(systemName: "apple.terminal")) { _ in self.openTerminal() },
             ])
-            done([
+            let t3 = self.app.t3Mode
+            let archived = vm?.archived ?? false
+            var items: [UIMenuElement] = [
                 companions,
                 UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
+            ]
+            if t3, !archived {
+                // Snoozing parks the session like settling: leave it.
+                let snoozed = vm?.snoozed ?? false
+                items.append(snoozed
+                    ? UIAction(title: "Wake Now", image: UIImage(systemName: "sun.max")) { _ in self.app.wake(self.chatId) } as UIMenuElement
+                    : UIMenu(title: "Snooze", image: UIImage(systemName: "clock"), children: AppModel.snoozePresets.map { preset in
+                        UIAction(title: preset.title) { _ in
+                            if self.app.snooze(self.chatId, seconds: preset.seconds, title: preset.title) { self.leave() }
+                        }
+                    }))
+            }
+            items += [
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
-                UIAction(title: "Archive", image: UIImage(systemName: "archivebox")) { _ in
-                    self.app.archive(self.chatId)
-                    self.leave()
-                },
+                // A settled session restores in place; there is nothing to leave.
+                archived
+                    ? UIAction(title: t3 ? "Unsettle" : "Unarchive", image: UIImage(systemName: "tray.and.arrow.up")) { _ in self.app.unarchive(self.chatId) }
+                    : UIAction(title: self.app.archiveWord, image: UIImage(systemName: t3 ? "checkmark.circle" : "archivebox")) { _ in
+                        if self.app.archive(self.chatId) { self.leave() }
+                    },
                 UIAction(title: "Delete", image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
                     self.confirmDelete(app: self.app, self.chatId) { self.leave() }
                 },
-            ])
+            ]
+            done(items)
         }])
     }
 
