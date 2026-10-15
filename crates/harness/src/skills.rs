@@ -634,8 +634,7 @@ mod tests {
     }
 
     fn write(root: &Path, relative: &str, body: &str) -> PathBuf {
-        // Match read_dir's native separators even when fixtures use `/` on Windows.
-        let path: PathBuf = root.join(relative).components().collect();
+        let path = root.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, body).unwrap();
         path
@@ -1052,10 +1051,15 @@ mod tests {
         let cwd = repo.to_str().unwrap();
         let prompt = with_zeron_instructions(cwd, None, "hello".into());
         assert!(prompt.starts_with("<zeron-skills>"), "{prompt}");
-        assert!(prompt.contains(&format!(
-            "- deploy: Ship it safely (SKILL.md: {})",
-            path.display()
-        )));
+        let skill_path = prompt
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("- deploy: Ship it safely (SKILL.md: ")?
+                    .strip_suffix(')')
+            })
+            .unwrap_or_else(|| panic!("missing deploy skill: {prompt}"));
+        // Discovery and fixture paths can mix `/` and `\` differently on Windows.
+        assert_eq!(Path::new(skill_path), path, "{prompt}");
         assert!(!prompt.contains("hidden"));
         assert!(prompt.ends_with("</zeron-skills>\n\nhello"));
         assert_eq!(with_zeron_instructions(cwd, Some("s"), "hi".into()), "hi");
