@@ -34,6 +34,7 @@ internal class VoiceMedia(
     private val operations = HashMap<ULong, Job>()
     private var closed = false
     private var activated = false
+    private var localMuted = false
     var onFailure: (() -> Unit)? = null
     var onRoute: ((VoiceRoute) -> Unit)? = null
 
@@ -78,7 +79,7 @@ internal class VoiceMedia(
                     VoiceMediaOperation.OFFER -> sdp = peer.offer()
                     VoiceMediaOperation.APPLY_ANSWER -> peer.apply(request.sdp ?: throw VoicePeer.Failure(VoicePeer.Failure.Kind.Unavailable))
                     VoiceMediaOperation.SET_MUTED -> {
-                        peer.setMuted(request.muted)
+                        peer.setMuted(request.muted || localMuted)
                         activated = true
                     }
                     VoiceMediaOperation.LEVELS -> levels = peer.levels()
@@ -110,6 +111,7 @@ internal class VoiceMedia(
 
     /** UI mute never waits for the Rust control queue or the relay. */
     fun muteLocally(muted: Boolean) {
+        localMuted = muted
         if (closed || !activated) return
         runCatching { peer.setMuted(muted) }
     }

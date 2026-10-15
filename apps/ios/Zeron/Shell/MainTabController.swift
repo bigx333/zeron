@@ -53,6 +53,7 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
             self.presentVoiceStage(app: self.app, source: source)
         }
         voice.onMute = { [weak self] in self?.app.voice.toggleMute() }
+        voice.onHold = { [weak self] held in self?.app.voice.hold(held, source: .accessory) }
         voice.onEnd = { [weak self] in self?.app.voice.stop() }
         voice.startButton.menu = voiceMenu(app: app)
         accessoryContent.updateVoice(app.voice)

@@ -504,8 +504,9 @@ struct ReadAttachmentChunkParams {
 const _: () = assert!(zeron_proto::VISUAL_MAX_BYTES == zeron_visual::MAX_SCRIPT_BYTES);
 const _: () = assert!(zeron_proto::VISUAL_MAX_ASSETS == zeron_visual::assets::MAX_ASSETS);
 const _: () = assert!(zeron_proto::VISUAL_MAX_ASSET_BYTES == zeron_visual::assets::MAX_ASSET_BYTES);
-const _: () =
-    assert!(zeron_proto::VISUAL_MAX_TOTAL_ASSET_BYTES == zeron_visual::assets::MAX_TOTAL_ASSET_BYTES);
+const _: () = assert!(
+    zeron_proto::VISUAL_MAX_TOTAL_ASSET_BYTES == zeron_visual::assets::MAX_TOTAL_ASSET_BYTES
+);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -520,7 +521,8 @@ struct PublishVisualParams {
 
 fn no_turn_for_visual() -> RpcError {
     RpcError::Failed(
-        "This chat has no running turn on this device; show_visual only works from inside a turn.".into(),
+        "This chat has no running turn on this device; show_visual only works from inside a turn."
+            .into(),
     )
 }
 
@@ -656,6 +658,12 @@ enum MutateParams {
     /// Set the account-wide composer delivery policy.
     #[serde(rename_all = "camelCase")]
     SetQueueSendMode { mode: zeron_proto::QueueSendMode },
+    /// Timed sidebar parking; None wakes early.
+    #[serde(rename_all = "camelCase")]
+    SetChatSnoozedUntil {
+        chat_id: String,
+        until: Option<chrono::DateTime<chrono::Utc>>,
+    },
     /// Change one pin without replacing another device's edits.
     #[serde(rename_all = "camelCase")]
     ChangeSidebarPin {
@@ -1213,6 +1221,11 @@ impl EngineRpc {
 
     fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
         let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
+        let chat_written = |written: bool| {
+            written
+                .then_some(())
+                .ok_or_else(|| RpcError::Failed("Chat no longer exists".into()))
+        };
         match params {
             MutateParams::CreateChat {
                 chat_id,
@@ -1314,9 +1327,20 @@ impl EngineRpc {
                 .workspace
                 .set_chat_archived(&chat_id, archived)
                 .map_err(failed)
-                .map(drop),
+                .and_then(chat_written),
             MutateParams::SetQueueSendMode { mode } => {
                 self.workspace.set_queue_send_mode(mode).map_err(failed)
+            }
+            MutateParams::SetChatSnoozedUntil { chat_id, until } => {
+                if until.is_some_and(|until| until <= chrono::Utc::now()) {
+                    return Err(RpcError::Failed(
+                        "Choose a snooze time in the future".into(),
+                    ));
+                }
+                self.workspace
+                    .set_chat_snoozed_until(&chat_id, until)
+                    .map_err(failed)
+                    .and_then(chat_written)
             }
             MutateParams::ChangeSidebarPin { change } => {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)
@@ -3896,6 +3920,55 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn lifecycle_mutations_reject_missing_and_deleted_chats() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let until = chrono::Utc::now() + chrono::Duration::hours(1);
+        let mutations = [
+            serde_json::json!({"op":"setChatArchived", "chatId":"lifecycle", "archived":true}),
+            serde_json::json!({"op":"setChatArchived", "chatId":"lifecycle", "archived":false}),
+            serde_json::json!({"op":"setChatSnoozedUntil", "chatId":"lifecycle", "until":until}),
+            serde_json::json!({"op":"setChatSnoozedUntil", "chatId":"lifecycle", "until":null}),
+        ];
+        for deleted in [false, true] {
+            if deleted {
+                rpc.handle(
+                    methods::MUTATE,
+                    serde_json::json!({"op":"createChat", "chatId":"lifecycle", "deviceId":core.device_id,
+                        "config":{"harness":"codex","sandbox":"workspace-write"}}),
+                )
+                .await
+                .unwrap();
+                for mutation in &mutations {
+                    rpc.handle(methods::MUTATE, mutation.clone()).await.unwrap();
+                }
+                rpc.handle(
+                    methods::MUTATE,
+                    serde_json::json!({"op":"deleteChat", "chatId":"lifecycle"}),
+                )
+                .await
+                .unwrap();
+            }
+            for mutation in &mutations {
+                match rpc.handle(methods::MUTATE, mutation.clone()).await {
+                    Err(RpcError::Failed(message)) => assert_eq!(message, "Chat no longer exists"),
+                    Err(other) => panic!("unexpected lifecycle error: {other}"),
+                    Ok(_) => panic!("lifecycle mutation unexpectedly succeeded: {mutation}"),
+                }
+                assert!(core.workspace.chat("lifecycle").unwrap().is_none());
+            }
+        }
+        core.sessions.shutdown().await;
+    }
 
     #[tokio::test]
     async fn voice_owner_is_shared_across_services_and_shutdown_retires_it() {

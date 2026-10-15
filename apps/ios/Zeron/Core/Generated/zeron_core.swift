@@ -1206,6 +1206,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func shutdown() 
     
+    func snoozeSession(chatId: String, durationSecs: UInt32) throws 
+    
     /**
      * Account-wide Queue/Steer preference. Unset means Queue.
      */
@@ -1242,6 +1244,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func userId()  -> String
     
+    func wakeSession(chatId: String) throws 
+    
     /**
      * The whole derived workspace.
      */
@@ -1257,6 +1261,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      * platform must hop to its media/UI executor and call complete_media.
      */
     func startVoice(hostDeviceId: String, voice: String?, media: VoiceMediaListener, listener: VoiceSessionListener)  -> VoiceCall
+    
+    /**
+     * Select the microphone gate before preparing media, so push-to-talk
+     * never briefly starts transmitting while the call connects.
+     */
+    func startVoiceWithInputMode(hostDeviceId: String, voice: String?, inputMode: VoiceInputMode, media: VoiceMediaListener, listener: VoiceSessionListener)  -> VoiceCall
     
 }
 /**
@@ -1967,6 +1977,16 @@ open func shutdown()  {try! rustCall() {
 }
 }
     
+open func snoozeSession(chatId: String, durationSecs: UInt32)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_snooze_session(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(chatId),
+        FfiConverterUInt32.lower(durationSecs),uniffiCallStatus
+    )
+}
+}
+    
     /**
      * Account-wide Queue/Steer preference. Unset means Queue.
      */
@@ -2094,6 +2114,15 @@ open func userId() -> String  {
 })
 }
     
+open func wakeSession(chatId: String)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_wake_session(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(chatId),uniffiCallStatus
+    )
+}
+}
+    
     /**
      * The whole derived workspace.
      */
@@ -2129,6 +2158,24 @@ open func startVoice(hostDeviceId: String, voice: String?, media: VoiceMediaList
             self.uniffiCloneHandle(),
         FfiConverterString.lower(hostDeviceId),
         FfiConverterOptionString.lower(voice),
+        FfiConverterTypeVoiceMediaListener_lower(media),
+        FfiConverterTypeVoiceSessionListener_lower(listener),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Select the microphone gate before preparing media, so push-to-talk
+     * never briefly starts transmitting while the call connects.
+     */
+open func startVoiceWithInputMode(hostDeviceId: String, voice: String?, inputMode: VoiceInputMode, media: VoiceMediaListener, listener: VoiceSessionListener) -> VoiceCall  {
+    return try!  FfiConverterTypeVoiceCall_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_start_voice_with_input_mode(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(hostDeviceId),
+        FfiConverterOptionString.lower(voice),
+        FfiConverterTypeVoiceInputMode_lower(inputMode),
         FfiConverterTypeVoiceMediaListener_lower(media),
         FfiConverterTypeVoiceSessionListener_lower(listener),uniffiCallStatus
     )
@@ -4677,7 +4724,19 @@ public protocol VoiceCallProtocol: AnyObject, Sendable {
      */
     func completeMedia(requestId: UInt64, failure: VoiceMediaFailure?, sdp: String?, microphone: UInt16, speaker: UInt16) 
     
+    /**
+     * Switching modes always requires a fresh hold. A mute toggle cannot
+     * bypass push-to-talk, including notification or lock-screen actions.
+     */
+    func setInputMode(mode: VoiceInputMode) 
+    
     func setMuted(muted: Bool) 
+    
+    /**
+     * Platforms aggregate touch holds, and release on focus
+     * loss, cancelled gestures, navigation and backgrounding.
+     */
+    func setPushToTalkHeld(held: Bool) 
     
     func stop() 
     
@@ -4751,11 +4810,37 @@ open func completeMedia(requestId: UInt64, failure: VoiceMediaFailure?, sdp: Str
 }
 }
     
+    /**
+     * Switching modes always requires a fresh hold. A mute toggle cannot
+     * bypass push-to-talk, including notification or lock-screen actions.
+     */
+open func setInputMode(mode: VoiceInputMode)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_voicecall_set_input_mode(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeVoiceInputMode_lower(mode),uniffiCallStatus
+    )
+}
+}
+    
 open func setMuted(muted: Bool)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_voicecall_set_muted(
             self.uniffiCloneHandle(),
         FfiConverterBool.lower(muted),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Platforms aggregate touch holds, and release on focus
+     * loss, cancelled gestures, navigation and backgrounding.
+     */
+open func setPushToTalkHeld(held: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_voicecall_set_push_to_talk_held(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(held),uniffiCallStatus
     )
 }
 }
@@ -6858,6 +6943,11 @@ public struct FrontPage: Equatable, Hashable {
      * Everything else, by recency.
      */
     public var recent: [SessionRow]
+    /**
+     * Empty in the default projection.
+     */
+    public var working: [SessionRow]
+    public var snoozed: [SessionRow]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -6870,10 +6960,15 @@ public struct FrontPage: Equatable, Hashable {
          */sections: [SectionView], 
         /**
          * Everything else, by recency.
-         */recent: [SessionRow]) {
+         */recent: [SessionRow], 
+        /**
+         * Empty in the default projection.
+         */working: [SessionRow], snoozed: [SessionRow]) {
         self.pinned = pinned
         self.sections = sections
         self.recent = recent
+        self.working = working
+        self.snoozed = snoozed
     }
 
     
@@ -6894,7 +6989,9 @@ public struct FfiConverterTypeFrontPage: FfiConverterRustBuffer {
             try FrontPage(
                 pinned: FfiConverterSequenceTypeSessionRow.read(from: &buf), 
                 sections: FfiConverterSequenceTypeSectionView.read(from: &buf), 
-                recent: FfiConverterSequenceTypeSessionRow.read(from: &buf)
+                recent: FfiConverterSequenceTypeSessionRow.read(from: &buf), 
+                working: FfiConverterSequenceTypeSessionRow.read(from: &buf), 
+                snoozed: FfiConverterSequenceTypeSessionRow.read(from: &buf)
         )
     }
 
@@ -6902,6 +6999,8 @@ public struct FfiConverterTypeFrontPage: FfiConverterRustBuffer {
         FfiConverterSequenceTypeSessionRow.write(value.pinned, into: &buf)
         FfiConverterSequenceTypeSectionView.write(value.sections, into: &buf)
         FfiConverterSequenceTypeSessionRow.write(value.recent, into: &buf)
+        FfiConverterSequenceTypeSessionRow.write(value.working, into: &buf)
+        FfiConverterSequenceTypeSessionRow.write(value.snoozed, into: &buf)
     }
 }
 
@@ -9320,6 +9419,12 @@ public struct SessionRow: Equatable, Hashable {
     public var createdAtMs: Int64
     public var unseen: Bool
     public var archived: Bool
+    public var snoozed: Bool
+    public var snoozedUntilMs: Int64?
+    /**
+     * Already includes "in" (for example "in 2h").
+     */
+    public var snoozeLabel: String?
     public var pinned: Bool
     public var sectionId: String?
     public var pullRequest: PullRequest?
@@ -9362,7 +9467,10 @@ public struct SessionRow: Equatable, Hashable {
          */workingSinceMs: Int64?, lastActivityMs: Int64, 
         /**
          * `now` / `34m` / `4h` / `2d` at derive time.
-         */timeLabel: String, createdAtMs: Int64, unseen: Bool, archived: Bool, pinned: Bool, sectionId: String?, pullRequest: PullRequest?, 
+         */timeLabel: String, createdAtMs: Int64, unseen: Bool, archived: Bool, snoozed: Bool, snoozedUntilMs: Int64?, 
+        /**
+         * Already includes "in" (for example "in 2h").
+         */snoozeLabel: String?, pinned: Bool, sectionId: String?, pullRequest: PullRequest?, 
         /**
          * Oldest unadopted send from this device (open sessions only).
          */sendState: SendState?, parentChatId: String?, 
@@ -9393,6 +9501,9 @@ public struct SessionRow: Equatable, Hashable {
         self.createdAtMs = createdAtMs
         self.unseen = unseen
         self.archived = archived
+        self.snoozed = snoozed
+        self.snoozedUntilMs = snoozedUntilMs
+        self.snoozeLabel = snoozeLabel
         self.pinned = pinned
         self.sectionId = sectionId
         self.pullRequest = pullRequest
@@ -9441,6 +9552,9 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 createdAtMs: FfiConverterInt64.read(from: &buf), 
                 unseen: FfiConverterBool.read(from: &buf), 
                 archived: FfiConverterBool.read(from: &buf), 
+                snoozed: FfiConverterBool.read(from: &buf), 
+                snoozedUntilMs: FfiConverterOptionInt64.read(from: &buf), 
+                snoozeLabel: FfiConverterOptionString.read(from: &buf), 
                 pinned: FfiConverterBool.read(from: &buf), 
                 sectionId: FfiConverterOptionString.read(from: &buf), 
                 pullRequest: FfiConverterOptionTypePullRequest.read(from: &buf), 
@@ -9475,6 +9589,9 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterInt64.write(value.createdAtMs, into: &buf)
         FfiConverterBool.write(value.unseen, into: &buf)
         FfiConverterBool.write(value.archived, into: &buf)
+        FfiConverterBool.write(value.snoozed, into: &buf)
+        FfiConverterOptionInt64.write(value.snoozedUntilMs, into: &buf)
+        FfiConverterOptionString.write(value.snoozeLabel, into: &buf)
         FfiConverterBool.write(value.pinned, into: &buf)
         FfiConverterOptionString.write(value.sectionId, into: &buf)
         FfiConverterOptionTypePullRequest.write(value.pullRequest, into: &buf)
@@ -10720,6 +10837,7 @@ public struct WorkspaceSnapshot: Equatable, Hashable {
      */
     public var synced: Bool
     public var front: FrontPage
+    public var t3Front: FrontPage
     /**
      * Creation order.
      */
@@ -10740,7 +10858,7 @@ public struct WorkspaceSnapshot: Equatable, Hashable {
          */pinsReady: Bool, 
         /**
          * The registry reached this device at least once (or demo).
-         */synced: Bool, front: FrontPage, 
+         */synced: Bool, front: FrontPage, t3Front: FrontPage, 
         /**
          * Creation order.
          */projects: [ProjectView], 
@@ -10752,6 +10870,7 @@ public struct WorkspaceSnapshot: Equatable, Hashable {
         self.pinsReady = pinsReady
         self.synced = synced
         self.front = front
+        self.t3Front = t3Front
         self.projects = projects
         self.projectless = projectless
         self.pullRequests = pullRequests
@@ -10780,6 +10899,7 @@ public struct FfiConverterTypeWorkspaceSnapshot: FfiConverterRustBuffer {
                 pinsReady: FfiConverterBool.read(from: &buf), 
                 synced: FfiConverterBool.read(from: &buf), 
                 front: FfiConverterTypeFrontPage.read(from: &buf), 
+                t3Front: FfiConverterTypeFrontPage.read(from: &buf), 
                 projects: FfiConverterSequenceTypeProjectView.read(from: &buf), 
                 projectless: FfiConverterSequenceTypeSessionRow.read(from: &buf), 
                 pullRequests: FfiConverterTypePullRequestGroups.read(from: &buf), 
@@ -10794,6 +10914,7 @@ public struct FfiConverterTypeWorkspaceSnapshot: FfiConverterRustBuffer {
         FfiConverterBool.write(value.pinsReady, into: &buf)
         FfiConverterBool.write(value.synced, into: &buf)
         FfiConverterTypeFrontPage.write(value.front, into: &buf)
+        FfiConverterTypeFrontPage.write(value.t3Front, into: &buf)
         FfiConverterSequenceTypeProjectView.write(value.projects, into: &buf)
         FfiConverterSequenceTypeSessionRow.write(value.projectless, into: &buf)
         FfiConverterTypePullRequestGroups.write(value.pullRequests, into: &buf)
@@ -14375,6 +14496,75 @@ public func FfiConverterTypeVoiceEndReason_lower(_ value: VoiceEndReason) -> Rus
 
 
 /**
+ * Device-local microphone behavior, shared by Swift and Kotlin clients.
+ */
+
+public enum VoiceInputMode: Equatable, Hashable {
+    
+    case handsFree
+    case pushToTalk
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension VoiceInputMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVoiceInputMode: FfiConverterRustBuffer {
+    typealias SwiftType = VoiceInputMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VoiceInputMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .handsFree
+        
+        case 2: return .pushToTalk
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: VoiceInputMode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .handsFree:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .pushToTalk:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVoiceInputMode_lift(_ buf: RustBuffer) throws -> VoiceInputMode {
+    return try FfiConverterTypeVoiceInputMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVoiceInputMode_lower(_ value: VoiceInputMode) -> RustBuffer {
+    return FfiConverterTypeVoiceInputMode.lower(value)
+}
+
+
+
+/**
  * Why a platform media operation failed.
  */
 
@@ -17337,6 +17527,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_shutdown() != 4352) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_snooze_session() != 49022) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_steer_mode() != 7842) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17364,6 +17557,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_user_id() != 27711) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_wake_session() != 42445) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_workspace() != 42501) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17371,6 +17567,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice() != 62086) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice_with_input_mode() != 45682) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_uploadprogress_on_progress() != 40458) {
@@ -17439,7 +17638,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_voicecall_complete_media() != 130) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_voicecall_set_input_mode() != 1567) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_voicecall_set_muted() != 41942) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_voicecall_set_push_to_talk_held() != 28424) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_voicecall_stop() != 33696) {

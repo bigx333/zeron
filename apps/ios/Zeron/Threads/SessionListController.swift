@@ -34,7 +34,17 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     /// Headers are disclosure rows that fold their section (front page).
     var collapsible = false
     private(set) var collapsed = Set(UserDefaults.standard.stringArray(forKey: "collapsedSections") ?? [])
+    /// T3 shelves start folded: their state is the set the user opened.
+    static let shelves: Set<String> = ["t3-working", "t3-snoozed", "t3-settled"]
+    /// The demo (and its UI tests) always start folded.
+    private static let persistsShelves = !ProcessInfo.processInfo.arguments.contains("-demo")
+    private var expandedShelves = Set(persistsShelves ? UserDefaults.standard.stringArray(forKey: "expandedShelves") ?? [] : [])
+
+    func isCollapsed(_ id: String) -> Bool {
+        Self.shelves.contains(id) ? !expandedShelves.contains(id) : collapsed.contains(id)
+    }
     private var headerStates: [String: SectionHeaderCell.State] = [:]
+    private var shownT3Mode: Bool?
 
     init(app: AppModel) {
         self.app = app
@@ -62,7 +72,13 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
             guard let self, let vm = self.sessions[id] else { return }
             cell.configure(vm)
             cell.isCurrent = id == self.currentChatId
-            cell.accessories = self.reorderable ? [.reorder(displayed: .whenEditing)] : []
+            var accessories: [UICellAccessory] = self.reorderable ? [.reorder(displayed: .whenEditing)] : []
+            if self.app.t3Mode { accessories.append(self.actionsAccessory(id, title: vm.title)) }
+            cell.accessories = accessories
+            // The ⋯ brings its own breathing room on the right.
+            cell.trailingInset = self.app.t3Mode ? 4 : 20
+            // Swipes and long-press are gestures; VoiceOver gets the same verbs.
+            cell.accessibilityCustomActions = self.customActions(id, cell: cell)
         }
         let folderReg = UICollectionView.CellRegistration<FolderCell, String> { [weak self] cell, _, id in
             guard let vm = self?.folders[id] else { return }
@@ -132,7 +148,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                         id: s.id,
                         title: header,
                         count: s.sessions.count,
-                        collapsed: collapsed.contains(s.id),
+                        collapsed: isCollapsed(s.id),
                         live: s.sessions.contains { $0.status == .working } ? .spinner : s.sessions.contains { $0.status == .awaiting } ? .dot(StatusTone.input) : nil
                     )
                     if let old = headerStates[s.id], old != state { changed.append(.header(s.id)) }
@@ -157,9 +173,16 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         }
         sessions = nextSessions
         folders = nextFolders
+        // A mode switch changes every row's actions without changing its data.
+        if shownT3Mode != app.t3Mode {
+            shownT3Mode = app.t3Mode
+            changed += snapshot.itemIdentifiers.filter { if case .session = $0 { return true } else { return false } }
+        }
         let present = Set(snapshot.itemIdentifiers)
         snapshot.reconfigureItems(changed.filter { present.contains($0) })
-        dataSource.apply(snapshot, animatingDifferences: animated && view.window != nil)
+        // Rows sliding between shelves and modes is motion; Reduce Motion
+        // swaps the list in place.
+        dataSource.apply(snapshot, animatingDifferences: animated && view.window != nil && !UIAccessibility.isReduceMotionEnabled)
     }
 
     /// Subclasses follow the scroll (the front page fades its wallpaper).
@@ -191,8 +214,13 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     }
 
     func toggleSection(_ id: String) {
-        if collapsed.remove(id) == nil { collapsed.insert(id) }
-        UserDefaults.standard.set(Array(collapsed), forKey: "collapsedSections")
+        if Self.shelves.contains(id) {
+            if expandedShelves.remove(id) == nil { expandedShelves.insert(id) }
+            if Self.persistsShelves { UserDefaults.standard.set(Array(expandedShelves), forKey: "expandedShelves") }
+        } else {
+            if collapsed.remove(id) == nil { collapsed.insert(id) }
+            UserDefaults.standard.set(Array(collapsed), forKey: "collapsedSections")
+        }
         UISelectionFeedbackGenerator().selectionChanged()
         reload(animated: true)
     }
@@ -225,8 +253,13 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         return nil
     }
 
+    /// Settled rows: the Archived list, or the front page's Settled shelf.
+    func isArchivedRow(_ id: String) -> Bool {
+        archivedRows || dataSource.snapshot().sectionIdentifier(containingItem: .session(id)) == "t3-settled"
+    }
+
     private func leadingSwipe(_ path: IndexPath) -> UISwipeActionsConfiguration? {
-        guard !archivedRows, let id = sessionId(path), let vm = sessions[id] else { return nil }
+        guard let id = sessionId(path), !isArchivedRow(id), let vm = sessions[id] else { return nil }
         let pin = UIContextualAction(style: .normal, title: vm.pinned ? "Unpin" : "Pin") { [weak self] _, _, done in
             self?.app.setPinned(id, !vm.pinned)
             done(true)
@@ -238,14 +271,30 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
 
     private func trailingSwipe(_ path: IndexPath) -> UISwipeActionsConfiguration? {
         guard let id = sessionId(path) else { return nil }
-        if archivedRows {
-            let restore = UIContextualAction(style: .normal, title: "Unarchive") { [weak self] _, _, done in
+        if isArchivedRow(id) {
+            let restore = UIContextualAction(style: .normal, title: app.t3Mode ? "Unsettle" : "Unarchive") { [weak self] _, _, done in
                 self?.app.unarchive(id)
                 done(true)
             }
             restore.image = UIImage(systemName: "tray.and.arrow.up.fill")
             restore.backgroundColor = Palette.accent
             return UISwipeActionsConfiguration(actions: [restore])
+        }
+        if app.t3Mode {
+            // Full swipe settles; the second parks it (or re-times a snooze).
+            // Snoozes clear at their deadline or on a sent message, never by a control.
+            let settle = UIContextualAction(style: .destructive, title: "Settle") { [weak self] _, _, done in
+                done(self?.app.archive(id) ?? false)
+            }
+            settle.image = UIImage(systemName: "checkmark")
+            settle.backgroundColor = StatusTone.done.withAlphaComponent(1)
+            let later = UIContextualAction(style: .normal, title: "Snooze") { [weak self] _, view, done in
+                self?.presentSnoozeSheet(id, from: view)
+                done(true)
+            }
+            later.image = UIImage(systemName: "clock.fill")
+            later.backgroundColor = UIColor(hex: 0x5E6AD2)
+            return UISwipeActionsConfiguration(actions: [settle, later])
         }
         let archive = UIContextualAction(style: .destructive, title: "Archive") { [weak self] _, _, done in
             self?.app.archive(id)
@@ -266,22 +315,115 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         if let path = indexPaths.first, case let .header(id) = dataSource.itemIdentifier(for: path), let menu = headerMenu(id) {
             return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in menu }
         }
-        guard let path = indexPaths.first, let id = sessionId(path), let vm = sessions[id] else { return nil }
+        guard let path = indexPaths.first, let id = sessionId(path), sessions[id] != nil else { return nil }
         return UIContextMenuConfiguration(identifier: id as NSString, previewProvider: nil) { [weak self] _ in
-            guard let self else { return nil }
-            if self.archivedRows {
-                return UIMenu(children: [
-                    UIAction(title: "Unarchive", image: UIImage(systemName: "tray.and.arrow.up")) { _ in self.app.unarchive(id) },
-                    UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },
-                ])
-            }
+            self?.rowMenu(id)
+        }
+    }
+
+    /// A row's actions: the long-press menu, and the T3 ⋯ button's.
+    func rowMenu(_ id: String) -> UIMenu? {
+        guard let vm = sessions[id] else { return nil }
+        if isArchivedRow(id) {
             return UIMenu(children: [
-                UIAction(title: vm.pinned ? "Unpin" : "Pin", image: UIImage(systemName: vm.pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(id, !vm.pinned) },
-                self.moveMenu(id),
-                UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },
-                UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in self.app.archive(id) },
+                UIAction(title: app.t3Mode ? "Unsettle" : "Unarchive", image: UIImage(systemName: "tray.and.arrow.up")) { [weak self] _ in self?.app.unarchive(id) },
+                UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { [weak self] _ in self?.rename(id) },
             ])
         }
+        var items: [UIMenuElement] = [
+            UIAction(title: vm.pinned ? "Unpin" : "Pin", image: UIImage(systemName: vm.pinned ? "pin.slash" : "pin")) { [weak self] _ in self?.app.setPinned(id, !vm.pinned) },
+        ]
+        if app.t3Mode {
+            items.append(Self.snoozeMenu(app: app, id: id) { [weak self] in
+                guard let self else { return }
+                SnoozeUntil.pickDate(from: self) { [weak self] date in self?.app.snooze(id, until: date) }
+            })
+        }
+        items += [
+            moveMenu(id),
+            UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { [weak self] _ in self?.rename(id) },
+            app.t3Mode
+                ? UIAction(title: "Settle", image: UIImage(systemName: "checkmark.circle")) { [weak self] _ in self?.app.archive(id) }
+                : UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { [weak self] _ in self?.app.archive(id) },
+        ]
+        return UIMenu(children: items)
+    }
+
+    /// T3 rows carry a visible ⋯ beside the swipes: phones have no hover, and
+    /// long-press alone hides Snooze and Settle. It opens the row's menu in
+    /// place, rebuilt on each open, and never selects the row.
+    private func actionsAccessory(_ id: String, title: String) -> UICellAccessory {
+        var config = UIButton.Configuration.plain()
+        config.image = UIImage(systemName: "ellipsis", withConfiguration: UIImage.SymbolConfiguration(pointSize: TypeScale.size(15), weight: .semibold))
+        config.baseForegroundColor = Palette.secondary
+        config.contentInsets = .zero
+        let button = UIButton(configuration: config)
+        button.frame = CGRect(x: 0, y: 0, width: 44, height: 44)
+        button.showsMenuAsPrimaryAction = true
+        button.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
+            done(self?.rowMenu(id)?.children ?? [])
+        }])
+        button.accessibilityLabel = "Actions for \(title)"
+        button.accessibilityIdentifier = "session-actions-\(id)"
+        return .customView(configuration: .init(customView: button, placement: .trailing(), reservedLayoutWidth: .custom(44), maintainsFixedSize: true))
+    }
+
+    /// Snooze presets as a submenu. A snoozed session offers them too, to
+    /// re-time it; its deadline or a sent message is what clears the snooze.
+    /// The presets, then "until" wake times; `pickDate` opens the picker.
+    static func snoozeMenu(app: AppModel, id: String, pickDate: @escaping () -> Void) -> UIMenuElement {
+        UIMenu(title: "Snooze", image: UIImage(systemName: "clock"), children: AppModel.snoozePresets.map { preset in
+            UIAction(title: preset.title) { _ in app.snooze(id, seconds: preset.seconds, title: preset.title) }
+        } + SnoozeUntil.menuElements(snooze: { app.snooze(id, until: $0) }, pickDate: pickDate))
+    }
+
+    func presentSnoozeSheet(_ id: String, from view: UIView) {
+        let sheet = UIAlertController(title: "Snooze", message: "It comes back to the inbox when the time is up, or when you send it a message.", preferredStyle: .actionSheet)
+        for preset in AppModel.snoozePresets {
+            sheet.addAction(UIAlertAction(title: preset.title, style: .default) { [weak self] _ in
+                self?.app.snooze(id, seconds: preset.seconds, title: preset.title)
+            })
+        }
+        // Action sheets have no subtitles: the wake time rides the title.
+        let now = Date()
+        for s in SnoozeUntil.suggestions(now: now) {
+            sheet.addAction(UIAlertAction(title: "\(s.title) · \(SnoozeUntil.label(s.date, now: now))", style: .default) { [weak self] _ in
+                self?.app.snooze(id, until: s.date)
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "Pick Date & Time…", style: .default) { [weak self] _ in
+            guard let self else { return }
+            SnoozeUntil.pickDate(from: self) { [weak self] date in self?.app.snooze(id, until: date) }
+        })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = view
+        sheet.popoverPresentationController?.sourceRect = view.bounds
+        present(sheet, animated: true)
+    }
+
+    /// The row's swipe verbs for assistive tech.
+    private func customActions(_ id: String, cell: UIView) -> [UIAccessibilityCustomAction] {
+        guard let vm = sessions[id] else { return [] }
+        if isArchivedRow(id) {
+            return [UIAccessibilityCustomAction(name: app.t3Mode ? "Unsettle" : "Unarchive") { [weak self] _ in
+                self?.app.unarchive(id) ?? false
+            }]
+        }
+        var out = [UIAccessibilityCustomAction(name: vm.pinned ? "Unpin" : "Pin") { [weak self] _ in
+            self?.app.setPinned(id, !vm.pinned)
+            return true
+        }]
+        if app.t3Mode {
+            out.append(UIAccessibilityCustomAction(name: "Snooze") { [weak self, weak cell] _ in
+                guard let self, let cell else { return false }
+                self.presentSnoozeSheet(id, from: cell)
+                return true
+            })
+        }
+        out.append(UIAccessibilityCustomAction(name: app.archiveWord) { [weak self] _ in
+            self?.app.archive(id) ?? false
+        })
+        return out
     }
 
     func moveMenu(_ id: String) -> UIMenu {
@@ -349,6 +491,7 @@ class SessionsViewController: SessionListController {
         title = "Sessions"
         navigationItem.largeTitleDisplayMode = .always
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: optionsMenu())
+        navigationItem.rightBarButtonItem?.accessibilityIdentifier = "sessions-options"
     }
 
     override func buildSections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] {
@@ -363,11 +506,31 @@ class SessionsViewController: SessionListController {
             for g in app.frontPage.projectGroups {
                 out.append((g.id, g.name, [], g.sessions))
             }
-            return out
+        } else if app.t3Mode {
+            out.append(("recent", "Inbox", [], app.frontPage.sessions))
+        } else {
+            out.append(("recent", out.isEmpty ? nil : "Recent", [], app.frontPage.sessions))
         }
-        out.append(("recent", out.isEmpty ? nil : "Recent", [], app.frontPage.sessions))
+        guard app.t3Mode else { return out }
+        // Shelves trail the inbox, folded until opened.
+        if !app.frontPage.working.isEmpty {
+            out.append(("t3-working", "Working", [], app.frontPage.working))
+        }
+        if !app.frontPage.snoozed.isEmpty {
+            out.append(("t3-snoozed", "Snoozed", [], app.frontPage.snoozed))
+        }
+        if !app.archived.isEmpty {
+            // The shelf holds the latest few; the full list is a tap away.
+            let shown = Array(app.archived.prefix(Self.settledShelfRows))
+            let all = app.archived.count > shown.count
+                ? [FolderRowVM(id: "archived", name: "All Settled", count: app.archived.count, symbol: "checkmark.circle")]
+                : []
+            out.append(("t3-settled", "Settled", all, shown))
+        }
         return out
     }
+
+    private static let settledShelfRows = 10
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -417,18 +580,25 @@ class SessionsViewController: SessionListController {
                 guard let self else { return }
                 var ids = self.app.frontPage.folders.map(\.id)
                 if self.app.groupByProject { ids += self.app.frontPage.projectGroups.map(\.id) }
-                for id in ids where !self.collapsed.contains(id) { self.toggleSection(id) }
+                if self.app.t3Mode { ids += Self.shelves }
+                for id in ids where !self.isCollapsed(id) { self.toggleSection(id) }
             },
-            // Rebuilt on each open: Settings flips it too.
+            // Rebuilt on each open: Settings flips them too.
             UIDeferredMenuElement.uncached { [weak self] done in
-                guard let app = self?.app else { return done([]) }
-                done([UIAction(title: "Group by Project", image: UIImage(systemName: "square.stack.3d.up"), state: app.groupByProject ? .on : .off) { _ in
-                    app.groupByProject.toggle()
-                }])
-            },
-            UIAction(title: "Archived", image: UIImage(systemName: "archivebox")) { [weak self] _ in
-                guard let self else { return }
-                self.navigationController?.pushViewController(FolderViewController(app: self.app, folder: FolderRowVM(id: "archived", name: "Archived", count: 0, symbol: "archivebox")), animated: true)
+                guard let self else { return done([]) }
+                let app = self.app
+                done([
+                    UIAction(title: "Group by Project", image: UIImage(systemName: "square.stack.3d.up"), state: app.groupByProject ? .on : .off) { _ in
+                        app.groupByProject.toggle()
+                    },
+                    UIAction(title: "T3 Mode", subtitle: "Inbox with Working, Snoozed and Settled shelves", image: UIImage(systemName: "tray.full"), state: app.t3Mode ? .on : .off) { _ in
+                        app.t3Mode.toggle()
+                    },
+                    UIAction(title: app.t3Mode ? "Settled" : "Archived", image: UIImage(systemName: app.t3Mode ? "checkmark.circle" : "archivebox")) { [weak self] _ in
+                        guard let self else { return }
+                        self.navigationController?.pushViewController(FolderViewController(app: app, folder: .archived(t3: app.t3Mode)), animated: true)
+                    },
+                ])
             },
         ])
     }
@@ -536,5 +706,12 @@ final class SearchViewController: SessionListController, UISearchResultsUpdating
 
     override func buildSections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] {
         [("results", nil, [], app.search(query))]
+    }
+}
+
+extension FolderRowVM {
+    /// The Archived list, named Settled in T3 Mode.
+    static func archived(t3: Bool) -> FolderRowVM {
+        FolderRowVM(id: "archived", name: t3 ? "Settled" : "Archived", count: 0, symbol: t3 ? "checkmark.circle" : "archivebox")
     }
 }

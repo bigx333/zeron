@@ -2,6 +2,7 @@ package sh.zeron.android.ui
 
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -68,7 +69,23 @@ fun ScreenHeader(title: String, subtitle: String?, modifier: Modifier = Modifier
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.displaySmallEmphasized, color = MaterialTheme.colorScheme.onSurface)
+            // A title that changes in place (Sessions ⇄ Inbox) cross-fades.
+            val still = sh.zeron.android.voice.rememberReducedMotion()
+            val fadeInSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
+            val fadeOutSpec = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
+            androidx.compose.animation.AnimatedContent(
+                title,
+                transitionSpec = {
+                    if (still) {
+                        androidx.compose.animation.EnterTransition.None togetherWith androidx.compose.animation.ExitTransition.None
+                    } else {
+                        androidx.compose.animation.fadeIn(fadeInSpec) togetherWith androidx.compose.animation.fadeOut(fadeOutSpec)
+                    }
+                },
+                label = "screen-title",
+            ) { shown ->
+                Text(shown, style = MaterialTheme.typography.displaySmallEmphasized, color = MaterialTheme.colorScheme.onSurface)
+            }
             if (subtitle != null) {
                 Spacer(Modifier.height(2.dp))
                 Text(subtitle, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)

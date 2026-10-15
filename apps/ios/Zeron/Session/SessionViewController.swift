@@ -527,22 +527,52 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return done([]) }
             let vm = self.app.session(self.chatId)
             let pinned = vm?.pinned ?? false
-            done([
+            let t3 = self.app.t3Mode
+            let archived = vm?.archived ?? false
+            var items: [UIMenuElement] = [
                 UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
+            ]
+            if t3, !archived {
+                // Snoozing parks the session like settling: leave it.
+                items.append(UIMenu(title: "Snooze", image: UIImage(systemName: "clock"), children: AppModel.snoozePresets.map { preset in
+                    UIAction(title: preset.title) { _ in
+                        if self.app.snooze(self.chatId, seconds: preset.seconds, title: preset.title) { self.leave() }
+                    }
+                } + SnoozeUntil.menuElements(
+                    snooze: { if self.app.snooze(self.chatId, until: $0) { self.leave() } },
+                    pickDate: {
+                        SnoozeUntil.pickDate(from: self) { [weak self] date in
+                            guard let self, self.app.snooze(self.chatId, until: date) else { return }
+                            self.leave()
+                        }
+                    }
+                )))
+            }
+            items += [
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
-                UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in
-                    self.app.archive(self.chatId)
-                    // Beside the iPad sidebar there's nothing to pop back to.
-                    if let split = self.splitViewController as? SplitRootController, !split.isCollapsed {
-                        split.showDraft(prompt: nil, focus: false)
-                    } else {
-                        self.navigationController?.popViewController(animated: true)
-                    }
-                },
-            ])
+                // A settled session restores in place; there is nothing to leave.
+                archived
+                    ? UIAction(title: t3 ? "Unsettle" : "Unarchive", image: UIImage(systemName: "tray.and.arrow.up")) { _ in self.app.unarchive(self.chatId) }
+                    : UIAction(title: self.app.archiveWord, image: UIImage(systemName: t3 ? "checkmark.circle" : "archivebox"), attributes: t3 ? [] : .destructive) { _ in
+                        if self.app.archive(self.chatId) { self.leave() }
+                    },
+            ]
+            done(items)
         }])
+    }
+}
+
+extension SessionViewController {
+    /// After parking the open session: beside the iPad sidebar there's
+    /// nothing to pop back to, so show a fresh draft instead.
+    fileprivate func leave() {
+        if let split = splitViewController as? SplitRootController, !split.isCollapsed {
+            split.showDraft(prompt: nil, focus: false)
+        } else {
+            navigationController?.popViewController(animated: true)
+        }
     }
 }
 

@@ -268,6 +268,21 @@ impl ClientInner {
         let _ = self.registry_write(|doc| doc.set_chat_seen(chat_id, Utc::now()));
     }
 
+    /// Sending a message resumes a parked thread; viewing, warming its
+    /// session and receiving agent output leave the snooze untouched.
+    pub(crate) fn clear_snooze_on_send(self: &Arc<Self>, chat_id: &str) {
+        if !self
+            .workspace
+            .chat(chat_id)
+            .is_some_and(|chat| chat.snoozed_until.is_some())
+        {
+            return;
+        }
+        if let Err(error) = self.registry_write(|doc| doc.set_chat_snoozed_until(chat_id, None)) {
+            tracing::warn!(%chat_id, %error, "could not clear snooze on send");
+        }
+    }
+
     pub(crate) fn recompute_connectivity(self: &Arc<Self>) {
         let raw = match self.live() {
             None => RawConnectivity {
@@ -757,6 +772,7 @@ impl Client {
             branch: new.branch,
             checkout_id: None,
             source_context: None,
+            snoozed_until: None,
             config: new.config,
             last_message_preview: None,
             last_message_at: None,
@@ -791,6 +807,23 @@ impl Client {
 
     pub fn unarchive_session(&self, chat_id: &str) -> Result<()> {
         self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, false))
+    }
+
+    /// Snooze via the synced registry, including while the host is offline.
+    pub fn snooze_session(&self, chat_id: &str, duration_secs: u32) -> Result<()> {
+        if duration_secs == 0 {
+            return Err(ClientError::InvalidArgument(
+                "snooze duration must be positive".into(),
+            ));
+        }
+        let until = Utc::now() + chrono::Duration::seconds(i64::from(duration_secs));
+        self.chat_write(chat_id, |doc| {
+            doc.set_chat_snoozed_until(chat_id, Some(until))
+        })
+    }
+
+    pub fn wake_session(&self, chat_id: &str) -> Result<()> {
+        self.chat_write(chat_id, |doc| doc.set_chat_snoozed_until(chat_id, None))
     }
 
     pub fn rename_session(&self, chat_id: &str, title: &str) -> Result<()> {

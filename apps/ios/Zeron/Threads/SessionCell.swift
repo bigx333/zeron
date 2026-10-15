@@ -29,6 +29,12 @@ struct SessionRowVM: Hashable {
     var unseen: Bool
     var pinned: Bool
     var sendFailed: Bool
+    /// T3 Mode: hidden on the Snoozed shelf until its deadline.
+    var snoozed: Bool
+    /// When a snoozed session comes back ("in 2h").
+    var snoozeLabel: String?
+    /// Archived (Settled in T3 Mode).
+    var archived: Bool
 }
 
 /// Folder row ("Pinned 2 ›", "P0 3 ›").
@@ -54,7 +60,11 @@ final class SessionCell: UICollectionViewListCell {
     private let time = UILabel()
     private let status = StatusGlyph()
     private let prBadge = PRBadgeView()
+    /// Snoozed rows lead their wake time with a moon, the shelf's glyph.
+    private let moon = UIImageView()
     private var vm: SessionRowVM?
+    /// Room right of the time; smaller when a trailing accessory follows.
+    var trailingInset: CGFloat = 20 { didSet { if trailingInset != oldValue { setNeedsLayout() } } }
     /// The session open beside the sidebar (iPad): a quiet fill.
     var isCurrent = false { didSet { if isCurrent != oldValue { setNeedsUpdateConfiguration() } } }
 
@@ -64,7 +74,10 @@ final class SessionCell: UICollectionViewListCell {
         time.textAlignment = .right
         harness.contentMode = .scaleAspectFit
         harness.tintColor = Palette.text
-        for v in [harness, title, meta, time, status, prBadge] as [UIView] { contentView.addSubview(v) }
+        moon.contentMode = .center
+        moon.tintColor = StatusTone.time
+        moon.isHidden = true
+        for v in [harness, title, meta, time, status, prBadge, moon] as [UIView] { contentView.addSubview(v) }
         var bg = UIBackgroundConfiguration.listCell()
         bg.backgroundColor = .clear
         backgroundConfiguration = bg
@@ -135,8 +148,19 @@ final class SessionCell: UICollectionViewListCell {
         } else {
             prBadge.isHidden = true
         }
-        let corner = Self.corner(vm)
-        if let corner {
+        // A snoozed row's story is when it comes back: the lane outranks its
+        // live state (only a failed send, which needs the user, still wins).
+        let wake = vm.snoozed && !vm.sendFailed ? vm.snoozeLabel : nil
+        let corner = wake == nil ? Self.corner(vm) : nil
+        moon.isHidden = wake == nil
+        if let wake {
+            time.text = wake
+            time.textColor = StatusTone.time
+            time.font = Fonts.ui(.sansMedium, TypeScale.size(13))
+            moon.image = UIImage(systemName: "moon.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: TypeScale.size(10), weight: .semibold))
+            status.kind = .none
+            status.isHidden = true
+        } else if let corner {
             time.text = corner.word
             time.textColor = corner.color
             time.font = Fonts.ui(.sansMedium, TypeScale.size(13))
@@ -149,7 +173,7 @@ final class SessionCell: UICollectionViewListCell {
             status.kind = .none
             status.isHidden = true
         }
-        accessibilityLabel = [vm.title, vm.projectName, corner?.word, prBadge.isHidden ? nil : prBadge.accessibilityLabel].compactMap { $0 }.joined(separator: ", ")
+        accessibilityLabel = [vm.title, vm.projectName, corner?.word, wake.map { "Snoozed, wakes \($0)" }, prBadge.isHidden ? nil : prBadge.accessibilityLabel].compactMap { $0 }.joined(separator: ", ")
         accessibilityIdentifier = "session-\(vm.id)"
         setNeedsLayout()
     }
@@ -158,7 +182,7 @@ final class SessionCell: UICollectionViewListCell {
         super.layoutSubviews()
         let b = contentView.bounds
         let left: CGFloat = 20
-        let right: CGFloat = 20
+        let right = trailingInset
         let k = TypeScale.factor
         let titleY = (10 * k).rounded()
         let titleH = (22 * k).rounded()
@@ -175,6 +199,10 @@ final class SessionCell: UICollectionViewListCell {
         let tw = ceil(time.sizeThatFits(CGSize(width: 140, height: 40)).width)
         time.frame = CGRect(x: b.width - right - tw, y: titleY, width: tw, height: titleH)
         var trailing = time.frame.minX - 10
+        if !moon.isHidden {
+            moon.frame = CGRect(x: time.frame.minX - 4 - 12, y: titleY + titleH / 2 - 6, width: 12, height: 12)
+            trailing = moon.frame.minX - 10
+        }
         if !status.isHidden {
             status.frame = CGRect(x: time.frame.minX - 5 - 12, y: titleY + titleH / 2 - 6, width: 12, height: 12)
             trailing = status.frame.minX - 10
@@ -280,7 +308,7 @@ final class SectionHeaderCell: UICollectionViewListCell {
         live.isHidden = s.live == nil
         if let kind = s.live { live.kind = kind }
         let rotate = { self.chevron.transform = s.collapsed ? CGAffineTransform(rotationAngle: -.pi / 2) : .identity }
-        if shownCollapsed != nil, shownCollapsed != s.collapsed, window != nil {
+        if shownCollapsed != nil, shownCollapsed != s.collapsed, window != nil, !UIAccessibility.isReduceMotionEnabled {
             UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0, animations: rotate)
         } else {
             rotate()

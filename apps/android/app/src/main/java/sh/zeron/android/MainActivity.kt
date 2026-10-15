@@ -38,10 +38,26 @@ class MainActivity : ComponentActivity() {
                 voiceStage = extras?.getBoolean("voice-stage") == true,
                 remoteVoice = extras?.getBoolean("remote-voice") == true,
                 voiceSelfTest = extras?.getBoolean("voice-selftest") == true,
+                t3 = extras?.getBoolean("t3") == true,
             ),
         )
         handleCallback(intent)
         setContent { ZeronRoot(model) }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        model.voice.setForeground(hasWindowFocus())
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        model.voice.setForeground(hasFocus)
+    }
+
+    override fun onPause() {
+        model.voice.setForeground(false)
+        super.onPause()
     }
 
     override fun onNewIntent(intent: Intent) {

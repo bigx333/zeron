@@ -7,6 +7,7 @@ final class VoiceAccessoryView: UIView {
     var onStart: ((UIView) -> Void)?
     var onOpen: ((UIView) -> Void)?
     var onMute: (() -> Void)?
+    var onHold: ((Bool) -> Void)?
     var onEnd: (() -> Void)?
 
     private(set) var live = false
@@ -15,7 +16,10 @@ final class VoiceAccessoryView: UIView {
     let orb = OrbView(preset: .avatar, orb: .connecting)
     private let title = UILabel()
     private let detail = UILabel()
-    private let mute = UIButton(type: .system)
+    private let mute = VoiceTalkPillButton(type: .system)
+    private var muteWidth: NSLayoutConstraint!
+    private var muteHeight: NSLayoutConstraint!
+    private var pushToTalk = false
     private let end = UIButton(type: .system)
     private var inline = false
 
@@ -55,12 +59,18 @@ final class VoiceAccessoryView: UIView {
             config.cornerStyle = .capsule
             button.configuration = config
             button.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                button.widthAnchor.constraint(equalToConstant: 32),
-                button.heightAnchor.constraint(equalToConstant: 32),
-            ])
+            let width = button.widthAnchor.constraint(equalToConstant: 32)
+            let height = button.heightAnchor.constraint(equalToConstant: 32)
+            if button === mute { muteWidth = width; muteHeight = height }
+            NSLayoutConstraint.activate([width, height])
         }
         mute.addAction(UIAction { [weak self] _ in self?.onMute?() }, for: .primaryActionTriggered)
+        mute.addVoiceHoldActions { [weak self] held in
+            guard let self, self.pushToTalk else { return }
+            self.onHold?(held)
+            UIImpactFeedbackGenerator(style: held ? .medium : .soft).impactOccurred()
+        }
+        mute.accessibilityIdentifier = "voice-accessory-microphone"
         end.addAction(UIAction { [weak self] _ in self?.onEnd?() }, for: .primaryActionTriggered)
         end.accessibilityLabel = "End call"
         end.accessibilityIdentifier = "voice-accessory-end"
@@ -111,9 +121,15 @@ final class VoiceAccessoryView: UIView {
 
     /// Minimized tab bar: the orb, the clock and hang-up only.
     func setInline(_ inline: Bool) {
+        if inline { onHold?(false) }
         self.inline = inline
         title.isHidden = inline
         mute.isHidden = inline
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { onHold?(false) }
     }
 
     func update(_ voice: RemoteVoiceController) {
@@ -123,19 +139,47 @@ final class VoiceAccessoryView: UIView {
         orb.isHidden = !live
         guard live else { return }
         let state = voice.state
+        pushToTalk = voice.pushToTalk
+        muteWidth.constant = pushToTalk ? 78 : 32
+        muteHeight.constant = pushToTalk ? 40 : 32
+        mute.isEnabled = !pushToTalk || voice.active
         orb.orb = voice.orb
         orb.setLevels(microphone: state?.microphone ?? 0, speaker: state?.speaker ?? 0)
         title.text = state?.work == .awaitingInput ? "Codex needs you" : "Codex"
         title.textColor = state?.work == .awaitingInput ? Palette.warning : Palette.text
-        detail.text = voice.active ? [voice.elapsedText, voice.muted ? "Muted" : nil].compactMap { $0 }.joined(separator: " · ") : "Connecting…"
+        let input = voice.pushToTalk ? voice.muted ? "Hold to talk" : "Transmitting" : voice.muted ? "Muted" : nil
+        detail.text = !voice.active ? "Connecting…" : voice.pushToTalk ? input : [voice.elapsedText, input].compactMap { $0 }.joined(separator: " · ")
         var config = mute.configuration
-        config?.image = UIImage(systemName: voice.muted ? "mic.slash.fill" : "mic.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .bold))
-        config?.baseBackgroundColor = voice.muted ? Palette.text : Palette.controlFill
-        config?.baseForegroundColor = voice.muted ? Palette.background : Palette.text
+        config?.image = UIImage(systemName: pushToTalk ? "mic.fill" : voice.muted ? "mic.slash.fill" : "mic.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: pushToTalk ? 16 : 13, weight: .bold))
+        config?.title = pushToTalk ? "Talk" : nil
+        config?.imagePadding = pushToTalk ? 6 : 0
+        config?.contentInsets = .zero
+        config?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes
+            attributes.font = Fonts.ui(.sansSemibold, 13)
+            return attributes
+        }
+        mute.layer.cornerRadius = pushToTalk ? 20 : 16
+        mute.layer.borderWidth = pushToTalk ? 1 : 0
+        mute.layer.borderColor = (voice.muted ? Palette.text.withAlphaComponent(0.16) : Palette.success).resolvedColor(with: traitCollection).cgColor
+        let highlighted = voice.pushToTalk ? !voice.muted : voice.muted
+        config?.baseBackgroundColor = highlighted ? Palette.text : Palette.controlFill
+        config?.baseForegroundColor = highlighted ? Palette.background : Palette.text
         mute.configuration = config
-        mute.accessibilityLabel = voice.muted ? "Unmute microphone" : "Mute microphone"
+        mute.accessibilityLabel = voice.pushToTalk ? "Hold to talk" : voice.muted ? "Unmute microphone" : "Mute microphone"
+        mute.accessibilityValue = voice.pushToTalk ? voice.muted ? "Microphone off" : "Transmitting" : nil
+        mute.accessibilityHint = voice.pushToTalk ? "Touch and hold to transmit. Release to mute." : nil
         strip.accessibilityLabel = "Voice call, \(voice.statusText)" + (voice.elapsedText.map { ", \($0)" } ?? "")
         strip.accessibilityHint = "Opens the call"
+    }
+}
+
+extension UIControl {
+    /// A press is never latched: leaving the button or cancelling a touch
+    /// closes the microphone just like lifting the finger.
+    func addVoiceHoldActions(_ action: @escaping (Bool) -> Void) {
+        addAction(UIAction { _ in action(true) }, for: [.touchDown, .touchDragEnter])
+        addAction(UIAction { _ in action(false) }, for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit])
     }
 }
 

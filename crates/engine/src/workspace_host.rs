@@ -1004,6 +1004,7 @@ impl WorkspaceHost {
                 branch: None,
                 checkout_id: None,
                 source_context: None,
+                snoozed_until: None,
                 config,
                 last_message_preview: None,
                 last_message_at: None,
@@ -1194,6 +1195,14 @@ impl WorkspaceHost {
 
     pub fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
+    }
+
+    pub fn set_chat_snoozed_until(
+        &self,
+        chat_id: &str,
+        until: Option<chrono::DateTime<Utc>>,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_snoozed_until(chat_id, until))?)
     }
 
     /// LWW full-config replace on the chat row (zeron `SetChatConfig` — the

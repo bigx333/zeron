@@ -441,6 +441,7 @@ mod tests {
             branch: Some("feature/pr".into()),
             checkout_id: checkout.map(str::to_owned),
             source_context: None,
+            snoozed_until: None,
             config: None,
             last_message_preview: None,
             last_message_at: None,

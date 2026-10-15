@@ -54,6 +54,34 @@ pub enum VoiceCallWork {
     /// Codex asked the user something; answer it in the transcript.
     AwaitingInput,
 }
+
+/// Device-local microphone behavior, shared by Swift and Kotlin clients.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum VoiceInputMode {
+    #[default]
+    HandsFree,
+    PushToTalk,
+}
+
+struct VoiceInput {
+    mode: VoiceInputMode,
+    manually_muted: bool,
+    held: bool,
+}
+
+impl VoiceInput {
+    fn new(mode: VoiceInputMode) -> Self {
+        Self {
+            mode,
+            manually_muted: false,
+            held: false,
+        }
+    }
+
+    fn muted(&self) -> bool {
+        self.manually_muted || (self.mode == VoiceInputMode::PushToTalk && !self.held)
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum VoiceSpeaker {
     User,
@@ -277,6 +305,7 @@ pub struct VoiceCall {
     media: Arc<PlatformMedia>,
     cancel: CancellationToken,
     muted: watch::Sender<bool>,
+    input: Mutex<VoiceInput>,
 }
 impl Drop for VoiceCall {
     fn drop(&mut self) {
@@ -287,13 +316,42 @@ impl Drop for VoiceCall {
 #[uniffi::export]
 impl VoiceCall {
     pub fn set_muted(&self, muted: bool) {
+        let mut input = self.input.lock().unwrap();
         if !self.cancel.is_cancelled() {
-            self.muted.send_replace(muted);
+            input.manually_muted = muted;
+            self.muted.send_replace(input.muted());
         }
     }
+
+    /// Switching modes always requires a fresh hold. A mute toggle cannot
+    /// bypass push-to-talk, including notification or lock-screen actions.
+    pub fn set_input_mode(&self, mode: VoiceInputMode) {
+        let mut input = self.input.lock().unwrap();
+        if self.cancel.is_cancelled() || input.mode == mode {
+            return;
+        }
+        *input = VoiceInput::new(mode);
+        self.muted.send_replace(input.muted());
+    }
+
+    /// Platforms aggregate touch holds, and release on focus
+    /// loss, cancelled gestures, navigation and backgrounding.
+    pub fn set_push_to_talk_held(&self, held: bool) {
+        let mut input = self.input.lock().unwrap();
+        if self.cancel.is_cancelled() {
+            return;
+        }
+        input.held = held && input.mode == VoiceInputMode::PushToTalk;
+        self.muted.send_replace(input.muted());
+    }
+
     pub fn stop(&self) {
+        {
+            let _input = self.input.lock().unwrap();
+            self.cancel.cancel();
+            self.muted.send_replace(true);
+        }
         self.media.close();
-        self.cancel.cancel();
     }
     /// Late native callbacks simply miss the retired request. No resume is possible.
     pub fn complete_media(
@@ -334,6 +392,7 @@ async fn present(
     muted: watch::Receiver<bool>,
 ) {
     let mut view = VoiceView::new();
+    view.set_muted(*muted.borrow());
     listener.on_voice_state(call_state(&view));
     let mut muted = Some(muted);
     loop {
@@ -373,6 +432,25 @@ impl CoreClient {
         media: Arc<dyn VoiceMediaListener>,
         listener: Arc<dyn VoiceSessionListener>,
     ) -> Arc<VoiceCall> {
+        self.start_voice_with_input_mode(
+            host_device_id,
+            voice,
+            VoiceInputMode::HandsFree,
+            media,
+            listener,
+        )
+    }
+
+    /// Select the microphone gate before preparing media, so push-to-talk
+    /// never briefly starts transmitting while the call connects.
+    pub fn start_voice_with_input_mode(
+        &self,
+        host_device_id: String,
+        voice: Option<String>,
+        input_mode: VoiceInputMode,
+        media: Arc<dyn VoiceMediaListener>,
+        listener: Arc<dyn VoiceSessionListener>,
+    ) -> Arc<VoiceCall> {
         let platform = Arc::new(PlatformMedia {
             listener: media,
             pending: Default::default(),
@@ -380,12 +458,14 @@ impl CoreClient {
             closed: AtomicBool::new(false),
         });
         let cancel = self.client.voice_cancellation();
-        let (muted, rx) = watch::channel(false);
+        let input = VoiceInput::new(input_mode);
+        let (muted, rx) = watch::channel(input.muted());
         let presented_mute = rx.clone();
         let handle = Arc::new(VoiceCall {
             media: platform.clone(),
             cancel: cancel.clone(),
             muted,
+            input: Mutex::new(input),
         });
         let client = self.client.clone();
         zc::runtime::handle().spawn(async move {
@@ -442,6 +522,73 @@ mod tests {
             closed: AtomicBool::new(false),
         })
     }
+
+    fn gated_call(mode: VoiceInputMode) -> (VoiceCall, watch::Receiver<bool>) {
+        let input = VoiceInput::new(mode);
+        let (muted, receiver) = watch::channel(input.muted());
+        (
+            VoiceCall {
+                media: media(Arc::new(Listener(Mutex::new(vec![])))),
+                cancel: CancellationToken::new(),
+                muted,
+                input: Mutex::new(input),
+            },
+            receiver,
+        )
+    }
+
+    #[test]
+    fn push_to_talk_starts_closed_and_mute_actions_cannot_bypass_the_hold() {
+        let (call, mut muted) = gated_call(VoiceInputMode::PushToTalk);
+        assert!(*muted.borrow_and_update());
+        call.set_muted(false);
+        assert!(*muted.borrow_and_update());
+        call.set_push_to_talk_held(true);
+        assert!(!*muted.borrow_and_update());
+        call.set_push_to_talk_held(false);
+        assert!(*muted.borrow_and_update());
+        call.set_push_to_talk_held(true);
+        call.set_push_to_talk_held(false);
+        assert!(
+            *muted.borrow_and_update(),
+            "rapid input keeps the latest release"
+        );
+        call.stop();
+        call.set_push_to_talk_held(true);
+        call.set_muted(false);
+        assert!(
+            *muted.borrow_and_update(),
+            "late input cannot reopen an ended call"
+        );
+    }
+
+    #[test]
+    fn switching_input_modes_requires_a_fresh_hold_and_keeps_hands_free_behavior() {
+        let (call, mut muted) = gated_call(VoiceInputMode::HandsFree);
+        assert!(!*muted.borrow_and_update());
+        call.set_muted(true);
+        assert!(*muted.borrow_and_update());
+        call.set_muted(false);
+        assert!(!*muted.borrow_and_update());
+        call.set_input_mode(VoiceInputMode::PushToTalk);
+        assert!(*muted.borrow_and_update());
+        call.set_push_to_talk_held(true);
+        assert!(!*muted.borrow_and_update());
+        call.set_input_mode(VoiceInputMode::HandsFree);
+        assert!(!*muted.borrow_and_update());
+        call.set_input_mode(VoiceInputMode::PushToTalk);
+        assert!(*muted.borrow_and_update());
+    }
+
+    #[tokio::test]
+    async fn push_to_talk_presenter_is_muted_before_the_first_host_event() {
+        let states = Arc::new(States(Mutex::new(vec![])));
+        let (events, receiver) = mpsc::channel(8);
+        let (_mute, muted) = watch::channel(true);
+        drop(events);
+        present(states.clone(), receiver, muted).await;
+        assert!(states.0.lock().unwrap()[0].muted);
+    }
     #[tokio::test]
     async fn close_releases_pending_callbacks_and_rejects_late_replies() {
         let listener = Arc::new(Listener(Mutex::new(vec![])));
@@ -457,6 +604,7 @@ mod tests {
             media: media.clone(),
             cancel: CancellationToken::new(),
             muted,
+            input: Mutex::new(VoiceInput::new(VoiceInputMode::HandsFree)),
         };
         call.complete_media(1, None, Some("late SDP".into()), 0, 0);
         assert!(media.offer().await.is_err());
@@ -481,6 +629,7 @@ mod tests {
             media: media.clone(),
             cancel: CancellationToken::new(),
             muted,
+            input: Mutex::new(VoiceInput::new(VoiceInputMode::HandsFree)),
         };
         let clone = media.clone();
         let task = tokio::spawn(async move { clone.prepare().await });

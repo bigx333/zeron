@@ -50,6 +50,18 @@ pub fn relative_time_label(at_ms: i64, now_ms: i64) -> String {
     }
 }
 
+/// Time remaining until a snoozed session returns, rounded up like desktop.
+fn snooze_label(until: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (until - now).num_seconds().max(1);
+    if (secs + 59) / 60 < 60 {
+        format!("in {}m", (secs + 59) / 60)
+    } else if (secs + 3_599) / 3_600 < 24 {
+        format!("in {}h", (secs + 3_599) / 3_600)
+    } else {
+        format!("in {}d", (secs + 86_399) / 86_400)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProjectRef {
     pub id: String,
@@ -93,6 +105,10 @@ pub struct SessionRow {
     pub created_at_ms: i64,
     pub unseen: bool,
     pub archived: bool,
+    /// Derived at snapshot time; expires without a registry write.
+    pub snoozed: bool,
+    pub snoozed_until_ms: Option<i64>,
+    pub snooze_label: Option<String>,
     pub pinned: bool,
     pub section_id: Option<String>,
     pub pull_request: Option<ChangeRequestSummary>,
@@ -117,6 +133,9 @@ pub struct FrontPage {
     pub pinned: Vec<Arc<SessionRow>>,
     pub sections: Vec<SectionView>,
     pub recent: Vec<Arc<SessionRow>>,
+    /// T3 shelves. Empty in the default projection.
+    pub working: Vec<Arc<SessionRow>>,
+    pub snoozed: Vec<Arc<SessionRow>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,6 +217,9 @@ pub struct WorkspaceSnapshot {
     /// The registry has reached this device at least once (or demo).
     pub synced: bool,
     pub front: FrontPage,
+    /// Same membership, projected into Inbox / Working / Snoozed lanes.
+    /// Archived sessions remain in `archived` (the T3 Settled shelf).
+    pub t3_front: FrontPage,
     pub projects: Vec<ProjectView>,
     /// Active sessions without a project.
     pub projectless: Vec<Arc<SessionRow>>,
@@ -403,6 +425,9 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.created_at_ms.hash(&mut h);
     row.unseen.hash(&mut h);
     row.archived.hash(&mut h);
+    row.snoozed.hash(&mut h);
+    row.snoozed_until_ms.hash(&mut h);
+    row.snooze_label.hash(&mut h);
     row.pinned.hash(&mut h);
     row.section_id.hash(&mut h);
     if let Some(pr) = &row.pull_request {
@@ -503,6 +528,12 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         created_at_ms: chat.created_at.timestamp_millis(),
         unseen: chat.unseen(),
         archived: chat.archived,
+        snoozed: chat.is_snoozed(cx.now),
+        snoozed_until_ms: chat.snoozed_until.map(|t| t.timestamp_millis()),
+        snooze_label: chat
+            .snoozed_until
+            .filter(|_| chat.is_snoozed(cx.now))
+            .map(|until| snooze_label(until, cx.now)),
         pinned: rc.pinned.contains(chat.id.as_str()),
         section_id: rc.section_of.get(chat.id.as_str()).map(|s| (*s).to_owned()),
         pull_request: change_request_for_chat(chat, cx.change_requests).cloned(),
@@ -598,6 +629,41 @@ pub(crate) fn derive(
         })
         .map(|c| row(c))
         .collect();
+
+    let front = FrontPage {
+        pinned,
+        sections: section_views,
+        recent,
+        ..Default::default()
+    };
+    // Lift shelved rows out of their visual pin/section slots. Their stored
+    // membership stays intact, so waking/completion restores the same slot.
+    let in_inbox = |r: &Arc<SessionRow>| !r.snoozed && r.indicator != ChatIndicator::Working;
+    let attention_first = |rows: &mut Vec<Arc<SessionRow>>| {
+        rows.sort_by_key(|r| {
+            !matches!(
+                r.indicator,
+                ChatIndicator::AwaitingInput | ChatIndicator::Errored | ChatIndicator::Completed
+            )
+        });
+    };
+    let mut t3_front = front.clone();
+    t3_front.pinned.retain(in_inbox);
+    for section in &mut t3_front.sections {
+        section.sessions.retain(in_inbox);
+        attention_first(&mut section.sessions);
+    }
+    t3_front.recent.retain(in_inbox);
+    attention_first(&mut t3_front.recent);
+    for chat in &active {
+        let row = row(chat);
+        if row.snoozed {
+            t3_front.snoozed.push(row);
+        } else if row.indicator == ChatIndicator::Working {
+            t3_front.working.push(row);
+        }
+    }
+    t3_front.snoozed.sort_by_key(|r| r.snoozed_until_ms);
 
     // Projects (creation order), sessions by recency.
     let mut spaces: Vec<&Space> = state.spaces.iter().collect();
@@ -717,11 +783,8 @@ pub(crate) fn derive(
         pins_ready: prefs.is_some(),
         queue_send_mode: None,
         synced: cx.synced,
-        front: FrontPage {
-            pinned,
-            sections: section_views,
-            recent,
-        },
+        front,
+        t3_front,
         projects,
         projectless,
         pull_requests,
@@ -745,14 +808,18 @@ fn snapshot_hash(s: &WorkspaceSnapshot) -> u64 {
     };
     s.pins_ready.hash(&mut h);
     s.synced.hash(&mut h);
-    ids(&mut h, &s.front.pinned);
-    for section in &s.front.sections {
-        section.id.hash(&mut h);
-        section.name.hash(&mut h);
-        section.collapsed.hash(&mut h);
-        ids(&mut h, &section.sessions);
+    for front in [&s.front, &s.t3_front] {
+        ids(&mut h, &front.pinned);
+        for section in &front.sections {
+            section.id.hash(&mut h);
+            section.name.hash(&mut h);
+            section.collapsed.hash(&mut h);
+            ids(&mut h, &section.sessions);
+        }
+        ids(&mut h, &front.recent);
+        ids(&mut h, &front.working);
+        ids(&mut h, &front.snoozed);
     }
-    ids(&mut h, &s.front.recent);
     for project in &s.projects {
         project.id.hash(&mut h);
         project.name.hash(&mut h);
@@ -792,6 +859,24 @@ impl Hash for DeviceView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snooze_labels_promote_rounded_units() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for (seconds, expected) in [
+            (1, "in 1m"),
+            (59 * 60, "in 59m"),
+            (59 * 60 + 1, "in 1h"),
+            (3_600, "in 1h"),
+            (3_601, "in 2h"),
+            (23 * 3_600, "in 23h"),
+            (23 * 3_600 + 1, "in 1d"),
+            (86_401, "in 2d"),
+        ] {
+            let until = now + chrono::Duration::seconds(seconds);
+            assert_eq!(snooze_label(until, now), expected);
+        }
+    }
 
     #[test]
     fn time_labels() {

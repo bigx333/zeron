@@ -121,6 +121,17 @@ unsafe extern "C" {
         options: u32,
         out_ref: *mut EventHotKeyRef,
     ) -> i32;
+    fn GetEventKind(event: EventRef) -> u32;
+    fn GetEventParameter(
+        event: EventRef,
+        name: u32,
+        desired_type: u32,
+        actual_type: *mut u32,
+        buffer_size: usize,
+        actual_size: *mut usize,
+        data: *mut c_void,
+    ) -> i32;
+    fn RemoveEventHandler(handler: *mut c_void) -> i32;
 }
 
 unsafe extern "C" {
@@ -382,13 +393,159 @@ fn layout_keycode(key: &str) -> Option<u32> {
 
 unsafe extern "C" fn appshot_hot_key_handler(
     _call: EventHandlerCallRef,
-    _event: EventRef,
+    event: EventRef,
     user_data: *mut c_void,
 ) -> i32 {
+    if hot_key_signature(event) != Some(APPSHOT_HOT_KEY_SIGNATURE) {
+        return -9874; // eventNotHandledErr: let other registered shortcuts run.
+    }
     if !user_data.is_null() {
         let sender = unsafe { &*user_data.cast::<mpsc::UnboundedSender<()>>() };
         let _ = sender.unbounded_send(());
     }
+    0
+}
+
+fn hot_key_signature(event: EventRef) -> Option<u32> {
+    let mut id = EventHotKeyId {
+        signature: 0,
+        id: 0,
+    };
+    let status = unsafe {
+        GetEventParameter(
+            event,
+            u32::from_be_bytes(*b"----"), // kEventParamDirectObject
+            u32::from_be_bytes(*b"hkid"), // typeEventHotKeyID
+            ptr::null_mut(),
+            std::mem::size_of::<EventHotKeyId>(),
+            ptr::null_mut(),
+            (&mut id as *mut EventHotKeyId).cast(),
+        )
+    };
+    (status == 0).then_some(id.signature)
+}
+
+const HOLD_HOT_KEY_SIGNATURE: u32 = u32::from_be_bytes(*b"ZPTT");
+type HoldSender = mpsc::UnboundedSender<crate::voice::shortcut::Event>;
+
+/// Main-thread Carbon registration; unregister before releasing callback data.
+pub(crate) struct HoldShortcut {
+    hot_key: EventHotKeyRef,
+    handler: *mut c_void,
+    sender: *mut HoldSender,
+    flags: u64,
+}
+
+impl Drop for HoldShortcut {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.hot_key.is_null() {
+                UnregisterEventHotKey(self.hot_key);
+            }
+            if !self.handler.is_null() {
+                RemoveEventHandler(self.handler);
+            }
+            drop(Box::from_raw(self.sender));
+        }
+    }
+}
+
+impl HoldShortcut {
+    /// Carbon supplies the main key's release event. Also check modifiers so
+    /// releasing those first closes the microphone, without monitoring keys.
+    pub(crate) fn modifiers_held(&self) -> bool {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGEventSourceFlagsState(state: i32) -> u64;
+        }
+        unsafe { CGEventSourceFlagsState(0) & self.flags == self.flags }
+    }
+}
+
+pub(crate) fn register_hold_shortcut(
+    shortcut: super::shortcut::Shortcut,
+) -> Result<
+    (
+        HoldShortcut,
+        mpsc::UnboundedReceiver<crate::voice::shortcut::Event>,
+    ),
+    String,
+> {
+    let key_code = shortcut_keycode(&shortcut.key).ok_or_else(|| {
+        "This shortcut key is unavailable on the current keyboard layout.".to_owned()
+    })?;
+    let modifiers = (if shortcut.control { CONTROL_KEY } else { 0 })
+        | (if shortcut.alt { OPTION_KEY } else { 0 })
+        | (if shortcut.shift { SHIFT_KEY } else { 0 })
+        | (if shortcut.platform { COMMAND_KEY } else { 0 });
+    let (tx, rx) = mpsc::unbounded();
+    let sender = Box::into_raw(Box::new(tx));
+    let target = unsafe { GetApplicationEventTarget() };
+    let types = [
+        EventTypeSpec {
+            event_class: EVENT_CLASS_KEYBOARD,
+            event_kind: EVENT_HOT_KEY_PRESSED,
+        },
+        EventTypeSpec {
+            event_class: EVENT_CLASS_KEYBOARD,
+            event_kind: 6,
+        }, // released
+    ];
+    let mut registration = HoldShortcut {
+        hot_key: ptr::null_mut(),
+        handler: ptr::null_mut(),
+        sender,
+        flags: (if shortcut.shift { 1 << 17 } else { 0 })
+            | (if shortcut.control { 1 << 18 } else { 0 })
+            | (if shortcut.alt { 1 << 19 } else { 0 })
+            | (if shortcut.platform { 1 << 20 } else { 0 }),
+    };
+    let status = unsafe {
+        InstallEventHandler(
+            target,
+            Some(hold_hot_key_handler),
+            2,
+            types.as_ptr(),
+            sender.cast(),
+            &mut registration.handler,
+        )
+    };
+    if status != 0 {
+        return Err("The global push-to-talk shortcut could not be installed.".into());
+    }
+    let status = unsafe {
+        RegisterEventHotKey(
+            key_code,
+            modifiers,
+            EventHotKeyId {
+                signature: HOLD_HOT_KEY_SIGNATURE,
+                id: 1,
+            },
+            target,
+            0,
+            &mut registration.hot_key,
+        )
+    };
+    if status != 0 {
+        return Err(
+            "Push-to-talk shortcut unavailable. Choose another shortcut in Settings → Voice."
+                .into(),
+        );
+    }
+    Ok((registration, rx))
+}
+
+unsafe extern "C" fn hold_hot_key_handler(
+    _call: EventHandlerCallRef,
+    event: EventRef,
+    user_data: *mut c_void,
+) -> i32 {
+    if hot_key_signature(event) != Some(HOLD_HOT_KEY_SIGNATURE) {
+        return -9874;
+    }
+    let sender = unsafe { &*user_data.cast::<HoldSender>() };
+    let pressed = unsafe { GetEventKind(event) } == EVENT_HOT_KEY_PRESSED;
+    let _ = sender.unbounded_send(crate::voice::shortcut::Event::Held(pressed));
     0
 }
 
