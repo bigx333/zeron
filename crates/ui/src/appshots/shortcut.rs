@@ -15,7 +15,12 @@ pub(crate) struct Shortcut {
 
 impl Shortcut {
     pub fn parse(combo: &str) -> Result<Self, ()> {
-        let stroke = Keystroke::parse(&crate::settings::platform_combo(combo)).map_err(|_| ())?;
+        Self::parse_on(cfg!(target_os = "macos"), combo)
+    }
+
+    fn parse_on(mac: bool, combo: &str) -> Result<Self, ()> {
+        let stroke =
+            Keystroke::parse(&crate::settings::platform_combo_on(mac, combo)).map_err(|_| ())?;
         let modifiers = stroke.modifiers;
         let key = stroke.key;
         let supported = (key.len() == 1 && key.as_bytes()[0].is_ascii_alphanumeric())
@@ -157,6 +162,7 @@ pub fn set_shortcut(combo: &str) {
 }
 
 pub fn set_recording(recording: bool) {
+    crate::voice::shortcut::set_recording(recording);
     if !super::is_desktop() || preferences().lock().unwrap().recording == recording {
         return;
     }
@@ -191,6 +197,25 @@ mod tests {
                 .portal_trigger(),
             "CTRL+SHIFT+Page_Up"
         );
+    }
+
+    #[test]
+    fn recorded_global_shortcuts_preserve_the_physical_platform_modifier() {
+        for mac in [false, true] {
+            for control in [false, true] {
+                let combo =
+                    crate::settings::combo_from_keystroke_on(mac, control, true, false, true, "v")
+                        .unwrap();
+                let shortcut = Shortcut::parse_on(mac, &combo).unwrap();
+                assert!(shortcut.platform, "{combo}");
+                assert_eq!(shortcut.control, control, "{combo}");
+                assert!(shortcut.alt);
+                assert_eq!(shortcut.key, "v");
+                let trigger = shortcut.portal_trigger();
+                assert!(trigger.contains("LOGO"));
+                assert_eq!(trigger.contains("CTRL"), control);
+            }
+        }
     }
 }
 

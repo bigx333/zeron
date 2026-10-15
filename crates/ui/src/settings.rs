@@ -1022,6 +1022,9 @@ pub struct UiSettings {
     /// Local preference: never transfers an active call or credentials.
     #[serde(default)]
     pub codex_voice_device: Option<String>,
+    /// Hands-free remains the default; push-to-talk opens the microphone only while held.
+    #[serde(default)]
+    pub voice_push_to_talk: bool,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -1120,6 +1123,7 @@ impl Default for UiSettings {
             pause_animations_in_background: false,
             codex_voice: None,
             codex_voice_device: None,
+            voice_push_to_talk: false,
             legacy_accent_color: None,
         }
     }
@@ -1155,6 +1159,7 @@ const JUMP_LABELS: [&str; JUMP_SLOTS] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShortcutId {
     ToggleDictation,
+    PushToTalk,
     CaptureAppshot,
     RandomWallpaper,
     SaveFile,
@@ -1173,8 +1178,9 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 15 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 16 + JUMP_SLOTS] = [
         ShortcutId::ToggleDictation,
+        ShortcutId::PushToTalk,
         ShortcutId::CaptureAppshot,
         ShortcutId::RandomWallpaper,
         ShortcutId::SaveFile,
@@ -1208,6 +1214,7 @@ impl ShortcutId {
     pub fn label(self) -> &'static str {
         match self {
             ShortcutId::ToggleDictation => "Hold to dictate",
+            ShortcutId::PushToTalk => "Push to talk (global)",
             ShortcutId::RandomWallpaper => "Random wallpaper",
             ShortcutId::CaptureAppshot => "Capture Appshot",
             ShortcutId::SaveFile => "Save file",
@@ -1236,6 +1243,8 @@ impl ShortcutId {
     pub fn default_combo_on(self, mac: bool) -> &'static str {
         match self {
             ShortcutId::ToggleDictation => "mod-d",
+            ShortcutId::PushToTalk if mac => "ctrl-shift-space",
+            ShortcutId::PushToTalk => "mod-shift-space",
             ShortcutId::RandomWallpaper => "mod-u",
             ShortcutId::CaptureAppshot if mac => "ctrl-alt-space",
             ShortcutId::CaptureAppshot => "mod-alt-space",
@@ -1285,6 +1294,7 @@ impl ShortcutId {
 #[serde(default, rename_all = "camelCase")]
 pub struct KeymapConfig {
     pub toggle_dictation: String,
+    pub push_to_talk: String,
     #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
     pub capture_appshot: String,
     pub random_wallpaper: String,
@@ -1352,6 +1362,7 @@ impl Default for KeymapConfig {
     fn default() -> Self {
         Self {
             toggle_dictation: ShortcutId::ToggleDictation.default_combo().into(),
+            push_to_talk: ShortcutId::PushToTalk.default_combo().into(),
             capture_appshot: ShortcutId::CaptureAppshot.default_combo().into(),
             random_wallpaper: ShortcutId::RandomWallpaper.default_combo().into(),
             save_file: ShortcutId::SaveFile.default_combo().into(),
@@ -1375,6 +1386,7 @@ impl KeymapConfig {
     pub fn get(&self, id: ShortcutId) -> &str {
         match id {
             ShortcutId::ToggleDictation => &self.toggle_dictation,
+            ShortcutId::PushToTalk => &self.push_to_talk,
             ShortcutId::CaptureAppshot => &self.capture_appshot,
             ShortcutId::RandomWallpaper => &self.random_wallpaper,
             ShortcutId::SaveFile => &self.save_file,
@@ -1400,6 +1412,7 @@ impl KeymapConfig {
     pub fn set(&mut self, id: ShortcutId, combo: String) {
         match id {
             ShortcutId::ToggleDictation => self.toggle_dictation = combo,
+            ShortcutId::PushToTalk => self.push_to_talk = combo,
             ShortcutId::CaptureAppshot => self.capture_appshot = combo,
             ShortcutId::RandomWallpaper => self.random_wallpaper = combo,
             ShortcutId::SaveFile => self.save_file = combo,
@@ -1480,7 +1493,7 @@ pub fn combo_from_keystroke_on(
     if key.is_empty()
         || matches!(
             key.as_str(),
-            "ctrl" | "control" | "alt" | "shift" | "cmd" | "platform" | "fn"
+            "ctrl" | "control" | "alt" | "shift" | "cmd" | "super" | "win" | "platform" | "fn"
         )
     {
         return None;
@@ -1490,8 +1503,13 @@ pub fn combo_from_keystroke_on(
     // re-recording Ctrl+Tab as Cmd+Tab would hand the combo to the OS app
     // switcher, which never delivers it to the window.
     let ctrl_is_primary = ctrl && !mac;
-    if cmd || ctrl_is_primary {
+    if (cmd && mac) || ctrl_is_primary {
         parts.push("mod");
+    }
+    // Win/Super is a distinct physical modifier off macOS. Storing it as
+    // "mod" would translate it to Ctrl when the shortcut is registered.
+    if cmd && !mac {
+        parts.push("super");
     }
     if ctrl && !ctrl_is_primary {
         parts.push("ctrl");
@@ -1766,6 +1784,7 @@ impl UiSettings {
             pause_animations_in_background,
             codex_voice,
             codex_voice_device,
+            voice_push_to_talk,
             legacy_accent_color,
             pull_request_destination,
             last_pull_request_repository,
@@ -2735,6 +2754,24 @@ mod tests {
     }
 
     #[test]
+    fn older_settings_keep_hands_free_and_push_to_talk_preferences_round_trip() {
+        let mut settings: UiSettings =
+            serde_json::from_str(r#"{"keymap":{"toggleDictation":"mod-v"}}"#).unwrap();
+        assert!(!settings.voice_push_to_talk);
+        assert_eq!(
+            settings.keymap.push_to_talk,
+            ShortcutId::PushToTalk.default_combo()
+        );
+        settings.voice_push_to_talk = true;
+        settings.keymap.push_to_talk = "mod-alt-v".into();
+        let saved = serde_json::to_string(&settings).unwrap();
+        let loaded: UiSettings = serde_json::from_str(&saved).unwrap();
+        assert!(loaded.voice_push_to_talk);
+        assert_eq!(loaded.keymap.push_to_talk, "mod-alt-v");
+        assert_eq!(loaded.keymap.toggle_dictation, "mod-v");
+    }
+
+    #[test]
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
@@ -2743,6 +2780,7 @@ mod tests {
             window_geometry: None,
             codex_voice: Some("ember".into()),
             codex_voice_device: Some("fedora".into()),
+            voice_push_to_talk: true,
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             sidebar_grouped: true,
@@ -3573,7 +3611,7 @@ mod tests {
         );
         assert_eq!(
             combo_from_keystroke(false, false, false, true, "s"),
-            Some("mod-s".into())
+            Some(if cfg!(target_os = "macos") { "mod-s" } else { "super-s" }.into())
         );
         assert_eq!(
             combo_from_keystroke(true, false, true, false, "tab"),

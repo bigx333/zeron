@@ -2355,7 +2355,7 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
-        let voice = cx.new(|_| crate::voice::VoiceController::default());
+        let voice = cx.new(crate::voice::VoiceController::new);
         let voice_footer_orb = cx.new(|_| {
             crate::orb::Orb::new()
                 .size(crate::orb::OrbSize::Inline)
@@ -13382,6 +13382,7 @@ impl Render for Shell {
                         this.check_voice_codex(true, cx);
                     }
                     if !window.is_window_active() {
+                        this.voice.update(cx, |voice, cx| voice.hold_button(false, cx));
                         this.reset_command_palette_key_state();
                         this.set_jump_hints(false, cx);
                         this.composer.update(cx, |composer, cx| {
