@@ -312,6 +312,10 @@ impl ClaudeHarness {
         let mut cmd = Command::new(&exe);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
+            // Advertise Zeron's skills exactly as the run will load them.
+            if let Some(plugin) = crate::skills::claude_plugin(cwd) {
+                cmd.arg("--plugin-dir").arg(plugin);
+            }
         }
         crate::compose_child_path(&mut cmd, &exe);
         cmd.args([
@@ -523,7 +527,19 @@ impl Harness for ClaudeHarness {
             skills
                 .into_iter()
                 .filter_map(|mut skill| {
-                    if crate::skills::is_shared_skill(&skill.path) {
+                    let plugin_command = format!("{}:{}", crate::skills::CLAUDE_PLUGIN, skill.name);
+                    if crate::skills::is_zeron_skill(&skill.path)
+                        && commands
+                            .iter()
+                            .any(|command| command.name == plugin_command)
+                    {
+                        // Loaded through the session plugin; invoke it natively.
+                        skill.command = Some(zeron_proto::invocation::SkillCommand {
+                            name: plugin_command,
+                            harness: self.id(),
+                        });
+                        Some(skill)
+                    } else if crate::skills::is_shared_skill(&skill.path) {
                         // Shared files are not Claude command definitions. A
                         // same-named built-in must not replace their identity.
                         Some(skill)
@@ -602,6 +618,12 @@ impl ClaudeHarness {
             // (no `--strict-mcp-config`): the CLI merges an inline JSON
             // config with settings-sourced ones.
             cmd.args(["--mcp-config", &mcp_config_arg(mcp)]);
+        }
+        if !title_only && !request.cwd.is_empty() {
+            // Zeron's own skills load natively through a session-only plugin.
+            if let Some(plugin) = crate::skills::claude_plugin(std::path::Path::new(&request.cwd)) {
+                cmd.arg("--plugin-dir").arg(plugin);
+            }
         }
         let normalizer = if let Some(session_id) = &request.resume {
             let config = crate::model_context::root(
