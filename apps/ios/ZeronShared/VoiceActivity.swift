@@ -16,7 +16,7 @@ struct VoiceActivityAttributes: ActivityAttributes {
         var pushToTalk: Bool? = nil
 
         var status: String {
-            pushToTalk == true && since != nil ? muted ? "Hold to talk in Zeron" : "Transmitting" : orb.status
+            pushToTalk == true && since != nil ? muted ? "Hold to talk in Zeron Nova" : "Transmitting" : orb.status
         }
     }
 

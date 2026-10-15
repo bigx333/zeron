@@ -1,20 +1,22 @@
-# Zeron
+# Zeron Nova
+
+Zeron Nova is a fork of [Zeron](https://github.com/zeronsh/zeron) with desktop and mobile enhancements. See [the Nova branding assets](docs/nova-branding.md).
 
 Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity) locally by default, with optional multi-device sync.
 
 *English | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [Español](README.es.md)*
 
-![Zeron desktop app](docs/media/readme/app-screenshot.jpg)
+![Zeron Nova desktop app](docs/media/readme/app-screenshot.jpg)
 
 ## Desktop app
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/zeronsh/zeron/releases/latest):
+Download the latest release for your platform from [GitHub Releases](https://github.com/bigx333/zeron/releases/latest):
 
 - **macOS** — `zeron-<version>-macos-arm64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz`, then run its `install.sh`
 
-No account or network connection is needed; sessions stay on your device. The app updates itself.
+No account or network connection is needed; sessions stay on your device. The macOS fork disables upstream auto-updates so a local Nova build is preserved.
 
 ## Headless (CLI)
 

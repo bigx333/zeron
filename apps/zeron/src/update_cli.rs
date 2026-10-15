@@ -56,7 +56,10 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
             let data_dir = super::paths::data_dir();
             let staged = zeron_update::stage_mac_app(edge_url, &manifest, &data_dir).await?;
             zeron_update::apply_mac_app(&staged, &bundle)?;
-            println!("updated {} — relaunch Zeron to finish.", bundle.display());
+            println!(
+                "updated {} — relaunch Zeron Nova to finish.",
+                bundle.display()
+            );
             Ok(())
         }
         #[cfg(windows)]
@@ -64,7 +67,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
             let staged = zeron_update::windows::stage(edge_url, &manifest, &directory).await?;
             zeron_update::windows::apply(&staged, &directory, false)?;
             println!(
-                "updated to {} — relaunch Zeron to finish.",
+                "updated to {} — relaunch Zeron Nova to finish.",
                 manifest.version
             );
             Ok(())
@@ -73,8 +76,8 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
             bail!(
                 "this binary is not update-managed (source build or hand-copied).\n\
                  Linux: curl -fsSL https://zeron.sh/install.sh | sh, or run install.sh from the release tarball\n\
-                 macOS: download the new Zeron.app dmg, or rebuild from source.\n\
-                 Windows: install with the Zeron setup .exe from {}, or rebuild from source.",
+                 macOS: download the new Zeron Nova.app dmg, or rebuild from source.\n\
+                 Windows: install with the Zeron Nova setup .exe from {}, or rebuild from source.",
                 zeron_update::LATEST_RELEASE_PAGE
             )
         }

@@ -5710,27 +5710,27 @@ impl WorkspaceCommand {
             (
                 Self::Model,
                 "model",
-                "Zeron: choose agent, model, and reasoning",
+                "Zeron Nova: choose agent, model, and reasoning",
                 false,
             ),
-            (Self::New, "new", "Zeron: start a new conversation", false),
+            (Self::New, "new", "Zeron Nova: start a new conversation", false),
             (
                 Self::Resume,
                 "resume",
-                "Zeron: search and open conversations",
+                "Zeron Nova: search and open conversations",
                 false,
             ),
-            (Self::Settings, "settings", "Zeron: open settings", false),
-            (Self::Diff, "diff", "Zeron: open changes", true),
-            (Self::Files, "files", "Zeron: open project files", true),
-            (Self::Terminal, "terminal", "Zeron: open a terminal", true),
+            (Self::Settings, "settings", "Zeron Nova: open settings", false),
+            (Self::Diff, "diff", "Zeron Nova: open changes", true),
+            (Self::Files, "files", "Zeron Nova: open project files", true),
+            (Self::Terminal, "terminal", "Zeron Nova: open a terminal", true),
             (
                 Self::Rename,
                 "rename",
-                "Zeron: rename this conversation",
+                "Zeron Nova: rename this conversation",
                 true,
             ),
-            (Self::Stop, "stop", "Zeron: stop the active run", true),
+            (Self::Stop, "stop", "Zeron Nova: stop the active run", true),
         ]
     }
 }
@@ -5963,9 +5963,9 @@ fn slash_error_message(err: &RpcError, skill: bool) -> SharedString {
     match err {
         RpcError::UnknownMethod(_) => {
             if skill {
-                "Skills require an updated engine on the selected device. Restart that device’s Zeron after updating.".into()
+                "Skills require an updated engine on the selected device. Restart that device’s Zeron Nova after updating.".into()
             } else {
-                "Commands require an updated engine on the selected device. Restart that device’s Zeron after updating.".into()
+                "Commands require an updated engine on the selected device. Restart that device’s Zeron Nova after updating.".into()
             }
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
@@ -8649,7 +8649,7 @@ impl Composer {
     /// Check before consuming drafts, attachments, or an edited queue row.
     pub(crate) fn check_reference_delivery(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         if references_require_update(text, self.reference_delivery_supported(cx)) {
-            self.failure = Some("Update the selected device’s Zeron to send file, command, or skill references. Your draft is preserved.".into());
+            self.failure = Some("Update the selected device’s Zeron Nova to send file, command, or skill references. Your draft is preserved.".into());
             self.failure_key = Some(self.current_key.clone());
             cx.notify();
             return false;

@@ -157,7 +157,7 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
         s.appendItems([Row(id: "hero", title: "")], toSection: .hero)
         let chosen = voice.startHost?.id
         if devices.isEmpty {
-            s.appendItems([Row(id: "no-hosts", title: "No Mac or server yet", subtitle: "Open Zeron on your Mac or server with remote voice enabled.", symbol: "desktopcomputer", enabled: false)], toSection: .hosts)
+            s.appendItems([Row(id: "no-hosts", title: "No Mac or server yet", subtitle: "Open Zeron Nova on your Mac or server with remote voice enabled.", symbol: "desktopcomputer", enabled: false)], toSection: .hosts)
         } else {
             s.appendItems(devices.map { device in
                 let compatible = RemoteVoiceController.compatible(device)
@@ -165,7 +165,7 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
                 return Row(
                     id: "host-\(device.id)",
                     title: device.name,
-                    subtitle: !device.online ? "Offline" : !compatible ? "Update Zeron and enable remote voice" : "Ready",
+                    subtitle: !device.online ? "Offline" : !compatible ? "Update Zeron Nova and enable remote voice" : "Ready",
                     symbol: Self.symbol(for: device.platform),
                     selected: device.id == chosen,
                     enabled: ready && !voice.live,
@@ -177,7 +177,7 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
         s.appendItems([Row(id: "input-mode", title: "Voice input mode", symbol: "mic")], toSection: .input)
         s.appendItems([
             Row(id: "tip-ear", title: "Hold it to your ear", subtitle: "The screen turns off and Codex plays through the earpiece.", symbol: "ear", enabled: true),
-            Row(id: "tip-lock", title: "Lock your iPhone", subtitle: voice.pushToTalk ? "The call continues with your microphone muted. Return to Zeron and hold to talk." : "The call keeps going. An incoming call ends it.", symbol: "lock", enabled: true),
+            Row(id: "tip-lock", title: "Lock your iPhone", subtitle: voice.pushToTalk ? "The call continues with your microphone muted. Return to Zeron Nova and hold to talk." : "The call keeps going. An incoming call ends it.", symbol: "lock", enabled: true),
             Row(id: "tip-bar", title: "Start from the bottom bar", subtitle: "Tap the waveform; hold it to switch device or voice.", symbol: "waveform", enabled: true),
         ], toSection: .call)
         dataSource.apply(s, animatingDifferences: view.window != nil)

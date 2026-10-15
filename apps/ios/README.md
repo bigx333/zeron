@@ -1,4 +1,4 @@
-# Zeron for iOS
+# Zeron Nova for iOS
 
 A UIKit viewport onto the zeron mesh, built on the Rust mobile core. The phone
 is a **peer device**: it mirrors the workspace registry, joins per-chat session

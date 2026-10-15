@@ -123,7 +123,7 @@ fun VoiceSettingsScreen(controller: VoiceController, onBack: () -> Unit) {
                             shapes = segmentedShapes(0, 1),
                             colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                             leadingContent = { IconTile(R.drawable.zi_laptop) },
-                            supportingContent = { Text("Open Zeron on your Mac or server with remote voice enabled.") },
+                            supportingContent = { Text("Open Zeron Nova on your Mac or server with remote voice enabled.") },
                         ) { Text("No Mac or server yet") }
                     }
                     devices.forEachIndexed { i, device ->
@@ -143,7 +143,7 @@ fun VoiceSettingsScreen(controller: VoiceController, onBack: () -> Unit) {
                                 Text(
                                     when {
                                         !device.online -> "Offline"
-                                        !compatible -> "Update Zeron and enable remote voice"
+                                        !compatible -> "Update Zeron Nova and enable remote voice"
                                         else -> "Ready"
                                     },
                                 )
@@ -240,7 +240,7 @@ fun VoiceSettingsScreen(controller: VoiceController, onBack: () -> Unit) {
             item {
                 val tips = listOf(
                     Triple(R.drawable.zi_smartphone, "Hold it to your ear", "The screen turns off and Codex plays through the earpiece."),
-                    Triple(R.drawable.zi_phone_hang_up, "Lock your phone", if (s.pushToTalk) "The call continues with your microphone muted. Return to Zeron and hold to talk." else "The call keeps going. Its notification has Mute and End; an incoming call ends it."),
+                    Triple(R.drawable.zi_phone_hang_up, "Lock your phone", if (s.pushToTalk) "The call continues with your microphone muted. Return to Zeron Nova and hold to talk." else "The call keeps going. Its notification has Mute and End; an incoming call ends it."),
                     Triple(R.drawable.zi_microphone, "Start from the bottom bar", "Tap the microphone; hold it to switch device or voice."),
                 )
                 Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {

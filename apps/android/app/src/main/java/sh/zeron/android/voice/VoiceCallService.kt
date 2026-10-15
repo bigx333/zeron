@@ -181,7 +181,7 @@ class VoiceCallService : Service() {
         val caller = Person.Builder().setName("Codex on $host").setImportant(true).build()
         val status = when {
             !snapshot.active -> snapshot.statusText
-            snapshot.pushToTalk -> if (snapshot.muted) "Hold to talk in Zeron" else "Transmitting"
+            snapshot.pushToTalk -> if (snapshot.muted) "Hold to talk in Zeron Nova" else "Transmitting"
             snapshot.awaitingInput -> "Codex needs your answer"
             snapshot.muted -> "Muted"
             else -> snapshot.statusText

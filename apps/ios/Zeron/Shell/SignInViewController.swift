@@ -36,10 +36,14 @@ final class SignInViewController: UIViewController, ASWebAuthenticationPresentat
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = Palette.background
-        let mark = UIImageView(image: UIImage(systemName: "sparkle", withConfiguration: UIImage.SymbolConfiguration(pointSize: 44, weight: .light)))
-        mark.tintColor = Palette.text
+        let mark = UIImageView(image: UIImage(named: "NovaLogo"))
+        mark.contentMode = .scaleAspectFit
+        mark.layer.cornerRadius = 16
+        mark.clipsToBounds = true
+        mark.widthAnchor.constraint(equalToConstant: 72).isActive = true
+        mark.heightAnchor.constraint(equalToConstant: 72).isActive = true
         let title = UILabel()
-        title.text = "Zeron"
+        title.text = "Zeron Nova"
         title.font = Fonts.ui(.sansSemibold, 34)
         title.textColor = Palette.text
         let tagline = UILabel()

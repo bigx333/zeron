@@ -3051,7 +3051,7 @@ impl Shell {
                 {
                     let body = match connectivity {
                         zeron_proto::ConnectivityState::Offline => "Your device is offline",
-                        _ => "Zeron is trying to reconnect",
+                        _ => "Zeron Nova is trying to reconnect",
                     };
                     crate::notify::post("Connection unavailable", body, None);
                 }
@@ -5330,7 +5330,7 @@ impl Shell {
                 ))
             })
             .child(
-                item("chat-copy-zeron", "Zeron conversation link".into()).on_click(cx.listener(
+                item("chat-copy-zeron", "Zeron Nova conversation link".into()).on_click(cx.listener(
                     move |this, _, _, cx| this.copy_zeron_conversation_link(&zeron_id, cx),
                 )),
             )
@@ -5375,7 +5375,7 @@ impl Shell {
             cx.write_to_clipboard(ClipboardItem::new_string(link));
             self.show_notice(
                 crate::toast::ToastKind::Success,
-                "Zeron conversation link copied",
+                "Zeron Nova conversation link copied",
                 cx,
             );
         } else {
@@ -5820,7 +5820,7 @@ impl Shell {
                     let detail = if !online {
                         "Offline"
                     } else if !compatible {
-                        "Update Zeron to use remote voice"
+                        "Update Zeron Nova to use remote voice"
                     } else {
                         "Available"
                     };
@@ -6901,7 +6901,7 @@ impl Shell {
                     },
                     Err(err) => {
                         shell.runtime_change_error = Some(format!(
-                            "Could not stop the remote engine: {err}. Run `zeron daemon stop`, then quit and reopen Zeron."
+                            "Could not stop the remote engine: {err}. Run `zeron daemon stop`, then quit and reopen Zeron Nova."
                         ).into());
                         cx.notify();
                     }
@@ -9842,7 +9842,7 @@ impl Shell {
             match update.prompt()? {
                 Prompt::Checking => (
                     "Checking for updates…".into(),
-                    format!("You're on Zeron {current}.").into(),
+                    format!("You're on Zeron Nova {current}.").into(),
                     vec![UpdatePromptButton::Close("Cancel")],
                 ),
                 Prompt::CheckFailed(message) => (
@@ -9855,12 +9855,12 @@ impl Shell {
                 ),
                 Prompt::Result => match update.available() {
                     None => (
-                        "Zeron is up to date".into(),
+                        "Zeron Nova is up to date".into(),
                         format!("Version {current} is the newest release.").into(),
                         vec![UpdatePromptButton::Close("OK")],
                     ),
                     Some(latest) => {
-                        let title: SharedString = format!("Zeron {latest} is available").into();
+                        let title: SharedString = format!("Zeron Nova {latest} is available").into();
                         if let Some(blocker) = update.blocker() {
                             (
                                 title,
@@ -9887,8 +9887,8 @@ impl Shell {
                                     vec![UpdatePromptButton::Close("Hide")],
                                 ),
                                 Flow::Ready { version, .. } => (
-                                    format!("Zeron {version} is ready").into(),
-                                    "Restart to finish updating. If you don't, it installs the next time you quit Zeron."
+                                    format!("Zeron Nova {version} is ready").into(),
+                                    "Restart to finish updating. If you don't, it installs the next time you quit Zeron Nova."
                                         .into(),
                                     vec![
                                         UpdatePromptButton::Close("Later"),
@@ -9916,7 +9916,7 @@ impl Shell {
                         } else {
                             (
                                 title,
-                                "This copy of Zeron wasn't set up by an installer (for example, a source build), so it can't update itself."
+                                "This copy of Zeron Nova wasn't set up by an installer (for example, a source build), so it can't update itself."
                                     .into(),
                                 vec![
                                     UpdatePromptButton::Close("Later"),
@@ -10370,7 +10370,7 @@ impl Shell {
         } else if remote_engine {
             "Stop daemon and quit"
         } else {
-            "Quit Zeron"
+            "Quit Zeron Nova"
         };
 
         if self.sync_flow == SyncFlow::Enabling && needs_org {
@@ -10395,7 +10395,7 @@ impl Shell {
                 .child(
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
-                        "Finish signing in in your browser. Zeron will keep using this local workspace until you quit and reopen.",
+                        "Finish signing in in your browser. Zeron Nova will keep using this local workspace until you quit and reopen.",
                     )),
                 )
                 .child(
@@ -10439,14 +10439,14 @@ impl Shell {
                     )
                     .into(),
                     (Some(email), None) => format!(
-                        "You're signed in as {email}. Zeron can switch to your synced workspace now."
+                        "You're signed in as {email}. Zeron Nova can switch to your synced workspace now."
                     )
                     .into(),
                     (None, Some(phrase)) => format!(
                         "Bring {phrase} from this device into your synced workspace, or start it fresh."
                     )
                     .into(),
-                    (None, None) => "Zeron can switch to your synced workspace now.".into(),
+                    (None, None) => "Zeron Nova can switch to your synced workspace now.".into(),
                 };
                 let mut actions = div()
                     .mt(px(16.0))
@@ -10635,9 +10635,9 @@ impl Shell {
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
                         if remote_engine {
-                            "Zeron is using a background daemon. Stop it and quit Zeron, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                            "Zeron Nova is using a background daemon. Stop it and quit Zeron Nova, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
                         } else {
-                            "Quit and reopen Zeron to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                            "Quit and reopen Zeron Nova to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
                         },
                     )),
                 )
@@ -10682,7 +10682,7 @@ impl Shell {
                 .child(
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
-                        "Zeron will remove your credentials, close the synced workspace, and continue in local mode.",
+                        "Zeron Nova will remove your credentials, close the synced workspace, and continue in local mode.",
                     )),
                 )
                 .child(
@@ -12341,7 +12341,7 @@ impl Shell {
                     .line_height(px(19.0))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(
-                        "Zeron removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
+                        "Zeron Nova removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
                     )),
             )
             .when_some(self.runtime_change_error.clone(), |card, error| {
@@ -12910,10 +12910,7 @@ impl Shell {
                 .items_center()
                 .text_center()
                 .child(
-                    icon(icons::ZERON_LOGO)
-                        .w(px(31.4))
-                        .h(px(36.0))
-                        .text_color(theme.text),
+                    gpui::img(icons::NOVA_LOGO).size(px(64.0)).rounded(px(14.0)),
                 )
                 .child(
                     div()
@@ -12921,7 +12918,7 @@ impl Shell {
                         .text_size(crate::typography::ui_rems(18.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.text)
-                        .child(SharedString::from("Log in to Zeron")),
+                        .child(SharedString::from("Log in to Zeron Nova")),
                 )
                 .child(
                     div()
@@ -13076,11 +13073,11 @@ impl Shell {
         // then existing memberships and the account escape hatch.
         let blurb: SharedString = match email {
             Some(email) => format!(
-                "Zeron is organized around workspaces — create one for yourself or your team. Signed in as {email}."
+                "Zeron Nova is organized around workspaces — create one for yourself or your team. Signed in as {email}."
             )
             .into(),
             None => {
-                "Zeron is organized around workspaces — create one for yourself or your team."
+                "Zeron Nova is organized around workspaces — create one for yourself or your team."
                     .into()
             }
         };

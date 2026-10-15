@@ -285,7 +285,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
     }
 
     private func showNoHosts() {
-        status.text = "No desktop devices yet — open Zeron on a computer to add one."
+        status.text = "No desktop devices yet — open Zeron Nova on a computer to add one."
         useButton.isEnabled = false
     }
 
@@ -315,7 +315,7 @@ final class NewProjectViewController: UIViewController, UICollectionViewDelegate
             return "\(message) Install GitHub CLI and run gh auth login on \(host), then retry."
         }
         if message.localizedCaseInsensitiveContains("unknown method") || message.localizedCaseInsensitiveContains("not supported") {
-            return "Update Zeron on \(host) to use GitHub projects."
+            return "Update Zeron Nova on \(host) to use GitHub projects."
         }
         return message
     }

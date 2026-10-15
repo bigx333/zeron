@@ -129,7 +129,7 @@ fun SettingsScreen(model: AppModel, onArchived: () -> Unit, onOpenVoiceSettings:
                     shapes = segmentedShapes(1, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Magic) },
-                    supportingContent = { Text("Tint Zeron with your wallpaper's palette") },
+                    supportingContent = { Text("Tint Zeron Nova with your wallpaper's palette") },
                     trailingContent = { Switch(appearance.dynamicColor, { model.setAppearance(appearance.copy(dynamicColor = it)) }) },
                 ) { Text("Wallpaper colors") }
             }
@@ -250,7 +250,7 @@ fun SettingsScreen(model: AppModel, onArchived: () -> Unit, onOpenVoiceSettings:
                     shapes = segmentedShapes(0, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Info) },
-                    supportingContent = { Text("Zeron for Android · core ${coreVersion()}") },
+                    supportingContent = { Text("Zeron Nova for Android · core ${coreVersion()}") },
                 ) { Text("Version") }
                 SegmentedListItem(
                     onClick = { if (model.isDemo) model.signOut() else confirmSignOut = true },
