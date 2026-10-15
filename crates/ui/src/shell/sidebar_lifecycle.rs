@@ -120,6 +120,17 @@ where
     at.format(format).to_string()
 }
 
+/// A row action's hue, pulled toward the text color until it clears the 3:1
+/// non-text floor on the sidebar under its own hover wash — the raw status
+/// colors fall short on some light themes.
+fn legible_row_action_tint(tint: gpui::Hsla, wash: gpui::Hsla, theme: &Theme) -> gpui::Hsla {
+    let backdrop = crate::theme::flatten(wash, theme.surface);
+    (0..=10)
+        .map(|step| crate::theme::mix(tint, theme.text, step as f32 / 10.0))
+        .find(|color| crate::theme::contrast_ratio(*color, backdrop) >= 3.0)
+        .unwrap_or(theme.text)
+}
+
 /// The quick snooze menu a T3 row's clock button opens beside itself.
 #[derive(Clone)]
 pub(super) struct RowSnoozeMenu {
@@ -721,11 +732,20 @@ impl Shell {
             .as_open()
             .is_some_and(|menu| menu.chat_id == chat_id);
         let buttons = actions.iter().map(|&action| {
-            let (suffix, glyph_path, tooltip) = match action {
-                Action::Snooze => ("snooze", icons::CLOCK_CIRCLE, "Snooze…"),
-                Action::Settle => ("settle", icons::CHECK, "Settle"),
-                Action::Unsettle => ("unsettle", icons::ARCHIVE_UP_MINIMALISTIC, "Unsettle"),
+            // Each action wears its own hue: amber to snooze, green to
+            // settle, accent to bring a settled row back.
+            let (suffix, glyph_path, tooltip, tint) = match action {
+                Action::Snooze => ("snooze", icons::CLOCK_CIRCLE, "Snooze…", theme.warning),
+                Action::Settle => ("settle", icons::CHECK, "Settle", theme.success),
+                Action::Unsettle => (
+                    "unsettle",
+                    icons::ARCHIVE_UP_MINIMALISTIC,
+                    "Unsettle",
+                    theme.accent,
+                ),
             };
+            let wash = tint.opacity(0.18);
+            let tint = legible_row_action_tint(tint, wash, theme);
             let element_id = format!("{row_id}-{suffix}");
             let id = chat_id.to_owned();
             let active = matches!(action, Action::Snooze) && menu_open;
@@ -742,13 +762,9 @@ impl Shell {
                 .cursor_pointer()
                 .role(gpui::Role::Button)
                 .aria_label(tooltip)
-                .when(active, |el| el.bg(crate::theme::wash(0.18)))
-                .hover(|el| el.bg(crate::theme::wash(0.18)))
-                .child(icon(glyph_path).size(px(glyph)).text_color(if active {
-                    theme.text
-                } else {
-                    theme.text_muted
-                }))
+                .when(active, |el| el.bg(wash))
+                .hover(move |el| el.bg(wash))
+                .child(icon(glyph_path).size(px(glyph)).text_color(tint))
                 // Above the row: below it the chip would cover the next row.
                 .tooltip(crate::settings::widgets::text_tooltip_above(tooltip));
             button = match action {
@@ -823,6 +839,28 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_action_tints_clear_the_non_text_floor_on_every_builtin() {
+        let registry = zeron_theme::ThemeRegistry::builtin();
+        for variant in registry.families.iter().flat_map(|family| &family.variants) {
+            let theme = Theme::from_variant(
+                variant,
+                zeron_theme::AccentSelection::ThemeDefault,
+                zeron_theme::SurfacePreference::Opaque,
+            );
+            for tint in [theme.warning, theme.success, theme.accent] {
+                let wash = tint.opacity(0.18);
+                let backdrop = crate::theme::flatten(wash, theme.surface);
+                let legible = legible_row_action_tint(tint, wash, &theme);
+                assert!(
+                    crate::theme::contrast_ratio(legible, backdrop) >= 3.0,
+                    "{} row action tint",
+                    variant.id
+                );
+            }
+        }
+    }
 
     /// 2026-10-14 (a Wednesday) at `hour:minute` UTC, plus `days`.
     fn at(hour: u32, minute: u32, days: u32) -> chrono::DateTime<Utc> {
