@@ -1,7 +1,6 @@
 package sh.zeron.android.transcript
 
 import android.graphics.BitmapFactory
-import android.util.LruCache
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -11,6 +10,11 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -265,24 +270,54 @@ object IconAssets {
     }
 }
 
-private val images = LruCache<String, ImageBitmap>(48)
+private sealed interface ImageLoad {
+    data object Loading : ImageLoad
+    data class Ready(val image: ImageBitmap) : ImageLoad
+    data object Failed : ImageLoad
+}
 
 @Composable
-private fun RemoteImage(reference: String, w: Widget, actions: TranscriptActions, progress: () -> Double?) {
-    val image by produceState(images.get(reference), reference) {
-        if (value == null) value = actions.loadImage(reference)?.also { images.put(reference, it) }
+private fun RemoteImage(reference: String, w: Widget, actions: TranscriptActions, progress: () -> Double?) = key(reference, actions) {
+    // produceState remembers its value even when its effect keys change. Give
+    // each image/host its own state and fade when a widget slot is reused.
+    var attempt by remember(reference) { mutableIntStateOf(0) }
+    val initial = remember { actions.cachedImage(reference)?.let(ImageLoad::Ready) ?: ImageLoad.Loading }
+    val load by produceState<ImageLoad>(initial, attempt) {
+        if (value is ImageLoad.Ready) return@produceState
+        value = ImageLoad.Loading
+        value = actions.loadImage(reference)?.let(ImageLoad::Ready) ?: ImageLoad.Failed
     }
+    val image = (load as? ImageLoad.Ready)?.image
+    // A cached image shows at once; one that arrives fades in over its placeholder.
+    val shown by animateFloatAsState(if (image != null) 1f else 0f, tween(220), label = "image")
     val radius = if (minOf(w.w, w.h) > 120) 14.dp else 12.dp
     val pending = reference.startsWith("pending://")
     Box(
         Modifier
             .fillMaxSize()
             .clip(RoundedCornerShape(radius))
-            .clickable(enabled = image != null && !pending, onClickLabel = "Open image") { actions.openImage(reference) },
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .then(
+                when {
+                    image != null && !pending -> Modifier.clickable(onClickLabel = "Open image") { actions.openImage(reference) }
+                    load == ImageLoad.Failed -> Modifier.clickable(onClickLabel = "Retry loading image") { attempt++ }
+                    else -> Modifier
+                },
+            ),
         contentAlignment = Alignment.Center,
     ) {
-        image?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
-            ?: Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerHigh))
+        if (shown < 1f) {
+            when (load) {
+                ImageLoad.Failed -> ZIcon(
+                    ZIcons.Image,
+                    "Image unavailable, tap to retry",
+                    Modifier.size(minOf(28f, minOf(w.w, w.h) * 0.4f).dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                )
+                else -> LoadingSweep(Modifier.fillMaxSize().graphicsLayer { alpha = 1f - shown })
+            }
+        }
+        image?.let { Image(it, null, Modifier.fillMaxSize().graphicsLayer { alpha = shown }, contentScale = ContentScale.Crop) }
         // Still being escorted to the host: a scrim and a wavy ring that fills with the transfer.
         val p = if (pending) progress() else null
         androidx.compose.animation.AnimatedVisibility(p != null, enter = fadeIn(), exit = fadeOut()) {
@@ -303,6 +338,25 @@ private fun RemoteImage(reference: String, w: Widget, actions: TranscriptActions
                 )
             }
         }
+    }
+}
+
+/** A soft band sweeping across an image still loading, so it reads as on its way, not broken. */
+@Composable
+private fun LoadingSweep(modifier: Modifier) {
+    val transition = rememberInfiniteTransition(label = "image-loading")
+    val phase by transition.animateFloat(0f, 1f, infiniteRepeatable(tween(1300, easing = LinearEasing), RepeatMode.Restart), label = "sweep")
+    val highlight = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+    Canvas(modifier) {
+        val band = size.width * 0.5f
+        val x = -band + phase * (size.width + band * 2f)
+        drawRect(
+            Brush.linearGradient(
+                listOf(Color.Transparent, highlight, Color.Transparent),
+                start = Offset(x - band, 0f),
+                end = Offset(x + band, size.height * 0.5f),
+            ),
+        )
     }
 }
 

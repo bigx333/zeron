@@ -259,36 +259,60 @@ final class CoreSessionSource: SessionSource {
         (try? await client.searchFiles(deviceId: hostDevice, chatId: chatId, spaceId: nil, query: query)) ?? []
     }
 
-    private static let images = NSCache<NSString, UIImage>()
+    /// Decoded attachments, bounded by bytes (a full-resolution screenshot is
+    /// ~10 MB) and keyed by host device and path, so equal paths on two hosts
+    /// never share an entry. NSCache also sheds entries under memory pressure.
+    private static let images: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.totalCostLimit = Int(min(ProcessInfo.processInfo.physicalMemory / 16, 256 << 20))
+        return cache
+    }()
+
+    private static func imageKey(_ device: String, _ reference: String) -> NSString {
+        "\(device)\u{0}\(reference)" as NSString
+    }
+
+    private static func cache(_ image: UIImage, device: String, reference: String) {
+        let cost = image.cgImage.map { $0.bytesPerRow * $0.height }
+            ?? Int(image.size.width * image.size.height * image.scale * image.scale * 4)
+        images.setObject(image, forKey: imageKey(device, reference), cost: cost)
+    }
 
     func image(_ reference: String) async -> UIImage? {
-        if let hit = Self.images.object(forKey: reference as NSString) { return hit }
-        guard let data = try? await client.readAttachment(deviceId: hostDevice, path: reference),
+        let device = hostDevice
+        if let hit = Self.images.object(forKey: Self.imageKey(device, reference)) { return hit }
+        guard let data = try? await client.readAttachment(deviceId: device, path: reference),
               let image = await UIImage(data: data)?.byPreparingForDisplay()
         else { return nil }
-        Self.images.setObject(image, forKey: reference as NSString)
+        Self.cache(image, device: device, reference: reference)
         return image
     }
 
-    func loadImage(_ reference: String, into view: UIImageView) {
+    func loadImage(_ reference: String, into view: RemoteImageView) {
         // Claim the view first: a slower load for a row it used to show
         // must not land on top of this one.
+        let loadID = UUID()
+        view.loadID = loadID
         view.accessibilityIdentifier = reference
-        if let hit = Self.images.object(forKey: reference as NSString) {
-            view.image = hit
+        view.retry = nil
+        let device = hostDevice
+        if let hit = Self.images.object(forKey: Self.imageKey(device, reference)) {
+            view.show(hit, animated: false)
             return
         }
-        let device = hostDevice
+        view.retry = { [weak self, weak view] in
+            guard let self, let view, view.loadID == loadID else { return }
+            self.loadImage(reference, into: view)
+        }
+        view.showLoading()
         let client = self.client
-        view.accessibilityIdentifier = reference
-        Task.detached(priority: .userInitiated) {
-            guard let data = try? await client.readAttachment(deviceId: device, path: reference),
-                  let image = UIImage(data: data)?.preparingForDisplay()
-            else { return }
-            Self.images.setObject(image, forKey: reference as NSString)
+        Task.detached(priority: .userInitiated) { [weak view] in
+            let data = try? await client.readAttachment(deviceId: device, path: reference)
+            let image = data.flatMap { UIImage(data: $0)?.preparingForDisplay() }
+            if let image { Self.cache(image, device: device, reference: reference) }
             await MainActor.run {
-                guard view.accessibilityIdentifier == reference else { return }
-                UIView.transition(with: view, duration: 0.2, options: .transitionCrossDissolve) { view.image = image }
+                guard let view, view.loadID == loadID else { return }
+                if let image { view.show(image, animated: true) } else { view.showFailed() }
             }
         }
     }

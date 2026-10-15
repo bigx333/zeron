@@ -76,7 +76,7 @@ protocol SessionSource: AnyObject {
     func finishEdit(text: String?) async
     /// Menu for a composer chip (model, effort, branch…), or nil.
     func chipMenu(_ id: String) -> UIMenu?
-    func loadImage(_ reference: String, into view: UIImageView)
+    func loadImage(_ reference: String, into view: RemoteImageView)
     /// An attachment's picture, for opening it full size (an image chip).
     func image(_ reference: String) async -> UIImage?
     /// Workspace files for `@` mentions.
@@ -229,7 +229,7 @@ final class FixtureSessionSource: SessionSource {
             return nil
         }
     }
-    func loadImage(_ reference: String, into view: UIImageView) {}
+    func loadImage(_ reference: String, into view: RemoteImageView) {}
     func image(_ reference: String) async -> UIImage? { nil }
     func searchFiles(_ query: String) async -> [FileMatch] { [] }
 }

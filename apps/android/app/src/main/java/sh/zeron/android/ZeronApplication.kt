@@ -7,6 +7,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.core.Fonts
 import sh.zeron.android.design.LocalAssets
+import sh.zeron.android.transcript.ImageCache
 
 class ZeronApplication : Application() {
     lateinit var model: AppModel
@@ -22,5 +23,10 @@ class ZeronApplication : Application() {
             override fun onStart(owner: LifecycleOwner) = model.onForeground()
             override fun onStop(owner: LifecycleOwner) = model.onBackground()
         })
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        ImageCache.trim(level)
     }
 }

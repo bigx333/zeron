@@ -35,7 +35,7 @@ protocol RowViewDelegate: AnyObject {
     func rowView(_ view: RowView, toggle key: UInt64)
     func rowView(_ view: RowView, toggleDetail detail: UInt64, open: Bool)
     func rowView(_ view: RowView, open url: URL)
-    func rowView(_ view: RowView, imageFor reference: String, into imageView: UIImageView)
+    func rowView(_ view: RowView, imageFor reference: String, into imageView: RemoteImageView)
     /// The live view for an agent visual (kept across row reuse).
     func rowView(_ view: RowView, visualFor id: String) -> UIView?
 }
@@ -230,7 +230,7 @@ final class RowView: UIView {
             case let .toolStatus(running, failed):
                 view = ToolStatusView(running: running, failed: failed)
             case let .image(reference):
-                let iv = UIImageView()
+                let iv = RemoteImageView(frame: .zero)
                 iv.contentMode = .scaleAspectFill
                 iv.clipsToBounds = true
                 iv.layer.cornerRadius = min(rect.width, rect.height) > 120 ? 14 : 12
@@ -315,6 +315,10 @@ final class RowView: UIView {
     }
 
     @objc private func openImage(_ tap: UITapGestureRecognizer) {
+        if let remote = tap.view as? RemoteImageView, remote.failed {
+            remote.retry?()
+            return
+        }
         guard let iv = tap.view as? UIImageView, let image = iv.image, let vc = findViewController() else { return }
         vc.present(ImageViewer(image: image, source: iv), animated: true)
     }

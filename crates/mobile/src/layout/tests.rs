@@ -1256,3 +1256,111 @@ fn math_tables_keep_a_bounded_canvas() {
     let small = rows_of("| a | b |\n|---|---|\n| $x^2$ | $\\frac{1}{2}$ |", 390.0).remove(0);
     assert!(!small.glyphs.is_empty(), "a small math table renders its formulas");
 }
+
+#[test]
+fn reply_host_images_render_inline_and_other_images_stay_links() {
+    // An image-only paragraph of host paths draws thumbnails (loaded from the
+    // chat's device); a remote image or one inside prose keeps its link.
+    let mut w = worker(390.0);
+    let text = "Here it is:\n\n![dark chat](/Users/me/zeron/shots/dark-chat.png) ![b](file:///tmp/a%20b.png)\n\n\
+                ![remote](https://example.com/x.png)\n\nInline ![c](/tmp/c.png) in prose."
+        .to_owned();
+    w.input = debug_input(vec![DebugEntry { id: "a".into(), user: false, text, streaming: false }], false);
+    let frame = w.pass();
+    let (mut images, mut links) = (Vec::new(), Vec::new());
+    for i in 0.. {
+        let Some(d) = frame.display(i) else { break };
+        images.extend(d.widgets.iter().filter_map(|w| match &w.kind {
+            display::WidgetKind::Image { reference } => Some(reference.clone()),
+            _ => None,
+        }));
+        links.extend(d.links.iter().map(|l| l.url.clone()));
+    }
+    assert_eq!(images, ["/Users/me/zeron/shots/dark-chat.png", "/tmp/a b.png"]);
+    assert_eq!(links, ["https://example.com/x.png", "file:///tmp/c.png"]);
+}
+
+#[test]
+fn host_image_paths_and_links_preserve_filenames() {
+    let mut w = worker(390.0);
+    for (source, path, link) in [
+        ("/tmp/a%20b#c?.png", "/tmp/a%20b#c?.png", "file:///tmp/a%2520b%23c%3F.png"),
+        ("/tmp/café shot.png", "/tmp/café shot.png", "file:///tmp/caf%C3%A9%20shot.png"),
+        ("file:///tmp/a%20b.png?download=1#image", "/tmp/a b.png", "file:///tmp/a%20b.png?download=1#image"),
+        ("FILE://LOCALHOST/tmp/a%2Fb%23c%3F%25.png", "/tmp/a/b#c?%.png", "FILE://LOCALHOST/tmp/a%2Fb%23c%3F%25.png"),
+    ] {
+        w.input = transcript_one(&format!("![image](<{source}>)\n\nInline ![image](<{source}>) here."));
+        let frame = w.pass();
+        let displays: Vec<_> = (0..frame.row_count()).map(|i| frame.display(i).unwrap()).collect();
+        let images: Vec<_> = displays.iter().flat_map(|d| &d.widgets).filter_map(|w| match &w.kind {
+            display::WidgetKind::Image { reference } => Some(reference.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(images, [path], "{source}");
+        let links: Vec<_> = displays.iter().flat_map(|d| &d.links).map(|l| l.url.as_str()).collect();
+        assert_eq!(links, [link], "{source}");
+    }
+}
+
+#[test]
+fn non_host_and_mixed_image_paragraphs_stay_links() {
+    let mut w = worker(390.0);
+    for md in [
+        "![remote](//example.com/x.png)",
+        "![remote](file://server/tmp/x.png)",
+        "![relative](images/x.png)",
+        "![invalid](file:///tmp/a%zz.png)",
+        "![invalid](file:///tmp/a%+1.png)",
+        "![invalid](file:///tmp/a%FF.png)",
+        "![invalid](file:///tmp/a%00.png)",
+        "![local](/tmp/x.png) ![remote](https://example.com/x.png)",
+        "[![local](/tmp/x.png)](https://example.com/)",
+    ] {
+        w.input = transcript_one(md);
+        let frame = w.pass();
+        let displays: Vec<_> = (0..frame.row_count()).map(|i| frame.display(i).unwrap()).collect();
+        assert!(displays.iter().flat_map(|d| &d.widgets).all(|w| !matches!(w.kind, display::WidgetKind::Image { .. })), "{md}");
+        assert!(displays.iter().any(|d| !d.links.is_empty()), "{md}");
+    }
+}
+
+#[test]
+fn image_blocks_measure_and_paint_the_same_wrapping_geometry() {
+    use super::markdown::{PBlock, Px, place};
+    for scale in [0.75, 1.0, 1.5] {
+        for width in [0.0, 0.5, 1.0, 259.9, 260.0, 527.9, 528.0, 1064.0] {
+            for count in [0, 1, 2, 5] {
+                let block = PBlock::Images((0..count).map(|i| format!("/tmp/{i}.png")).collect());
+                let measured = place(&block, Px(scale), 0.0, 0.0, width, None);
+                let mut out = display::DisplayBuilder::default();
+                let painted = place(&block, Px(scale), 0.0, 0.0, width, Some(&mut out));
+                assert_eq!(measured, painted);
+                assert_eq!(out.widgets.len(), count);
+                for widget in &out.widgets {
+                    assert!(widget.x >= 0.0 && widget.w >= 0.0 && widget.x + widget.w <= width + 0.001);
+                    assert!(widget.y >= 0.0 && widget.h >= 0.0 && widget.y + widget.h <= measured + 0.001);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn streaming_image_only_paragraph_switches_back_to_prose() {
+    let mut w = worker(390.0);
+    for (text, streaming, expected_images) in [
+        ("![image](/tmp/x.png)", true, 1),
+        ("![image](/tmp/x.png) followed by prose", true, 0),
+        ("![image](/tmp/x.png) followed by prose", false, 0),
+        ("![image](/tmp/x.png)", false, 1),
+    ] {
+        w.input = debug_input(vec![DebugEntry { id: "a".into(), user: false, text: text.into(), streaming }], streaming);
+        let frame = w.pass();
+        let displays: Vec<_> = (0..frame.row_count()).map(|i| frame.display(i).unwrap()).collect();
+        let images = displays.iter().flat_map(|d| &d.widgets).filter(|w| matches!(w.kind, display::WidgetKind::Image { .. })).count();
+        assert_eq!(images, expected_images, "{text}");
+        for i in 0..frame.row_count() {
+            assert_eq!(frame.placement(i).unwrap().height, frame.display(i).unwrap().height);
+        }
+    }
+}
