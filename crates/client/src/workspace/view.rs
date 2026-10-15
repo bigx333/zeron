@@ -53,9 +53,9 @@ pub fn relative_time_label(at_ms: i64, now_ms: i64) -> String {
 /// Time remaining until a snoozed session returns, rounded up like desktop.
 fn snooze_label(until: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let secs = (until - now).num_seconds().max(1);
-    if secs < 3_600 {
+    if (secs + 59) / 60 < 60 {
         format!("in {}m", (secs + 59) / 60)
-    } else if secs < 86_400 {
+    } else if (secs + 3_599) / 3_600 < 24 {
         format!("in {}h", (secs + 3_599) / 3_600)
     } else {
         format!("in {}d", (secs + 86_399) / 86_400)
@@ -862,6 +862,24 @@ impl Hash for DeviceView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snooze_labels_promote_rounded_units() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for (seconds, expected) in [
+            (1, "in 1m"),
+            (59 * 60, "in 59m"),
+            (59 * 60 + 1, "in 1h"),
+            (3_600, "in 1h"),
+            (3_601, "in 2h"),
+            (23 * 3_600, "in 23h"),
+            (23 * 3_600 + 1, "in 1d"),
+            (86_401, "in 2d"),
+        ] {
+            let until = now + chrono::Duration::seconds(seconds);
+            assert_eq!(snooze_label(until, now), expected);
+        }
+    }
 
     #[test]
     fn time_labels() {
