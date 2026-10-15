@@ -9,8 +9,17 @@ impl Render for Host {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.0.update(cx, |shell, cx| {
             let theme = Theme::default();
+            // Mirror the real Shell root: when an inline input unmounts,
+            // keyboard events must recover to a mounted shortcut surface.
+            let root = shell.shortcut_focus.clone();
+            let (preferred, unfocused) = shell.navigation_focus_fallback(cx);
+            window.defer(cx, move |window, cx| {
+                restore_mounted_focus(&root, &preferred, &unfocused, window, cx);
+            });
             div()
                 .size_full()
+                .track_focus(&shell.shortcut_focus)
+                .child(div().track_focus(&shell.unfocused))
                 .capture_key_down(cx.listener(Shell::on_key_down_capture))
                 .child(
                     div()
