@@ -10,6 +10,7 @@ Native captures from the isolated demo workspace. These show the actual app, inc
 | Snooze presets and Settle button | [Open](android-t3-dark-actions.png) | [Open](android-t3-light-actions.png) |
 | Snoozed row | [Open](android-t3-dark-snoozed.png) | [Open](android-t3-light-snoozed.png) |
 | Wake now and Settle | [Open](android-t3-dark-wake-actions.png) | — |
+| Unsettle a settled thread | — | [Open](android-t3-light-unsettle-actions.png) |
 | T3 Mode toggle | — | [Open](android-t3-light-mode-menu.png) |
 | Default mode | — | [Open](android-default-light.png) |
 
