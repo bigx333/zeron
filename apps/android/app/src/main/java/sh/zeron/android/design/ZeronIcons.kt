@@ -96,6 +96,11 @@ object ZIcons {
     val GitHub = R.drawable.zi_github
     val Zeron = R.drawable.zi_zeron
     val Menu = R.drawable.zi_menu
+    // T3 Mode: the inbox, snooze and settle.
+    val Inbox = R.drawable.zi_checklist
+    val Snooze = R.drawable.zi_clock_circle
+    val Settle = R.drawable.zi_queue_check
+    val Wake = R.drawable.zi_bell
 }
 
 @Composable

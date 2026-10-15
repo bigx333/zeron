@@ -75,6 +75,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.Shelf
+import sh.zeron.android.core.SidebarMode
+import sh.zeron.android.core.activeRows
+import sh.zeron.android.core.frontFor
+import sh.zeron.android.voice.rememberReducedMotion
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.foundation.lazy.LazyItemScope
+import androidx.compose.ui.draw.scale
+import androidx.compose.material3.toShape
 import sh.zeron.android.design.HarnessMark
 import sh.zeron.android.design.LocalDarkTheme
 import sh.zeron.android.design.ProjectColors
@@ -160,15 +170,13 @@ fun liveSummary(ws: WorkspaceSnapshot): String? {
     return parts.joinToString(" · ").ifEmpty { null }
 }
 
-private fun frontRows(ws: WorkspaceSnapshot): List<SessionRow> {
-    val seen = HashSet<String>()
-    return (ws.front.pinned + ws.front.sections.flatMap { it.sessions } + ws.front.recent).filter { seen.add(it.id) }
-}
-
 private fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
-    val rows = frontRows(ws)
+    val rows = ws.front.activeRows()
     return rows.count { it.indicator == ChatIndicator.WORKING } to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
 }
+
+/** Settled rows shown on the shelf before "See all". */
+private const val SETTLED_PEEK = 20
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -186,6 +194,9 @@ fun SessionsScreen(
     val connectivity by model.connectivity.collectAsState()
     val groupByProject by model.groupByProject.collectAsState()
     val collapsedGroups by model.collapsed.collectAsState()
+    val mode by model.sidebarMode.collectAsState()
+    val openShelves by model.openShelves.collectAsState()
+    val reducedMotion = rememberReducedMotion()
     var filter by rememberSaveable { mutableStateOf(Filter.All) }
     val scope = rememberCoroutineScope()
     var newSection by remember { mutableStateOf<String?>(null) }
@@ -194,7 +205,11 @@ fun SessionsScreen(
     var refreshing by remember { mutableStateOf(false) }
     val pull = rememberPullToRefreshState()
     val ws = workspace
-    val counts = remember(ws) { ws?.let { liveCounts(it) } ?: (0 to 0) }
+    val counts = remember(ws, mode) {
+        ws?.frontFor(mode)?.activeRows()?.let { rows ->
+            rows.count { it.indicator == ChatIndicator.WORKING } to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
+        } ?: (0 to 0)
+    }
 
     val subtitle = when {
         connectivity?.state == ConnectivityState.OFFLINE -> "Offline"
@@ -207,7 +222,7 @@ fun SessionsScreen(
     // "New section…" from a row's Move menu files that row into it. Remembered: every row
     // takes `actions`, so a fresh instance per recomposition re-composes every visible row.
     val userSections = ws?.front?.sections
-    val actions = remember(model, onOpen, selected, userSections) {
+    val actions = remember(model, onOpen, selected, userSections, mode, reducedMotion) {
         RowActions(
             model = model,
             onOpen = onOpen,
@@ -215,6 +230,8 @@ fun SessionsScreen(
             sections = userSections.orEmpty().map { it.id to it.name },
             newSection = { chatId -> newSection = chatId ?: "" },
             selected = selected,
+            mode = mode,
+            reducedMotion = reducedMotion,
         )
     }
 
@@ -308,7 +325,10 @@ fun SessionsScreen(
                     }
                 }
                 if (ws == null) return@LazyColumn
-                val front = ws.front
+                // T3: pins, sections and the attention-first inbox hold only what
+                // needs a look; Working and Snoozed sit on shelves below.
+                val front = ws.frontFor(mode)
+                val active = front.activeRows()
                 when (filter) {
                     Filter.All -> {
                         if (front.pinned.isNotEmpty()) {
@@ -341,14 +361,14 @@ fun SessionsScreen(
                             }
                         } else if (front.recent.isNotEmpty()) {
                             group(
-                                "recent", "Recent", front.recent, actions,
+                                "recent", if (mode.isT3) "Inbox" else "Recent", front.recent, actions,
                                 collapsed = "recent" in collapsedGroups,
                                 onToggle = { model.setGroupCollapsed("recent", "recent" !in collapsedGroups) },
                             )
                         }
                     }
-                    Filter.NeedsYou -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.AWAITING_INPUT }, actions)
-                    Filter.Working -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.WORKING }, actions)
+                    Filter.NeedsYou -> group("f", null, active.filter { it.indicator == ChatIndicator.AWAITING_INPUT }, actions)
+                    Filter.Working -> group("f", null, active.filter { it.indicator == ChatIndicator.WORKING }, actions)
                     Filter.Pinned -> group("f", null, front.pinned, actions)
                 }
                 val empty = when (filter) {
@@ -357,7 +377,14 @@ fun SessionsScreen(
                     Filter.Working -> counts.first == 0
                     Filter.Pinned -> front.pinned.isEmpty()
                 }
-                if (empty) item("empty") { EmptyState(filter) }
+                if (empty) item("empty") { EmptyState(filter, mode, itemMotion(reducedMotion)) }
+                if (mode.isT3 && filter == Filter.All) {
+                    shelf(Shelf.Working, front.working, front.working.size, openShelves, actions) { model.setShelfOpen(Shelf.Working, it) }
+                    shelf(Shelf.Snoozed, front.snoozed, front.snoozed.size, openShelves, actions) { model.setShelfOpen(Shelf.Snoozed, it) }
+                    shelf(Shelf.Settled, ws.archived.take(SETTLED_PEEK), ws.archived.size, openShelves, actions, onSeeAll = onArchived) {
+                        model.setShelfOpen(Shelf.Settled, it)
+                    }
+                }
             }
         }
         StatusBarScrim(list)
@@ -371,16 +398,20 @@ fun SessionsScreen(
                     open,
                     dismiss,
                     listOf(
+                        MenuAction("T3 Mode", ZIcons.Inbox, checked = mode.isT3) {
+                            model.setSidebarMode(if (mode.isT3) SidebarMode.Default else SidebarMode.T3)
+                        },
                         MenuAction("New section…", ZIcons.Folder) { newSection = "" },
                         MenuAction("Collapse all", ZIcons.Collapse) {
-                            val front = ws?.front ?: return@MenuAction
+                            val front = ws?.frontFor(mode) ?: return@MenuAction
                             for (section in front.sections) if (!section.collapsed) model.setSectionCollapsed(section.id, true)
                             val local = listOf("pinned", "recent") +
                                 if (groupByProject) projectGroups(front.recent, ws.projects).map { it.id } else emptyList()
                             local.forEach { model.setGroupCollapsed(it, true) }
+                            if (mode.isT3) Shelf.entries.forEach { model.setShelfOpen(it, false) }
                         },
                         MenuAction("Group by project", ZIcons.Project, checked = groupByProject) { model.setGroupByProject(!groupByProject) },
-                        MenuAction("Archived", ZIcons.Archive, onClick = onArchived),
+                        MenuAction(mode.settled, ZIcons.Archive, onClick = onArchived),
                     ),
                 )
             },
@@ -408,14 +439,52 @@ fun SessionsScreen(
 class RowActions(
     val model: AppModel,
     val onOpen: (String) -> Unit,
-    val archive: (SessionRow) -> Unit,
+    /** Archive (T3: settle); false when it didn't land. */
+    val archive: (SessionRow) -> Boolean,
     /** User sections a row can move to (id, name). */
     val sections: List<Pair<String, String>>,
     /** Prompt for a new section, filing `chatId` into it (null: just create). */
     val newSection: (String?) -> Unit,
     /** The chat open beside the list (large screens). */
     val selected: String? = null,
+    /** T3 Mode: rows get a visible actions button, a sheet, and snooze/settle swipes. */
+    val mode: SidebarMode = SidebarMode.Default,
+    /** "Remove animations": rows and shelves move without animating. */
+    val reducedMotion: Boolean = false,
 )
+
+/** List item motion (fade and slide between groups and shelves), still when motion is off. */
+fun LazyItemScope.itemMotion(reducedMotion: Boolean): Modifier =
+    if (reducedMotion) Modifier.animateItem(fadeInSpec = null, placementSpec = null, fadeOutSpec = null) else Modifier.animateItem()
+
+/** A T3 shelf: a folding bar, its rows when open, and "See all" for a long Settled. */
+private fun LazyListScope.shelf(
+    shelf: Shelf,
+    rows: List<SessionRow>,
+    total: Int,
+    open: Set<String>,
+    actions: RowActions,
+    onSeeAll: (() -> Unit)? = null,
+    setOpen: (Boolean) -> Unit,
+) {
+    val isOpen = shelf.id in open
+    item("shelf-${shelf.id}") {
+        ShelfHeader(shelf, rows, total, isOpen, actions.reducedMotion, onToggle = { setOpen(!isOpen) }, modifier = itemMotion(actions.reducedMotion))
+    }
+    if (!isOpen) return
+    itemsIndexed(rows, key = { _, r -> "${shelf.id}/${r.id}" }) { i, row ->
+        Box(itemMotion(actions.reducedMotion).padding(horizontal = 16.dp).padding(bottom = ListItemDefaults.SegmentedGap)) {
+            SwipeableSessionRow(row, i, rows.size, actions)
+        }
+    }
+    if (onSeeAll != null && total > rows.size) {
+        item("shelf-${shelf.id}-all") {
+            Box(itemMotion(actions.reducedMotion).fillMaxWidth().padding(top = 4.dp), contentAlignment = Alignment.Center) {
+                TextButton(onClick = onSeeAll) { Text("See all $total") }
+            }
+        }
+    }
+}
 
 private fun LazyListScope.group(
     id: String,
@@ -429,7 +498,7 @@ private fun LazyListScope.group(
     if (title != null) {
         item("h-$id") {
             var open by remember { mutableStateOf(false) }
-            Box(Modifier.animateItem()) {
+            Box(itemMotion(actions.reducedMotion)) {
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -464,52 +533,79 @@ private fun LazyListScope.group(
     }
     if (collapsed) return
     itemsIndexed(rows, key = { _, r -> "$id/${r.id}" }) { i, row ->
-        Box(Modifier.animateItem().padding(horizontal = 16.dp).padding(bottom = ListItemDefaults.SegmentedGap)) {
+        Box(itemMotion(actions.reducedMotion).padding(horizontal = 16.dp).padding(bottom = ListItemDefaults.SegmentedGap)) {
             SwipeableSessionRow(row, i, rows.size, actions)
         }
     }
 }
 
-/** Swipe right to pin (or unpin), left to archive. */
+/** What a swipe does, by direction; `run` is false when the write didn't land. */
+private class SwipeAction(val label: String, val icon: Int, val run: () -> Boolean, val keepsRow: Boolean)
+
+/**
+ * Default: swipe right to pin (or unpin), left to archive.
+ * T3: right to snooze (the sheet's lengths) or wake a snoozed row, left to
+ * settle; a settled row swipes left to unsettle.
+ */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun SwipeableSessionRow(row: SessionRow, index: Int, count: Int, actions: RowActions) {
     val state = rememberSwipeToDismissBoxState()
     val scope = rememberCoroutineScope()
     val shape = segmentedShapes(index, count).shape
+    val sheet = remember { mutableStateOf(false) }
+    val model = actions.model
+    val mode = actions.mode
+    val (right, left) = when {
+        !mode.isT3 -> SwipeAction(if (row.pinned) "Unpin" else "Pin", ZIcons.Pin, { model.setPinned(row.id, !row.pinned); true }, keepsRow = true) to
+            SwipeAction("Archive", ZIcons.Archive, { actions.archive(row) }, keepsRow = false)
+        row.archived -> null to SwipeAction(mode.unsettle, ZIcons.Unarchive, { model.unarchive(row.id) }, keepsRow = false)
+        row.snoozed -> SwipeAction("Wake", ZIcons.Wake, { model.wake(row.id) }, keepsRow = false) to
+            SwipeAction(mode.settle, ZIcons.Settle, { actions.archive(row) }, keepsRow = false)
+        else -> SwipeAction("Snooze", ZIcons.Snooze, { sheet.value = true; true }, keepsRow = true) to
+            SwipeAction(mode.settle, ZIcons.Settle, { actions.archive(row) }, keepsRow = false)
+    }
     SwipeToDismissBox(
         state = state,
+        enableDismissFromStartToEnd = right != null,
         onDismiss = {
-            when (it) {
-                SwipeToDismissBoxValue.EndToStart -> actions.archive(row)
-                SwipeToDismissBoxValue.StartToEnd -> {
-                    actions.model.setPinned(row.id, !row.pinned)
-                    scope.launch { state.reset() }
-                }
-                else -> Unit
-            }
+            val action = when (it) {
+                SwipeToDismissBoxValue.StartToEnd -> right
+                SwipeToDismissBoxValue.EndToStart -> left
+                else -> null
+            } ?: return@SwipeToDismissBox
+            // A failed write slides the row back rather than leaving a gap.
+            if (!action.run() || action.keepsRow) scope.launch { state.reset() }
         },
         backgroundContent = {
-            val pinning = state.dismissDirection == SwipeToDismissBoxValue.StartToEnd
-            Surface(
-                Modifier.fillMaxSize(),
-                shape = shape,
-                color = if (pinning) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.tertiaryContainer,
-            ) {
-                Box(
-                    Modifier.padding(horizontal = 28.dp),
-                    contentAlignment = if (pinning) Alignment.CenterStart else Alignment.CenterEnd,
+            val fromStart = state.dismissDirection == SwipeToDismissBoxValue.StartToEnd
+            val action = (if (fromStart) right else left) ?: return@SwipeToDismissBox
+            // The glyph swells once the swipe would commit.
+            val armed = state.targetValue != SwipeToDismissBoxValue.Settled
+            val swell by animateFloatAsState(
+                if (armed) 1.2f else 1f,
+                if (actions.reducedMotion) snap() else MaterialTheme.motionScheme.fastSpatialSpec<Float>(),
+                label = "swipe-swell",
+            )
+            val container = if (fromStart) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.tertiaryContainer
+            val content = if (fromStart) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onTertiaryContainer
+            Surface(Modifier.fillMaxSize(), shape = shape, color = container, contentColor = content) {
+                Row(
+                    Modifier.fillMaxSize().padding(horizontal = 28.dp),
+                    horizontalArrangement = if (fromStart) Arrangement.Start else Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (pinning) {
-                        ZIcon(ZIcons.Pin, if (row.pinned) "Unpin" else "Pin", tint = MaterialTheme.colorScheme.onSecondaryContainer)
-                    } else {
-                        ZIcon(ZIcons.Archive, "Archive", tint = MaterialTheme.colorScheme.onTertiaryContainer)
+                    ZIcon(action.icon, null, Modifier.scale(swell))
+                    // T3 names its swipes: snooze and settle aren't the pin and archive people know.
+                    if (mode.isT3) {
+                        Spacer(Modifier.width(10.dp))
+                        Text(action.label, style = MaterialTheme.typography.labelLarge)
                     }
                 }
             }
         },
     ) {
-        SessionItem(row, index, count, actions)
+        SessionItem(row, index, count, actions, sheet)
     }
 }
 
@@ -519,18 +615,26 @@ fun cardColor() = if (LocalDarkTheme.current) MaterialTheme.colorScheme.surfaceC
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SessionItem(row: SessionRow, index: Int, count: Int, actions: RowActions) {
+fun SessionItem(
+    row: SessionRow,
+    index: Int,
+    count: Int,
+    actions: RowActions,
+    /** T3's actions sheet (a snooze swipe opens it too). */
+    sheet: androidx.compose.runtime.MutableState<Boolean> = remember { mutableStateOf(false) },
+) {
     var menu by remember { mutableStateOf(false) }
     var moving by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     val haptics = LocalHapticFeedback.current
     val model = actions.model
+    val mode = actions.mode
     Box {
         SegmentedListItem(
             onClick = { actions.onOpen(row.id) },
             onLongClick = {
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                menu = true
+                if (mode.isT3) sheet.value = true else menu = true
             },
             shapes = segmentedShapes(index, count),
             colors = ListItemDefaults.segmentedColors(
@@ -539,9 +643,21 @@ fun SessionItem(row: SessionRow, index: Int, count: Int, actions: RowActions) {
             leadingContent = { HarnessTile(row) },
             supportingContent = { Subline(row) },
             trailingContent = {
-                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    StatusLabel(row)
-                    row.pullRequest?.let { PrBadge(it.number, it.state) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        when {
+                            row.snoozed -> SnoozeBadge(row)
+                            row.archived -> Text(row.timeLabel, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.outline)
+                            else -> StatusLabel(row)
+                        }
+                        row.pullRequest?.let { PrBadge(it.number, it.state) }
+                    }
+                    // Touch has no hover: T3's actions stay one visible tap away.
+                    if (mode.isT3) {
+                        IconButton(onClick = { sheet.value = true }, modifier = Modifier.padding(start = 4.dp).size(40.dp)) {
+                            ZIcon(ZIcons.More, "Actions for ${row.title}", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
                 }
             },
         ) {
@@ -555,11 +671,12 @@ fun SessionItem(row: SessionRow, index: Int, count: Int, actions: RowActions) {
         ActionMenu(
             menu,
             { menu = false },
-            listOf(
+            listOfNotNull(
                 MenuAction(if (row.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(row.id, !row.pinned) },
                 MenuAction("Move to section…", ZIcons.Folder) { moving = true },
                 MenuAction("Rename…", ZIcons.Rename) { renaming = true },
-                MenuAction("Archive", ZIcons.Archive, destructive = true) { actions.archive(row) },
+                if (row.snoozed) MenuAction("Wake now", ZIcons.Wake) { model.wake(row.id) } else null,
+                MenuAction(mode.settle, ZIcons.Archive, destructive = true) { actions.archive(row) },
             ),
         )
         ChoiceMenu(
@@ -573,6 +690,22 @@ fun SessionItem(row: SessionRow, index: Int, count: Int, actions: RowActions) {
                     MenuChoice("New section…", false, leading = { ZIcon(ZIcons.Plus, null, Modifier.size(20.dp)) }) { actions.newSection(row.id) },
                 )),
             ),
+        )
+    }
+    if (sheet.value) {
+        SessionActionsSheet(
+            row,
+            mode,
+            SheetCallbacks(
+                pin = { model.setPinned(row.id, !row.pinned) },
+                move = { moving = true },
+                rename = { renaming = true },
+                settle = { actions.archive(row) },
+                unsettle = { model.unarchive(row.id) },
+                snooze = { model.snooze(row.id, it) },
+                wake = { model.wake(row.id) },
+            ),
+            onDismiss = { sheet.value = false },
         )
     }
     if (renaming) RenameDialog(row.title, onDismiss = { renaming = false }) { model.rename(row.id, it) }
@@ -692,18 +825,36 @@ private fun ReorderPinsSheet(model: AppModel, pinned: List<SessionRow>, onDismis
 }
 
 @Composable
-private fun EmptyState(filter: Filter) {
-    Column(Modifier.fillMaxWidth().padding(48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        ZIcon(ZIcons.Chat, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.outline)
+private fun EmptyState(filter: Filter, mode: SidebarMode, modifier: Modifier = Modifier) {
+    val inboxZero = mode.isT3 && filter == Filter.All
+    Column(modifier.fillMaxWidth().padding(horizontal = 48.dp, vertical = if (inboxZero) 32.dp else 48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        if (inboxZero) {
+            // Inbox zero earns the expressive cookie, not a muted glyph.
+            Box(
+                Modifier.size(64.dp).clip(androidx.compose.material3.MaterialShapes.Cookie9Sided.toShape()).background(MaterialTheme.colorScheme.tertiaryContainer),
+                contentAlignment = Alignment.Center,
+            ) { ZIcon(ZIcons.Settle, null, Modifier.size(28.dp), tint = MaterialTheme.colorScheme.onTertiaryContainer) }
+        } else {
+            ZIcon(ZIcons.Chat, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.outline)
+        }
         Spacer(Modifier.height(12.dp))
         Text(
             when (filter) {
-                Filter.All -> "No sessions yet"
+                Filter.All -> if (inboxZero) "Inbox zero" else "No sessions yet"
                 Filter.NeedsYou -> "Nothing needs you"
                 Filter.Working -> "No agents working"
                 Filter.Pinned -> "Nothing pinned"
             },
             style = MaterialTheme.typography.titleLarge,
         )
+        if (inboxZero) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Running and snoozed sessions wait on the shelves below",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
     }
 }
