@@ -68,6 +68,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ToggleButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -122,9 +123,11 @@ fun Composer(
     val scope = rememberCoroutineScope()
     val focus = remember { FocusRequester() }
     var error by remember { mutableStateOf<String?>(null) }
-    var delivery by remember { mutableStateOf(Delivery.Queue) }
     val running = c.live.turnRunning
     val canSteer = c.host.capabilities.midTurnSteering == true
+    val steerMode by model.steerMode.collectAsState()
+    val preferred = if (steerMode && canSteer) Delivery.Steer else Delivery.Queue
+    var delivery by remember(preferred) { mutableStateOf(preferred) }
 
     // Queue editing: the row being edited, its lease, and the user's own draft parked meanwhile.
     var editingId by remember { mutableStateOf<String?>(null) }
@@ -218,7 +221,7 @@ fun Composer(
             draft.clear()
             model.drafts.save(c.chatId, "")
             error = null
-            delivery = Delivery.Queue
+            delivery = preferred
             // An immediate send gets the runway; one queued behind a live turn
             // takes it over once its bubble lands.
             if (queued) transcript.expectQueuedTurn() else transcript.beginOwnTurn()
