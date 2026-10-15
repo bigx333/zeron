@@ -83,6 +83,16 @@ class MainActivity : ComponentActivity() {
             .maxByOrNull { it.refreshRate }?.modeId ?: 0
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        model.voice.setForeground(hasFocus)
+    }
+
+    override fun onPause() {
+        model.voice.setForeground(false)
+        super.onPause()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleCallback(intent)
@@ -101,6 +111,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        model.voice.setForeground(hasWindowFocus())
         model.browser.resumes.tryEmit(Unit)
     }
 }

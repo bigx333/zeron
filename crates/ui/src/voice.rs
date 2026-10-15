@@ -4,15 +4,15 @@
 //! failure closes it. No automatic reconnect or microphone resume.
 use crate::orb::OrbState;
 use crate::state::EngineHandle;
+#[cfg(target_os = "macos")]
+use futures::FutureExt as _;
+use futures::StreamExt as _;
 use gpui::{Context, Task};
 use gpui_tokio::Tokio;
 use zeron_proto::voice::*;
 mod permissions;
 mod remote;
-
-pub enum VoiceControl {
-    Mute(bool),
-}
+pub(crate) mod shortcut;
 
 pub struct VoiceController {
     pub phase: VoicePhase,
@@ -30,7 +30,17 @@ pub struct VoiceController {
     /// When the session first became active; drives the stage's call timer.
     pub active_since: Option<std::time::Instant>,
     engine: Option<EngineHandle>,
-    controls: Option<tokio::sync::mpsc::Sender<VoiceControl>>,
+    controls: Option<tokio::sync::watch::Sender<bool>>,
+    push_to_talk: bool,
+    manually_muted: bool,
+    shortcut_held: bool,
+    button_held: bool,
+    shortcut_combo: String,
+    shortcut: Option<shortcut::Registration>,
+    shortcut_task: Option<Task<()>>,
+    _input_settings: Option<gpui::Subscription>,
+    _shortcut_recording: Option<Task<()>>,
+    pub push_to_talk_error: Option<String>,
     epoch: u64,
     task: Option<Task<()>>,
     cancellation: tokio_util::sync::CancellationToken,
@@ -59,6 +69,18 @@ impl Default for VoiceController {
             active_since: None,
             engine: None,
             controls: None,
+            push_to_talk: false,
+            manually_muted: false,
+            shortcut_held: false,
+            button_held: false,
+            shortcut_combo: crate::settings::ShortcutId::PushToTalk
+                .default_combo()
+                .into(),
+            shortcut: None,
+            shortcut_task: None,
+            _input_settings: None,
+            _shortcut_recording: None,
+            push_to_talk_error: None,
             epoch: 0,
             task: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
@@ -70,6 +92,143 @@ impl Default for VoiceController {
     }
 }
 impl VoiceController {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let input_settings = cx.observe_global::<crate::settings::SettingsStore>(|this, cx| {
+            this.sync_input_settings(cx);
+        });
+        let mut recording = shortcut::subscribe_recording();
+        let shortcut_recording = cx.spawn(async move |this, cx| {
+            while recording.next().await.is_some() {
+                if this
+                    .update(cx, |this, cx| this.refresh_shortcut(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let settings = crate::settings::current(cx);
+        let mut controller = Self::default();
+        controller.push_to_talk = settings.voice_push_to_talk;
+        controller.shortcut_combo = settings.keymap.push_to_talk;
+        controller._input_settings = Some(input_settings);
+        controller._shortcut_recording = Some(shortcut_recording);
+        controller
+    }
+
+    fn sync_input_settings(&mut self, cx: &mut Context<Self>) {
+        let settings = crate::settings::current(cx);
+        if self.push_to_talk == settings.voice_push_to_talk
+            && self.shortcut_combo == settings.keymap.push_to_talk
+        {
+            return;
+        }
+        if self.push_to_talk != settings.voice_push_to_talk {
+            self.manually_muted = false;
+        }
+        self.push_to_talk = settings.voice_push_to_talk;
+        self.shortcut_combo = settings.keymap.push_to_talk;
+        self.refresh_shortcut(cx);
+    }
+
+    fn refresh_shortcut(&mut self, cx: &mut Context<Self>) {
+        self.shortcut_task = None;
+        self.shortcut = None;
+        self.shortcut_held = false;
+        self.button_held = false;
+        self.push_to_talk_error = None;
+        self.apply_mute(cx);
+        if !self.is_live() || !self.push_to_talk || shortcut::is_recording() {
+            return;
+        }
+        let equivalents = crate::settings::key_equivalents(cx);
+        let registered = shortcut::localized(&self.shortcut_combo, &equivalents)
+            .map_err(|_| "Choose a valid global shortcut in Settings → Voice.".to_owned())
+            .and_then(shortcut::register);
+        let (registration, mut events) = match registered {
+            Ok(registered) => registered,
+            Err(error) => {
+                self.push_to_talk_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        self.shortcut = Some(registration);
+        self.shortcut_task = Some(cx.spawn(async move |this, cx| {
+            #[cfg(target_os = "macos")]
+            let mut held = false;
+            loop {
+                #[cfg(target_os = "macos")]
+                let event = if held {
+                    futures::select_biased! {
+                        event = events.next().fuse() => event,
+                        _ = cx.background_executor().timer(std::time::Duration::from_millis(20)).fuse() => {
+                            match this.update(cx, |this, _| this.shortcut.as_ref().is_some_and(|key| key.modifiers_held())) {
+                                Ok(true) => continue,
+                                Ok(false) => Some(shortcut::Event::Held(false)),
+                                Err(_) => break,
+                            }
+                        },
+                    }
+                } else {
+                    events.next().await
+                };
+                #[cfg(not(target_os = "macos"))]
+                let event = events.next().await;
+                let disconnected = event.is_none();
+                let event = event.unwrap_or_else(|| shortcut::Event::Unavailable(
+                    "Global push-to-talk disconnected. End the call and try again.".into()
+                ));
+                #[cfg(target_os = "macos")]
+                { held = matches!(event, shortcut::Event::Held(true)); }
+                if this.update(cx, |this, cx| match event {
+                    shortcut::Event::Held(held) => {
+                        #[cfg(target_os = "macos")]
+                        let held = held && this.shortcut.as_ref().is_some_and(|key| key.modifiers_held());
+                        this.set_shortcut_held(held, cx);
+                    },
+                    shortcut::Event::Unavailable(error) => {
+                        this.push_to_talk_error = Some(error);
+                        this.set_shortcut_held(false, cx);
+                        cx.notify();
+                    }
+                }).is_err() || disconnected {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn set_shortcut_held(&mut self, held: bool, cx: &mut Context<Self>) {
+        let held = held && self.is_live() && self.push_to_talk && !shortcut::is_recording();
+        if self.shortcut_held != held {
+            self.shortcut_held = held;
+            self.apply_mute(cx);
+        }
+    }
+
+    pub fn push_to_talk(&self) -> bool {
+        self.push_to_talk
+    }
+
+    pub fn hold_button(&mut self, held: bool, cx: &mut Context<Self>) {
+        let held = held && self.is_live() && self.push_to_talk && !shortcut::is_recording();
+        if self.button_held != held {
+            self.button_held = held;
+            self.apply_mute(cx);
+        }
+    }
+
+    fn apply_mute(&mut self, cx: &mut Context<Self>) {
+        let muted = self.muted();
+        if let Some(snapshot) = &mut self.snapshot {
+            snapshot.muted = muted;
+        }
+        if let Some(controls) = &self.controls {
+            controls.send_replace(muted);
+        }
+        cx.notify();
+    }
     /// Voice can be offered here. An unread catalog counts as yes, so a slow
     /// or failed read never hides it; a live call or its failure stays.
     pub fn offered(&self) -> bool {
@@ -134,6 +293,7 @@ impl VoiceController {
         cx: &mut Context<Self>,
     ) {
         self.cancel(cx);
+        self.sync_input_settings(cx);
         // The call sounds as it is placed, well before the microphone opens.
         crate::sound::play_voice(true);
         self.cued = true;
@@ -143,8 +303,9 @@ impl VoiceController {
         self.reason = None;
         let epoch = self.epoch;
         let cancellation = self.cancellation.clone();
-        let (controls, control_rx) = tokio::sync::mpsc::channel(8);
+        let (controls, muted) = tokio::sync::watch::channel(self.muted());
         self.controls = Some(controls);
+        self.refresh_shortcut(cx);
         let (events, mut event_rx) = tokio::sync::mpsc::channel(32);
         let query = Tokio::spawn(cx, async move {
             // Media belongs to this viewport, even when the chosen host is
@@ -156,7 +317,7 @@ impl VoiceController {
                 voice,
                 cancellation,
                 events,
-                control_rx,
+                muted,
             )
             .await
         });
@@ -214,7 +375,15 @@ impl VoiceController {
         self.caption.clear();
         self.microphone_level = 0;
         self.speaker_level = 0;
-        self.controls = None;
+        if let Some(controls) = self.controls.take() {
+            controls.send_replace(true);
+        }
+        self.shortcut_task = None;
+        self.shortcut = None;
+        self.shortcut_held = false;
+        self.button_held = false;
+        self.manually_muted = false;
+        self.push_to_talk_error = None;
         self.task = None;
         self.stage_open = false;
         self.active_since = None;
@@ -235,6 +404,9 @@ impl VoiceController {
 
     pub fn set_stage_open(&mut self, open: bool, cx: &mut Context<Self>) {
         let open = open && self.is_live();
+        if !open {
+            self.hold_button(false, cx);
+        }
         if self.stage_open != open {
             self.stage_open = open;
             cx.notify();
@@ -257,19 +429,12 @@ impl VoiceController {
             .is_some_and(|e| e.same_connection(engine))
     }
     pub fn muted(&self) -> bool {
-        self.snapshot.as_ref().is_some_and(|s| s.muted)
+        self.manually_muted || (self.push_to_talk && !(self.shortcut_held || self.button_held))
     }
     pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {
-        let muted = self.muted();
-        if let Some(snapshot) = &mut self.snapshot {
-            snapshot.muted = !muted;
-        }
-        cx.notify();
-        if let Some(controls) = &self.controls {
-            if controls.try_send(VoiceControl::Mute(!muted)).is_err() {
-                self.cancel(cx);
-                self.reason = Some(VoiceRejection::Overflow);
-            }
+        if !self.push_to_talk {
+            self.manually_muted = !self.manually_muted;
+            self.apply_mute(cx);
         }
     }
 
@@ -298,6 +463,7 @@ impl VoiceController {
     pub fn reduce(&mut self, event: VoiceEvent, cx: &mut Context<Self>) {
         match event {
             VoiceEvent::Snapshot { mut snapshot } => {
+                snapshot.muted = self.muted();
                 if let Some(previous) = &self.snapshot {
                     snapshot.playing = previous.playing;
                 }
@@ -457,6 +623,146 @@ mod tests {
             voice: None,
             voices: Vec::new(),
         }
+    }
+
+    #[gpui::test]
+    fn push_to_talk_starts_muted_and_only_transmits_while_a_control_is_held(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let voice = cx.new(|_| {
+            let mut voice = VoiceController::default();
+            voice.phase = VoicePhase::Checking;
+            voice.push_to_talk = true;
+            voice
+        });
+        voice.update(cx, |voice, cx| {
+            let (controls, mut muted) = tokio::sync::watch::channel(voice.muted());
+            voice.controls = Some(controls);
+            assert!(
+                *muted.borrow_and_update(),
+                "startup must never briefly open the microphone"
+            );
+            voice.reduce(
+                VoiceEvent::Snapshot {
+                    snapshot: snapshot(),
+                },
+                cx,
+            );
+            assert!(
+                voice.snapshot.as_ref().unwrap().muted,
+                "host snapshots cannot reopen the local microphone"
+            );
+            voice.toggle_mute(cx);
+            assert!(voice.muted(), "clicks and M cannot latch push-to-talk open");
+
+            voice.set_shortcut_held(true, cx);
+            assert!(!*muted.borrow_and_update());
+            voice.reduce(
+                VoiceEvent::Snapshot {
+                    snapshot: snapshot(),
+                },
+                cx,
+            );
+            assert!(!voice.snapshot.as_ref().unwrap().muted);
+            voice.set_shortcut_held(true, cx); // key repeat
+            assert!(!muted.has_changed().unwrap());
+            voice.set_shortcut_held(false, cx);
+            assert!(*muted.borrow_and_update());
+            assert_eq!(voice.microphone_level(), 0.0);
+
+            voice.set_shortcut_held(true, cx);
+            voice.set_shortcut_held(false, cx);
+            assert!(
+                *muted.borrow_and_update(),
+                "rapid press/release keeps only the latest state"
+            );
+
+            voice.hold_button(true, cx);
+            voice.set_shortcut_held(true, cx);
+            voice.hold_button(false, cx);
+            assert!(
+                !*muted.borrow_and_update(),
+                "the shortcut is still physically held"
+            );
+            voice.set_shortcut_held(false, cx);
+            assert!(*muted.borrow_and_update());
+        });
+    }
+
+    #[gpui::test]
+    fn push_to_talk_hiding_the_hold_button_and_ending_a_call_close_the_microphone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let voice = cx.new(|_| {
+            let mut voice = VoiceController::default();
+            voice.phase = VoicePhase::Active;
+            voice.push_to_talk = true;
+            voice.stage_open = true;
+            voice
+        });
+        voice.update(cx, |voice, cx| {
+            let (controls, mut muted) = tokio::sync::watch::channel(true);
+            voice.controls = Some(controls);
+            voice.hold_button(true, cx);
+            assert!(!*muted.borrow_and_update());
+            voice.set_stage_open(false, cx);
+            assert!(*muted.borrow_and_update());
+            voice.set_shortcut_held(true, cx);
+            assert!(!*muted.borrow_and_update());
+            voice.cancel(cx);
+            assert!(*muted.borrow_and_update());
+            voice.set_shortcut_held(true, cx);
+            voice.hold_button(true, cx);
+            assert!(voice.muted(), "late presses cannot reopen a closed call");
+        });
+    }
+
+    #[gpui::test]
+    fn push_to_talk_setting_changes_clear_holds_and_preserve_hands_free_muting(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx)
+        });
+        let voice = cx.new(|_| VoiceController::default());
+        voice.update(cx, |voice, cx| {
+            voice.phase = VoicePhase::Active;
+            voice.toggle_mute(cx);
+            assert!(voice.muted());
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |s| {
+                s.keymap.push_to_talk = "ctrl-alt-v".into();
+            });
+            voice.sync_input_settings(cx);
+            assert!(
+                voice.muted(),
+                "editing the hold shortcut preserves a hands-free manual mute"
+            );
+            voice.push_to_talk = true;
+            voice.manually_muted = false;
+            voice.shortcut_held = true;
+            assert!(!voice.muted());
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |s| {
+                s.voice_push_to_talk = true;
+                s.keymap.push_to_talk = "unsupported-key".into();
+            });
+            voice.sync_input_settings(cx);
+            assert!(voice.muted(), "rebinding requires a fresh press");
+            assert!(
+                voice.push_to_talk_error.is_some(),
+                "registration failures explain why the mic stays closed"
+            );
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |s| {
+                s.voice_push_to_talk = false
+            });
+            voice.sync_input_settings(cx);
+            assert!(
+                !voice.muted(),
+                "switching back to hands-free restores its normal behavior"
+            );
+            voice.toggle_mute(cx);
+            assert!(voice.muted());
+        });
     }
 
     #[test]

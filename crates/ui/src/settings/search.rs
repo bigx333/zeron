@@ -139,6 +139,8 @@ settings_index! {
         "remote host machine"),
     (CodexVoiceStyle, Voice, None, "Codex voice style",
         "speech tone"),
+    (VoiceMode, Voice, None, "Voice input mode",
+        "hands-free push to talk ptt hold transmit microphone call"),
     (Dictation, Voice, None, "Dictation",
         "speech to text transcribe talk"),
     (Microphone, Voice, None, "Microphone",
@@ -208,7 +210,13 @@ impl SettingId {
 }
 
 /// Shortcuts recorded on a feature page rather than on Shortcuts.
-const FEATURE_SHORTCUTS: [(ShortcutId, SettingsSection, &str, &str); 2] = [
+const FEATURE_SHORTCUTS: [(ShortcutId, SettingsSection, &str, &str); 3] = [
+    (
+        ShortcutId::PushToTalk,
+        SettingsSection::Voice,
+        "Push-to-talk shortcut",
+        "ptt hold transmit talk call global keybinding hotkey",
+    ),
     (
         ShortcutId::ToggleDictation,
         SettingsSection::Voice,
@@ -243,6 +251,10 @@ impl Target {
                 Some(Target::Page(SettingsSection::Harnesses))
             }
             Target::Setting(id) => id.parent().map(Target::Setting),
+            // Push to talk's shortcut shows only once that mode is chosen.
+            Target::Shortcut(ShortcutId::PushToTalk) => {
+                Some(Target::Setting(SettingId::VoiceMode))
+            }
             Target::Shortcut(_) | Target::Page(_) => None,
         }
     }

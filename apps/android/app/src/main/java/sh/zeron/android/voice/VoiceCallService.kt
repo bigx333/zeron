@@ -181,6 +181,7 @@ class VoiceCallService : Service() {
         val caller = Person.Builder().setName("Codex on $host").setImportant(true).build()
         val status = when {
             !snapshot.active -> snapshot.statusText
+            snapshot.pushToTalk -> if (snapshot.muted) "Hold to talk in Zeron" else "Transmitting"
             snapshot.awaitingInput -> "Codex needs your answer"
             snapshot.muted -> "Muted"
             else -> snapshot.statusText
@@ -197,11 +198,13 @@ class VoiceCallService : Service() {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setStyle(NotificationCompat.CallStyle.forOngoingCall(caller, pending(ACTION_END, 3)))
-            .addAction(
+        if (!snapshot.pushToTalk) {
+            builder.addAction(
                 if (snapshot.muted) R.drawable.zi_microphone else R.drawable.zi_microphone_off,
                 if (snapshot.muted) "Unmute" else "Mute",
                 pending(ACTION_MUTE, 2),
             )
+        }
         val since = snapshot.activeSinceWall
         if (since != null) {
             builder.setWhen(since).setShowWhen(true).setUsesChronometer(true)

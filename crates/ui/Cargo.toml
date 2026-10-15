@@ -7,6 +7,7 @@ publish.workspace = true
 
 [features]
 voice-experimental = [] # Compatibility flag; native subscription voice uses Codex's packaged helper.
+voice-fixture = []
 project-palette-fixture = []
 # New project's typed path against a real engine, filmed in process.
 project-path-fixture = ["gpui_platform/test-support"]
@@ -19,6 +20,10 @@ windows-render-fixture = []
 appshots-fixture = ["gpui_platform/test-support"]
 pull-request-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
+
+[[example]]
+name = "voice-fixture"
+required-features = ["voice-fixture"]
 
 [[example]]
 name = "macos-resource-profile"

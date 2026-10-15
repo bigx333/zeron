@@ -45,6 +45,7 @@ import uniffi.zeron_core.VoiceCallState
 import uniffi.zeron_core.VoiceCallWork
 import uniffi.zeron_core.VoiceEndReason
 import uniffi.zeron_core.VoiceOrb
+import uniffi.zeron_core.VoiceInputMode
 import uniffi.zeron_core.VoiceSessionListener
 import uniffi.zeron_core.VoiceSpeaker
 import uniffi.zeron_core.WorkspaceSnapshot
@@ -67,6 +68,7 @@ data class VoiceSnapshot(
     /** Why the last call ended on its own; cleared by the next start. */
     val endReason: VoiceEndReason? = null,
     val muted: Boolean = false,
+    val pushToTalk: Boolean = false,
     val hostName: String = "",
     /** `SystemClock.elapsedRealtime()` when the call went live. */
     val activeSince: Long? = null,
@@ -100,6 +102,7 @@ data class VoiceSnapshot(
             val state = state ?: return if (live) "Calling $hostName…" else "Codex voice"
             if (state.phase == VoiceCallPhase.CONNECTING) return "Connecting to $hostName…"
             if (state.phase == VoiceCallPhase.ENDING) return "Ending…"
+            if (pushToTalk) return if (muted) "Hold to talk" else "Transmitting · Release to mute"
             return when (state.orb) {
                 VoiceOrb.SPEAKING -> "Speaking"
                 VoiceOrb.AWAITING_INPUT -> "Codex needs your answer"
@@ -182,6 +185,8 @@ class VoiceController(
     private var generation = 0L
     private var stageViews = 0
     private var proximity: Proximity? = null
+    private val holds = mutableSetOf<Any>()
+    private var foreground = false
 
     /** Development override (`--ez remote-voice true`): offer voice before any host advertises it. */
     var forced: Boolean = false
@@ -266,6 +271,7 @@ class VoiceController(
         val key = preferenceKey
         _selectedHost.value = prefs.getString("$key.host", null)
         _selectedStyle.value = prefs.getString("$key.style", null)
+        applyInputMode(prefs.getBoolean("$key.pushToTalk", false))
     }
 
     /** Remember the host for the next call (not while one runs). */
@@ -278,6 +284,50 @@ class VoiceController(
     fun selectStyle(style: String?) {
         prefs.edit().putString("$preferenceKey.style", style).apply()
         _selectedStyle.value = style
+    }
+
+    fun selectInputMode(pushToTalk: Boolean) {
+        prefs.edit().putBoolean("$preferenceKey.pushToTalk", pushToTalk).apply()
+        applyInputMode(pushToTalk)
+    }
+
+    private fun applyInputMode(pushToTalk: Boolean) {
+        if (_snapshot.value.pushToTalk == pushToTalk) return
+        holds.clear()
+        media?.muteLocally(pushToTalk)
+        call?.setInputMode(if (pushToTalk) VoiceInputMode.PUSH_TO_TALK else VoiceInputMode.HANDS_FREE)
+        _snapshot.update { it.copy(pushToTalk = pushToTalk).withInputMuted(pushToTalk) }
+        VoiceCallService.refresh(context)
+    }
+
+    /** Touch holds are valid only while the app has focus. */
+    fun setForeground(active: Boolean) {
+        foreground = active
+        if (!active) releaseHolds()
+    }
+
+    fun hold(held: Boolean, source: Any) {
+        val s = _snapshot.value
+        if (held) {
+            if (!s.live || !s.pushToTalk || !foreground) return
+            holds.add(source)
+        } else holds.remove(source)
+        if (!s.pushToTalk) return
+        updateHold()
+    }
+
+    fun releaseHolds() {
+        holds.clear()
+        if (_snapshot.value.pushToTalk) updateHold()
+    }
+
+    private fun updateHold() {
+        val muted = holds.isEmpty()
+        // Native capture closes before a core callback or relay round trip.
+        media?.muteLocally(muted)
+        call?.setPushToTalkHeld(!muted)
+        _snapshot.update { it.withInputMuted(muted) }
+        VoiceCallService.refresh(context)
     }
 
     // ── Call ───────────────────────────────────────────────────────────────
@@ -301,11 +351,13 @@ class VoiceController(
         val generation = generation
         _notice.value = null
         val previous = _snapshot.value
+        holds.clear()
         val media = VoiceMedia(context, this, speakerOn = previous.speakerOn)
+        media.muteLocally(previous.pushToTalk)
         media.onFailure = { if (this.generation == generation) finish(VoiceEndReason.AUDIO_UNAVAILABLE) }
         media.onRoute = { route -> if (this.generation == generation) _snapshot.update { it.copy(route = route) } }
         val call = try {
-            client.startVoice(device.id, _selectedStyle.value, media, Bridge(this, generation))
+            client.startVoiceWithInputMode(device.id, _selectedStyle.value, if (previous.pushToTalk) VoiceInputMode.PUSH_TO_TALK else VoiceInputMode.HANDS_FREE, media, Bridge(this, generation))
         } catch (e: Exception) {
             Log.w(TAG, "startVoice failed", e)
             media.close()
@@ -316,6 +368,8 @@ class VoiceController(
         this.media = media
         _snapshot.value = VoiceSnapshot(
             live = true,
+            pushToTalk = previous.pushToTalk,
+            muted = previous.pushToTalk,
             hostName = device.name,
             styles = previous.styles,
             speakerOn = previous.speakerOn,
@@ -329,11 +383,11 @@ class VoiceController(
 
     fun toggleMute() {
         val s = _snapshot.value
-        if (!s.live) return
+        if (!s.live || s.pushToTalk) return
         val muted = !s.muted
         media?.muteLocally(muted)
         call?.let { c -> runCatching { c.setMuted(muted) } }
-        _snapshot.update { it.copy(muted = muted, state = if (it.previewing) it.state?.copy(muted = muted) else it.state) }
+        _snapshot.update { it.withInputMuted(muted) }
         VoiceCallService.refresh(context)
     }
 
@@ -385,6 +439,7 @@ class VoiceController(
     }
 
     private fun finish(reason: VoiceEndReason?) {
+        releaseHolds()
         stopPreview()
         generation++
         val s = _snapshot.value
@@ -421,7 +476,7 @@ class VoiceController(
         val becameActive = state.phase == VoiceCallPhase.ACTIVE && s.state?.phase != VoiceCallPhase.ACTIVE
         _snapshot.update {
             it.copy(
-                state = state,
+                state = state.withInputMuted(it.muted),
                 styles = state.voices.ifEmpty { it.styles },
                 activeSince = if (becameActive) SystemClock.elapsedRealtime() else it.activeSince,
                 activeSinceWall = if (becameActive) System.currentTimeMillis() else it.activeSinceWall,
@@ -517,7 +572,7 @@ class VoiceController(
                 previewing = true,
                 hostName = "Fedora",
                 endReason = null,
-                muted = false,
+                muted = it.pushToTalk,
                 activeSince = SystemClock.elapsedRealtime() - 83_000,
                 activeSinceWall = System.currentTimeMillis() - 83_000,
             )
@@ -689,3 +744,17 @@ private class Proximity(context: Context, private val onChange: (Boolean) -> Uni
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 }
+
+/** Late core frames cannot override the native microphone gate. */
+private fun VoiceCallState.withInputMuted(muted: Boolean): VoiceCallState = copy(
+    muted = muted,
+    microphone = if (muted) 0f else microphone,
+    orb = when {
+        muted && orb == VoiceOrb.LISTENING -> VoiceOrb.MUTED
+        !muted && orb == VoiceOrb.MUTED -> VoiceOrb.LISTENING
+        else -> orb
+    },
+)
+
+private fun VoiceSnapshot.withInputMuted(muted: Boolean): VoiceSnapshot =
+    copy(muted = muted, state = state?.withInputMuted(muted))

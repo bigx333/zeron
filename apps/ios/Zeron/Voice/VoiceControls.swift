@@ -139,6 +139,15 @@ final class VoiceAccessoryView: UIView {
     }
 }
 
+extension UIControl {
+    /// A press is never latched: leaving the button or cancelling a touch
+    /// closes the microphone just like lifting the finger.
+    func addVoiceHoldActions(_ action: @escaping (Bool) -> Void) {
+        addAction(UIAction { _ in action(true) }, for: [.touchDown, .touchDragEnter])
+        addAction(UIAction { _ in action(false) }, for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit])
+    }
+}
+
 /// A plain control that dims while pressed.
 class PressableControl: UIControl {
     override var isHighlighted: Bool {

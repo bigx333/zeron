@@ -9,6 +9,7 @@ final class NativeVoiceMedia: VoiceMediaListener {
     private var operations: [UInt64: Task<Void, Never>] = [:]
     private var closed = false
     private var activated = false
+    private var localMuted = false
     var onFailure: (() -> Void)?
 
     init() {
@@ -45,7 +46,7 @@ final class NativeVoiceMedia: VoiceMediaListener {
                     guard let answer = request.sdp else { throw CodexVoicePeer.Failure.unavailable }
                     try await self.peer.apply(answer: answer)
                 case .setMuted:
-                    try self.peer.setMuted(request.muted)
+                    try self.peer.setMuted(request.muted || self.localMuted)
                     self.activated = true
                 case .levels: (microphone, speaker) = try await self.peer.levels()
                 case .close: self.close()
@@ -61,6 +62,7 @@ final class NativeVoiceMedia: VoiceMediaListener {
     }
 
     func muteLocally(_ muted: Bool) {
+        localMuted = muted
         // UI mute never waits for the Rust control queue or the relay.
         guard !closed, activated else { return }
         try? peer.setMuted(muted)

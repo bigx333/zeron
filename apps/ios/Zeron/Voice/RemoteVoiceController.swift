@@ -19,6 +19,9 @@ final class RemoteVoiceController {
     private var generation: UInt64 = 0
     private var observers: [UUID: () -> Void] = [:]
     private var proximity: NSObjectProtocol?
+    private var inactive: NSObjectProtocol?
+    enum HoldSource: Hashable { case stage }
+    private var holds: Set<HoldSource> = []
     /// The call in the Dynamic Island and on the Lock Screen.
     private let liveActivity = VoiceActivityController()
 
@@ -44,6 +47,9 @@ final class RemoteVoiceController {
     init(app: AppModel) {
         self.app = app
         liveActivity.attach(to: self)
+        inactive = NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.releaseHolds() }
+        }
     }
 
     // MARK: Hosts and preferences
@@ -72,6 +78,43 @@ final class RemoteVoiceController {
         set { UserDefaults.standard.set(newValue, forKey: preferenceKey + ".style"); changed() }
     }
 
+    var inputMode: VoiceInputMode {
+        get { UserDefaults.standard.string(forKey: preferenceKey + ".inputMode") == "pushToTalk" ? .pushToTalk : .handsFree }
+        set {
+            guard newValue != inputMode else { return }
+            holds.removeAll()
+            UserDefaults.standard.set(newValue == .pushToTalk ? "pushToTalk" : "handsFree", forKey: preferenceKey + ".inputMode")
+            muted = newValue == .pushToTalk
+            media?.muteLocally(muted)
+            call?.setInputMode(mode: newValue)
+            changed()
+        }
+    }
+    var pushToTalk: Bool { inputMode == .pushToTalk }
+    func hold(_ held: Bool, source: HoldSource) {
+        if held {
+            guard live, pushToTalk, UIApplication.shared.applicationState == .active else { return }
+            holds.insert(source)
+        } else { holds.remove(source) }
+        guard pushToTalk else { return }
+        let muted = holds.isEmpty
+        guard muted != self.muted else { return }
+        self.muted = muted
+        // Close native capture before notifying Rust or waiting for a relay.
+        media?.muteLocally(muted)
+        call?.setPushToTalkHeld(held: !muted)
+        changed()
+    }
+
+    func releaseHolds() {
+        holds.removeAll()
+        guard pushToTalk else { return }
+        muted = true
+        media?.muteLocally(true)
+        call?.setPushToTalkHeld(held: false)
+        changed()
+    }
+
     /// The host a plain tap calls: the chosen one, or the only one online.
     var startHost: DeviceView? {
         let hosts = self.hosts
@@ -84,7 +127,18 @@ final class RemoteVoiceController {
         observers[id] = callback
         return Token { [weak self] in self?.observers[id] = nil }
     }
-    private func changed() { for callback in observers.values { callback() } }
+    private func changed() {
+        // Native capture is authoritative; late core frames must not show a
+        // released microphone as transmitting.
+        if var state {
+            state.muted = muted
+            if muted { state.microphone = 0 }
+            if muted && state.orb == .listening { state.orb = .muted }
+            else if !muted && state.orb == .muted { state.orb = .listening }
+            self.state = state
+        }
+        for callback in observers.values { callback() }
+    }
 
     // MARK: Call
 
@@ -95,9 +149,11 @@ final class RemoteVoiceController {
         guard !live, let client = app?.client, let device = host ?? startHost else { return false }
         if host != nil { selectedHost = device.id }
         generation &+= 1
-        state = nil; endReason = nil; muted = false; activeSince = nil
+        holds.removeAll()
+        state = nil; endReason = nil; muted = pushToTalk; activeSince = nil
         hostName = device.name
         let media = NativeVoiceMedia()
+        media.muteLocally(muted)
         self.media = media
         let generation = self.generation
         media.onFailure = { [weak self] in
@@ -105,7 +161,7 @@ final class RemoteVoiceController {
             self.finish(reason: .audioUnavailable)
         }
         let listener = VoiceListenerBridge(controller: self, generation: generation)
-        let call = client.startVoice(hostDeviceId: device.id, voice: selectedStyle, media: media, listener: listener)
+        let call = client.startVoiceWithInputMode(hostDeviceId: device.id, voice: selectedStyle, inputMode: inputMode, media: media, listener: listener)
         self.call = call
         media.call = call
         // A call keeps the screen awake, like the phone app.
@@ -118,7 +174,7 @@ final class RemoteVoiceController {
     }
 
     func toggleMute() {
-        guard live else { return }
+        guard live, !pushToTalk else { return }
         muted.toggle()
         media?.muteLocally(muted)
         call?.setMuted(muted: muted)
@@ -140,6 +196,7 @@ final class RemoteVoiceController {
     }
 
     private func finish(reason: VoiceEndReason?) {
+        releaseHolds()
         #if DEBUG
         previewing = false
         previewTimer?.invalidate()
@@ -230,6 +287,7 @@ final class RemoteVoiceController {
         guard let state else { return live ? "Calling \(hostName)…" : "Codex voice" }
         if state.phase == .connecting { return "Connecting to \(hostName)…" }
         if state.phase == .ending { return "Ending…" }
+        if pushToTalk { return muted ? "Hold to talk" : "Transmitting · Release to mute" }
         switch state.orb {
         case .speaking: return "Speaking"
         case .awaitingInput: return "Codex needs your answer"
@@ -264,6 +322,7 @@ final class RemoteVoiceController {
     /// orb walks through listening, speaking and working with synthetic
     /// levels. No audio, host or relay is involved.
     func preview() {
+        muted = pushToTalk
         previewing = true
         hostName = "Fedora"
         activeSince = Date().addingTimeInterval(-83)

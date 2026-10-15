@@ -3,7 +3,7 @@
 
 mod atspi;
 mod portal;
-mod x11;
+pub(super) mod x11;
 
 use std::fs;
 use std::os::unix::net::UnixDatagram;
