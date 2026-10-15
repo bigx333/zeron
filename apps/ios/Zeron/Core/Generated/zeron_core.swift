@@ -1094,7 +1094,7 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func listFolders(deviceId: String, path: String?) async throws  -> FolderListing
     
     /**
-     * Browse folders on a device (`None` = its home folder).
+     * Browse repositories available to the selected host's GitHub CLI account.
      */
     func listGithubRepositories(deviceId: String, cursor: String?) async throws  -> GitHubRepositoryPage
     
@@ -1577,7 +1577,7 @@ open func listFolders(deviceId: String, path: String?)async throws  -> FolderLis
 }
     
     /**
-     * Browse folders on a device (`None` = its home folder).
+     * Browse repositories available to the selected host's GitHub CLI account.
      */
 open func listGithubRepositories(deviceId: String, cursor: String?)async throws  -> GitHubRepositoryPage  {
     return
@@ -17244,7 +17244,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_folders() != 2324) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_zeron_mobile_checksum_method_coreclient_list_github_repositories() != 19228) {
+    if (uniffi_zeron_mobile_checksum_method_coreclient_list_github_repositories() != 52734) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_harnesses() != 2345) {
