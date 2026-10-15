@@ -47,6 +47,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -435,6 +436,11 @@ private class SwipeAction(val label: String, val icon: Int, val run: () -> Boole
 private fun SwipeableSessionRow(row: SessionRow, index: Int, count: Int, actions: RowActions) {
     val state = rememberSwipeToDismissBoxState()
     val scope = rememberCoroutineScope()
+    // The lazy list keeps a removed row's saved swipe state under its key, so
+    // a row brought back (Undo, unsettle) would return still swiped away.
+    LaunchedEffect(Unit) {
+        if (state.currentValue != SwipeToDismissBoxValue.Settled) state.snapTo(SwipeToDismissBoxValue.Settled)
+    }
     val shape = segmentedShapes(index, count).shape
     val sheet = remember { mutableStateOf(false) }
     val model = actions.model
