@@ -287,12 +287,13 @@ fn t3_lanes_preserve_pins_sections_and_default_order() {
     client.assign_section("chat-tabs", None).unwrap();
     client.assign_section("chat-errored", None).unwrap();
     let ws = client.workspace();
-    assert_eq!(ws.front.recent[0].id, "chat-cjk");
+    assert_eq!(ws.front.recent[0].id, "chat-visuals");
     assert_eq!(
         ids(&ws.t3_front.recent),
         [
             "chat-tabs",
             "chat-errored",
+            "chat-visuals",
             "chat-cjk",
             "chat-home",
             "chat-deploy",
