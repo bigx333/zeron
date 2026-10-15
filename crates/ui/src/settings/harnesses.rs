@@ -1819,6 +1819,7 @@ mod tests {
                         zeron_proto::AgentAccountsSnapshot {
                             accounts: vec![account],
                             warnings: Vec::new(),
+                            pool: Default::default(),
                         },
                     );
             })

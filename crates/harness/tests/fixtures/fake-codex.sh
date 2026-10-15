@@ -72,6 +72,16 @@ if has "$line" '"method":"thread/resume"'; then
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\",\"turns\":[{\"items\":[{\"type\":\"collabAgentToolCall\",\"id\":\"spawn-alpha\",\"tool\":\"spawnAgent\",\"status\":\"completed\",\"receiverThreadIds\":[\"child-alpha\"]}]}]}}}"
   elif has "$line" '"threadId":"resume-with-child-v2"'; then
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\",\"turns\":[{\"items\":[{\"type\":\"subAgentActivity\",\"id\":\"spawn-alpha\",\"kind\":\"started\",\"agentThreadId\":\"child-alpha\",\"agentPath\":\"/root/alpha\"},{\"type\":\"subAgentActivity\",\"id\":\"subagent-completed-old\",\"kind\":\"completed\",\"agentThreadId\":\"child-alpha\",\"agentPath\":\"/root/alpha\"}]}]}}}"
+  elif has "$line" '"threadId":"resume-after-pool-off"'; then
+    emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32600,\"message\":\"failed to load configuration: Model provider zeron-pool not found\"}}"
+    read -r line || exit 1
+    has "$line" '"method":"config/read"' || exit 1
+    emit "{\"id\":$(rid "$line"),\"result\":{\"config\":{\"model_provider\":\"openai\"}}}"
+    read -r line || exit 1
+    has "$line" '"method":"thread/resume"' || exit 1
+    has "$line" '"threadId":"resume-after-pool-off"' || exit 1
+    has "$line" '"modelProvider":"openai"' || exit 1
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\"}}}"
   elif has "$line" '"threadId":"resume-fail"'; then
     # Missing rollout (live 0.164.0 wording): reject, expect the fresh-start
     # fallback.

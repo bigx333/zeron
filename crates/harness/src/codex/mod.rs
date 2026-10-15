@@ -913,6 +913,13 @@ fn spawn_app_server(exe: &Path, request: &RunRequest) -> Result<AppServer, Harne
     // Host-resolved credentials (a Cloud device's managed CODEX_HOME,
     // GH_TOKEN, …). Absent on laptops: the CLI's own login is used.
     crate::apply_run_env(&mut cmd, &request.env);
+    // A pooled run reaches the engine's loopback hub through a temporary
+    // provider; the hub's capability rides `request.env`, never an argument.
+    if let Some(route) = crate::AccountPoolRoute::from_env(HarnessId::Codex, &request.env) {
+        for setting in route.codex_config() {
+            cmd.args(["-c", &setting]);
+        }
+    }
     if !request.cwd.is_empty() {
         cmd.current_dir(&request.cwd);
     }
@@ -1362,8 +1369,15 @@ async fn run_session(session: Session) {
     let asks_person = |live: &RunRequest| !title_only && !run_access(live).is_full_access();
     let start_tier = service_tier(&request);
 
+    let pooled = crate::AccountPoolRoute::from_env(HarnessId::Codex, &request.env).is_some();
     let start_params = {
         let mut p = serde_json::Map::new();
+        if pooled {
+            p.insert(
+                "modelProvider".into(),
+                crate::AccountPoolRoute::CODEX_PROVIDER.into(),
+            );
+        }
         if title_only {
             p.insert("baseInstructions".into(), crate::TITLE_INSTRUCTIONS.into());
             p.insert(
@@ -1565,10 +1579,31 @@ async fn run_session(session: Session) {
         let thread = if let Some(resume) = &request.resume {
             let mut p = start_params.clone();
             p.insert("threadId".into(), Value::String(resume.clone()));
-            match resume_thread(&client, Value::Object(p))
-                .await
-                .map_err(|e| (resume_unrecoverable(&e), e))
+            let mut resumed = resume_thread(&client, Value::Object(p.clone())).await;
+            // Rollouts remember their model provider. When pooling is turned
+            // off, resume that same history with the user's configured provider
+            // instead of treating the missing temporary provider as a lost chat.
+            if !pooled
+                && resumed
+                    .as_ref()
+                    .is_err_and(|e| {
+                        e.to_string()
+                            .contains(crate::AccountPoolRoute::CODEX_PROVIDER)
+                    })
+                && let Ok(config) = client
+                    .request(
+                        "config/read",
+                        json!({"includeLayers": false, "cwd": request.cwd}),
+                    )
+                    .await
             {
+                let provider = config["config"]["model_provider"]
+                    .as_str()
+                    .unwrap_or("openai");
+                p.insert("modelProvider".into(), provider.into());
+                resumed = resume_thread(&client, Value::Object(p)).await;
+            }
+            match resumed.map_err(|e| (resume_unrecoverable(&e), e)) {
                 Ok(thread) => thread,
                 // A missing/unreadable/foreign rollout falls back to a fresh
                 // thread — visibly: the reply will not know the earlier

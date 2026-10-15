@@ -346,6 +346,7 @@ impl EngineCore {
         registry.set_account_environment(Arc::new(agent_accounts::MuseRunEnvironment(
             agent_accounts.clone(),
         )));
+        sessions.set_agent_accounts(agent_accounts.clone());
         let harness_updates =
             harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
         harness_updates.start();
@@ -605,6 +606,7 @@ impl EngineCore {
         self.sessions.shutdown().await;
         self.terminals.shutdown();
         self.sessions.stop_activity_projection().await;
+        self.agent_accounts.drain_pool_refreshes().await;
         self.agent_accounts.shutdown();
         self.change_requests.shutdown();
         // Cancel + await every worker that can reach Edge before flushing: a

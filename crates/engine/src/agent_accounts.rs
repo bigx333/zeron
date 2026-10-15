@@ -106,6 +106,7 @@ pub struct RelayedCallback {
 
 mod muse;
 mod oauth;
+mod pool;
 #[cfg(test)]
 mod provider_tests;
 pub use muse::MuseRunEnvironment;
@@ -521,6 +522,9 @@ struct UsageSnapshot {
     windows: Vec<AgentUsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     plan_label: Option<String>,
+    /// The credential version actually sent by a probe that can refresh first.
+    #[serde(skip)]
+    credential_version: Option<String>,
 }
 
 /// Why a usage probe produced no windows. Drives the backoff and the reason
@@ -630,6 +634,11 @@ struct UsageEntry {
     usage: Option<UsageSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fetched_at: Option<i64>,
+    /// Version that produced the retained successful measurement, including
+    /// when a later attempt failed. A success from an old token cannot recover
+    /// an authentication error against a newer slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage_credentials: Option<String>,
     /// The last probe's failure; cleared by the next success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<ProbeError>,
@@ -672,6 +681,7 @@ impl UsageEntry {
             Ok(usage) => {
                 self.usage = Some(usage);
                 self.fetched_at = Some(now);
+                self.usage_credentials = Some(credentials);
                 self.error = None;
                 self.retry_at = None;
                 self.credentials = None;
@@ -751,6 +761,7 @@ struct CachedClaudeCredentials {
 }
 
 struct Inner {
+    pool: pool::PoolState,
     config: AgentAccountsConfig,
     http: reqwest::Client,
     endpoints: ProbeEndpoints,
@@ -857,6 +868,7 @@ impl AgentAccounts {
             .unwrap_or_default();
         Self {
             inner: Arc::new(Inner {
+                pool: pool::PoolState::new(&root),
                 config,
                 http,
                 endpoints,
@@ -1104,7 +1116,16 @@ impl AgentAccounts {
         if let Some(login) = antigravity {
             accounts.push(login.account());
         }
-        Ok(AgentAccountsSnapshot { accounts, warnings })
+        self.order_pool_accounts(&mut accounts);
+        // Live request headers can be newer than the last usage probe.
+        self.apply_pool_usage(&mut accounts);
+        let mut snapshot = AgentAccountsSnapshot {
+            accounts,
+            warnings,
+            pool: self.pool_snapshot(),
+        };
+        Self::include_unsaved_pool_statuses(&mut snapshot);
+        Ok(snapshot)
     }
 
     // ── swap ────────────────────────────────────────────────────────────────
@@ -1150,6 +1171,9 @@ impl AgentAccounts {
                     "That saved login no longer exists — refresh and try again.".into(),
                 )
             })?;
+        if harness == HarnessId::ClaudeCode && slot.profile.auth_kind == AgentAuthKind::ApiKey {
+            return Err(EngineError::Other("API-key accounts are used through the account pool and cannot replace the CLI login".into()));
+        }
         match harness {
             HarnessId::ClaudeCode => {
                 let slot = self.revive_claude_slot(slot).await?;
@@ -1511,6 +1535,7 @@ impl AgentAccounts {
         if file.exists() {
             std::fs::remove_file(&file)?;
         }
+        self.forget_pending_pool_slot(account_id);
         self.list_locked(false).await
     }
 
@@ -2656,6 +2681,9 @@ impl AgentAccounts {
     /// Engine shutdown: kill any in-flight login child so an orphan `codex login`
     /// can't survive the restart and brick the next attempt.
     pub fn shutdown(&self) {
+        self.retry_pool_credential_saves();
+        self.flush_pool();
+        self.inner.pool.shutdown();
         let ids: Vec<String> = lock(&self.inner.flows).keys().cloned().collect();
         for id in ids {
             self.cancel_login(&id);
@@ -2819,6 +2847,9 @@ impl AgentAccounts {
 
     /// One saved slot by id (`None` when missing or unparseable).
     fn read_slot(&self, harness: HarnessId, id: &str) -> Option<Slot> {
+        if let Some(slot) = self.pending_pool_slot(harness, id) {
+            return Some(slot);
+        }
         let file = self.slots_dir(harness).ok()?.join(format!("{id}.json"));
         serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()
     }
@@ -2952,6 +2983,7 @@ impl AgentAccounts {
                 slots.push(slot);
             }
         }
+        self.merge_pending_pool_slots(harness, &mut slots);
         // Creation order — stable across switches (saved_at churns on every
         // auto-snapshot; created_at never does). Slot id breaks creation-time
         // ties: two logins saved in the same millisecond otherwise land in
@@ -2993,7 +3025,11 @@ impl AgentAccounts {
             .map_err(|e| EngineError::Other(format!("serialize slot: {e}")))?;
         // Atomic + 0600 from birth: tokens must never be world-readable, and a
         // crash mid-write must never leave torn JSON.
-        write_file_atomic(&file, json.as_bytes(), true)
+        let result = write_file_atomic(&file, json.as_bytes(), true);
+        if result.is_ok() {
+            self.forget_pending_pool_slot(&slot.id);
+        }
+        result
     }
 
     // ── remaining usage ─────────────────────────────────────────────────────
@@ -3003,6 +3039,15 @@ impl AgentAccounts {
     /// moment ago, or already being probed by an overlapping list are left
     /// alone — they keep serving their last known usage.
     async fn refresh_usage(&self, targets: &[(HarnessId, &Slot, bool)]) {
+        self.refresh_usage_scoped(targets, true).await;
+    }
+
+    /// Pool probes retain other providers' cached usage and use read-only targets.
+    async fn refresh_usage_scoped(
+        &self,
+        targets: &[(HarnessId, &Slot, bool)],
+        full_snapshot: bool,
+    ) {
         let now = now_ms();
         let mut probes = Vec::new();
         let mut claimed = Vec::new();
@@ -3033,8 +3078,14 @@ impl AgentAccounts {
                 }
                 claimed.push(key.clone());
                 probes.push(async move {
-                    let result = self.probe_usage(harness, slot, active).await;
-                    (key, credentials, result)
+                    let mut result = self.probe_usage(harness, slot, active).await;
+                    let completed_at = now_ms();
+                    let credentials = result
+                        .as_mut()
+                        .ok()
+                        .and_then(|snapshot| snapshot.credential_version.take())
+                        .unwrap_or(credentials);
+                    (key, credentials, result, completed_at)
                 });
             }
         }
@@ -3046,20 +3097,21 @@ impl AgentAccounts {
             return;
         }
         let results = futures::future::join_all(probes).await;
-        let now = now_ms();
         let mut usage = lock(&self.inner.usage);
-        for (key, credentials, result) in results {
+        for (key, credentials, result, completed_at) in results {
             usage
                 .entry(key)
                 .or_default()
-                .record(result, credentials, now);
+                .record(result, credentials, completed_at);
         }
         // Drop entries for accounts that no longer have a slot (forgotten).
         let live: std::collections::HashSet<String> = targets
             .iter()
             .map(|(harness, slot, _)| usage_key(*harness, &slot.account_key))
             .collect();
-        usage.retain(|key, _| live.contains(key));
+        if full_snapshot {
+            usage.retain(|key, _| live.contains(key));
+        }
         // Persist under the lock: overlapping lists must not interleave
         // writes of the same file.
         self.persist_usage(&usage);
@@ -3123,6 +3175,11 @@ impl AgentAccounts {
         slot: &Slot,
         is_active: bool,
     ) -> Result<UsageSnapshot, ProbeError> {
+        if slot.profile.auth_kind == AgentAuthKind::ApiKey {
+            return Err(ProbeError::NoCredentials {
+                why: NoCredentials::ApiKey,
+            });
+        }
         let missing = ProbeError::NoCredentials {
             why: NoCredentials::Missing,
         };
@@ -3131,7 +3188,7 @@ impl AgentAccounts {
             .get("claudeAiOauth")
             .ok_or(missing.clone())?;
         let access_token = str_field(oauth, "accessToken").ok_or(missing)?;
-        match self.claude_usage_request(&access_token).await {
+        match self.claude_usage_request(Some(slot), &access_token).await {
             // The stored expiry metadata can lie (a Claude Code regression
             // wrote `expiresAt: 0` for fresh logins), so probe with the
             // stored token first and rotate the slot-owned pair only after
@@ -3145,7 +3202,19 @@ impl AgentAccounts {
                     && self.claude_slot_is_not_live(slot).await =>
             {
                 match self.refresh_claude_slot(slot).await? {
-                    Some(fresh) => self.claude_usage_request(&fresh).await,
+                    Some(_) => {
+                        let refreshed = self.read_slot(slot.harness, &slot.id).ok_or(
+                            ProbeError::NoCredentials {
+                                why: NoCredentials::Missing,
+                            },
+                        )?;
+                        let access =
+                            str_field(&refreshed.credentials["claudeAiOauth"], "accessToken")
+                                .ok_or(ProbeError::NoCredentials {
+                                    why: NoCredentials::Missing,
+                                })?;
+                        self.claude_usage_request(Some(&refreshed), &access).await
+                    }
                     // Refresh in flight elsewhere (single-flight) — report
                     // the original rejection; the next probe sees the result.
                     None => Err(ProbeError::Unauthorized { status }),
@@ -3156,7 +3225,11 @@ impl AgentAccounts {
     }
 
     /// One usage probe: GET the endpoint and parse windows.
-    async fn claude_usage_request(&self, access_token: &str) -> Result<UsageSnapshot, ProbeError> {
+    async fn claude_usage_request(
+        &self,
+        slot: Option<&Slot>,
+        access_token: &str,
+    ) -> Result<UsageSnapshot, ProbeError> {
         let body = probe_json(
             "claude-code",
             "usage",
@@ -3168,7 +3241,13 @@ impl AgentAccounts {
                 .header("Content-Type", "application/json"),
         )
         .await?;
-        claude_usage_windows(&body).ok_or_else(|| schema_error("claude-code", &body))
+        let mut snapshot =
+            claude_usage_windows(&body).ok_or_else(|| schema_error("claude-code", &body))?;
+        if let Some(slot) = slot {
+            snapshot.credential_version = Some(credentials_fingerprint(&slot.credentials));
+            self.record_claude_pool_probe(slot, &body, &snapshot);
+        }
+        Ok(snapshot)
     }
 
     async fn codex_usage(&self, slot: &Slot) -> Result<UsageSnapshot, ProbeError> {
@@ -3198,7 +3277,11 @@ impl AgentAccounts {
                 ),
         )
         .await?;
-        codex_usage_snapshot(&body).ok_or_else(|| schema_error("codex", &body))
+        let labels = self.codex_pool_labels(slot);
+        let snapshot = codex_usage_snapshot_labeled(&body, &labels)
+            .ok_or_else(|| schema_error("codex", &body))?;
+        self.record_codex_pool_labels(slot, &body, &labels);
+        Ok(snapshot)
     }
 
     async fn cursor_usage(&self, slot: &Slot) -> Result<UsageSnapshot, ProbeError> {
@@ -3244,6 +3327,7 @@ impl AgentAccounts {
             .map(|window| UsageSnapshot {
                 windows: vec![window],
                 plan_label: None,
+                ..Default::default()
             })
             .ok_or_else(|| schema_error("cursor", &body))
     }
@@ -3368,9 +3452,7 @@ impl AgentAccounts {
         // would have nothing to merge if live credentials were also empty.
         refreshed.credentials = with_claude_ai_oauth(&slot.credentials, updated);
         refreshed.saved_at = now_ms();
-        if let Err(err) = self.write_slot(&refreshed) {
-            tracing::warn!(slot = %slot.id, error = %err, "refreshed slot write failed");
-        }
+        self.save_refreshed_pool_slot(&refreshed);
         Ok(access_token)
     }
 }
@@ -4150,18 +4232,28 @@ pub(crate) fn usage_windows_from_reply(
 
 /// Codex `/wham/usage`: primary/secondary windows + the live plan.
 fn codex_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
-    zeron_proto::plan_usage::codex(body).map(|(windows, plan_label)| UsageSnapshot {
-        windows,
-        plan_label,
+    codex_usage_snapshot_labeled(body, &HashMap::new())
+}
+
+fn codex_usage_snapshot_labeled(
+    body: &serde_json::Value,
+    labels: &HashMap<String, String>,
+) -> Option<UsageSnapshot> {
+    zeron_proto::plan_usage::codex_labeled(body, labels).map(|(windows, plan_label)| {
+        UsageSnapshot {
+            windows,
+            plan_label,
+            ..Default::default()
+        }
     })
 }
 
-/// Windows from Claude's `/api/oauth/usage`: the 5-hour session and weekly
-/// buckets, each a 0-100 `utilization` with an RFC3339 `resets_at`.
+/// Windows from Claude's `/api/oauth/usage` (see [`zeron_proto::plan_usage::claude`]).
 fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
     zeron_proto::plan_usage::claude(body).map(|windows| UsageSnapshot {
         windows,
         plan_label: None,
+        ..Default::default()
     })
 }
 
@@ -5202,6 +5294,7 @@ mod probe_tests {
                 resets_at: None,
             }],
             plan_label: None,
+            ..Default::default()
         }
     }
 

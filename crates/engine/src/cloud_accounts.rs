@@ -234,6 +234,7 @@ async fn snapshot(
     Ok(AgentAccountsSnapshot {
         accounts: out,
         warnings: Vec::new(),
+        pool: Default::default(),
     })
 }
 
