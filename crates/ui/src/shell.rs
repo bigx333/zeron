@@ -10603,6 +10603,14 @@ impl Shell {
             self.close_row_snooze_menu(cx);
             return true;
         }
+        if self
+            .chat_menu
+            .get()
+            .is_some_and(|menu| menu.page == ChatMenuPage::Snooze)
+        {
+            self.close_chat_menu(cx);
+            return true;
+        }
         // Modals and context menus sit above the rest of the shell. Preserve
         // their existing behavior: only surfaces that already have a Cancel
         // path close here; the others remain explicit blockers.

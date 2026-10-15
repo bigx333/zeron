@@ -9,17 +9,16 @@ impl Render for Host {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.0.update(cx, |shell, cx| {
             let theme = Theme::default();
-            let popup = theme.for_popup();
             div()
                 .size_full()
+                .capture_key_down(cx.listener(Shell::on_key_down_capture))
                 .child(
                     div()
                         .w(px(280.0))
                         .h(px(800.0))
                         .child(shell.render_chat_sidebar(&theme, cx)),
                 )
-                .children(shell.render_row_snooze_menu(&popup, cx))
-                .children(shell.render_custom_snooze(window.viewport_size(), window, cx))
+                .children(shell.render_overlays(window.viewport_size(), window, cx))
         })
     }
 }
@@ -238,6 +237,50 @@ fn custom_snooze_types_inline_in_the_card_without_selecting(cx: &mut TestAppCont
     shell.update(cx, |shell, cx| shell.close_row_snooze_menu(cx));
     redraw(cx);
     assert!(shell.read_with(cx, |shell, _| shell.custom_snooze.is_none()));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn escape_dismisses_custom_editor_then_either_snooze_menu(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    let before = selected(&shell, cx);
+    hover(cx, "chat-a");
+    click(cx, "chat-a-snooze");
+    redraw(cx);
+    click(cx, "row-snooze-a-custom");
+    redraw(cx);
+    cx.simulate_input("45m");
+    cx.simulate_keystrokes("escape");
+    redraw(cx);
+    assert!(shell.read_with(cx, |shell, _| shell.custom_snooze.is_none()));
+    assert_eq!(snooze_menu(&shell, cx).as_deref(), Some("a"));
+    cx.simulate_keystrokes("escape");
+    redraw(cx);
+    assert_eq!(snooze_menu(&shell, cx), None);
+    finish_close(&shell, cx);
+
+    // The same editor is also entered through the context menu's Snooze card.
+    shell.update(cx, |shell, cx| {
+        shell.chat_menu.open(ChatMenuState {
+            chat_id: "a".into(),
+            tab: None,
+            position: gpui::point(px(280.0), px(100.0)),
+            page: ChatMenuPage::Snooze,
+        });
+        cx.notify();
+    });
+    redraw(cx);
+    click(cx, "chat-snooze-a-custom");
+    redraw(cx);
+    cx.simulate_input("1h30m");
+    cx.simulate_keystrokes("escape");
+    redraw(cx);
+    assert!(shell.read_with(cx, |shell, _| shell.custom_snooze.is_none()));
+    assert!(shell.read_with(cx, |shell, _| shell.chat_menu.is_open()));
+    cx.simulate_keystrokes("escape");
+    redraw(cx);
+    assert!(!shell.read_with(cx, |shell, _| shell.chat_menu.is_open()));
+    assert_eq!(selected(&shell, cx), before);
     cx.run_until_parked();
 }
 
