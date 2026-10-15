@@ -10,12 +10,14 @@ Some captures show “in 60m”; the current code displays “in 1h” after the
 
 ## Desktop
 
-Native fixture captures of the compact snooze card and its inline custom field.
+Native fixture captures of the compact snooze card and its inline custom editor. Custom opens a focused, outlined text field. Type a duration, then click Snooze or press Enter; the caption previews the wake time. The button stays inactive until the duration is valid.
 
 | Screen | Dark | Light |
 | --- | --- | --- |
 | Presets and wake-time choices | [Open](desktop-t3-quick-snooze-dark.png) | [Open](desktop-t3-quick-snooze-light-opaque.png) |
-| Custom duration in place | [Open](desktop-t3-custom-snooze-dark.png) | [Open](desktop-t3-custom-snooze-light-opaque.png) |
+| Custom editor ready for typing | [Open](desktop-t3-custom-snooze-empty-dark.png) | [Open](desktop-t3-custom-snooze-empty-light-opaque.png) |
+| Valid duration and Snooze button | [Open](desktop-t3-custom-snooze-dark.png) | [Open](desktop-t3-custom-snooze-light-opaque.png) |
+| Invalid duration feedback | [Open](desktop-t3-custom-snooze-invalid-dark.png) | [Open](desktop-t3-custom-snooze-invalid-light-opaque.png) |
 
 ## Android
 
