@@ -1420,7 +1420,7 @@ impl Theme {
     ) -> Self {
         let appearance = model_appearance(variant.appearance);
         let accent_color = match accent_selection {
-            AccentSelection::ThemeDefault => AccentColor::Zeron,
+            AccentSelection::ThemeDefault => AccentColor::Nova,
             AccentSelection::Preset(preset) => preset.into(),
         };
         let mut theme = Self::for_preferences(appearance, accent_color);
