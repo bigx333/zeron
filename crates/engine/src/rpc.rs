@@ -1432,6 +1432,7 @@ fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::FORK_SIDE_CHAT
+            | methods::NOTIFY_CONTROLLER
             | methods::LIST_HARNESSES
             | methods::INSTALL_HARNESS
             | methods::CANCEL_INSTALL
@@ -2425,6 +2426,25 @@ impl RpcService for EngineRpc {
                     .workspace
                     .merged_sessions_watch(self.sessions.watch_sessions());
                 Ok(RpcReply::Stream(watch_stream(merged)))
+            }
+            methods::NOTIFY_CONTROLLER => {
+                let chat = params
+                    .get("chatId")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| RpcError::Failed("chatId is required".into()))?;
+                let kind = params
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("info");
+                let message = params
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| RpcError::Failed("message is required".into()))?;
+                let id = self
+                    .sessions
+                    .notify_controller(chat, kind, message)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&serde_json::json!({"eventId":id,"queued":true}))
             }
             methods::LOCAL_DEVICE => {
                 RpcReply::value(&serde_json::json!({ "deviceId": self.doc_host.device_id() }))

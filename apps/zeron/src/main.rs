@@ -47,7 +47,14 @@ enum Command {
     /// Serve the Zeron MCP (Model Context Protocol) server on stdin/stdout,
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
-    Mcp,
+    Mcp {
+        /// Serve authenticated Streamable HTTP instead of stdio.
+        #[arg(long)]
+        http: bool,
+        /// Specific local IP:port (defaults to ZERON_MCP_HTTP_BIND or 127.0.0.1:27655).
+        #[arg(long, requires = "http")]
+        bind: Option<std::net::SocketAddr>,
+    },
     /// Manage `zeron headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
@@ -150,6 +157,17 @@ fn main() -> anyhow::Result<()> {
     }
     #[cfg(windows)]
     attach_parent_console();
+    // Load before creating threads/runtimes. Explicit process variables win;
+    // dotenv parsing performs no shell evaluation. Also works under launchd.
+    if let Some(path) = paths::env_file() {
+        if path.exists() {
+            dotenvy::from_path(path).map_err(|_| {
+                anyhow::anyhow!(
+                    "unable to load ~/.zeron/env; check dotenv syntax and file permissions"
+                )
+            })?;
+        }
+    }
     let cli = Cli::parse();
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
@@ -191,7 +209,7 @@ fn main() -> anyhow::Result<()> {
         use tracing_subscriber::util::SubscriberInitExt;
         // `zeron mcp` owns stdout for the protocol: a single log line on it
         // would corrupt the JSON-RPC stream, so its diagnostics go to stderr.
-        if matches!(&cli.command, Some(Command::Mcp)) {
+        if matches!(&cli.command, Some(Command::Mcp { .. })) {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(
@@ -255,7 +273,7 @@ fn main() -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(sync_cli(engine_config_from_env().ipc_port))
         }
-        Some(Command::Mcp) => {
+        Some(Command::Mcp { http, bind }) => {
             // One bridge per agent session, and it only relays: stdio
             // requests out to the engine over IPC and replies back. Two
             // workers keep a burst of parallel tool calls (large replies to
@@ -265,7 +283,17 @@ fn main() -> anyhow::Result<()> {
                 .worker_threads(2)
                 .enable_all()
                 .build()?;
-            runtime.block_on(zeron_mcp::run(zeron_mcp::McpConfig::from_env()))
+            let config = zeron_mcp::McpConfig::from_env();
+            if http {
+                let mut http = zeron_mcp::HttpConfig::from_env(Some("127.0.0.1:27655"))?
+                    .expect("CLI default bind");
+                if let Some(bind) = bind {
+                    http.bind = bind;
+                }
+                runtime.block_on(zeron_mcp::run_http(config, http))
+            } else {
+                runtime.block_on(zeron_mcp::run(config))
+            }
         }
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {

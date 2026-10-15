@@ -15,9 +15,9 @@
 //! - Notifications map to [`AgentEvent`]s: agentMessage/reasoning deltas (both
 //!   `delta`/`textDelta` spellings), item lifecycles → typed ToolCall/ToolResult,
 //!   `thread/tokenUsage/updated` → Usage, turn/completed|failed|aborted → Done.
-//! - Approvals + sandbox: yolo mode. The wire policy is always `"never"` and
-//!   the sandbox is forced to `danger-full-access` — parity with the Claude
-//!   adapter's auto-approve-everything (unattended runs). Stray
+//! - Approvals + sandbox: unattended by default (`"never"`, full access).
+//!   `ZERON_APPROVAL_MODE=prompt` preserves the requested sandbox and uses
+//!   `"on-request"` for runs without `auto_approve`. Stray
 //!   `item/commandExecution/requestApproval` +
 //!   `item/fileChange/requestApproval` still round-trip through
 //!   [`RunControls::request_input`] as a synthesized yes/no question.
@@ -779,6 +779,8 @@ impl CodexHarness {
         // kills every command.
         request.sandbox = if title_only {
             zeron_proto::SandboxLevel::ReadOnly
+        } else if crate::prompt_for_approvals() && !request.auto_approve {
+            request.sandbox
         } else {
             zeron_proto::SandboxLevel::DangerFullAccess
         };
@@ -1088,14 +1090,13 @@ async fn run_session(session: Session) {
     let request_input = Arc::new(request_input);
 
     // ---- wire params ------------------------------------------------------
-    // Parity with the Claude adapter, which auto-approves every `can_use_tool`
-    // regardless of `auto_approve` (zeron sessions run unattended; combined
-    // with the danger-full-access override above this is codex's yolo mode):
-    // never surface wire approvals. "on-request" turned
-    // every command into a yes/no question (user report: "asking me for
-    // approval at every step"). The approval-as-input plumbing below stays for
-    // stray requests and a future explicit permission-mode setting.
-    let approval_policy = "never";
+    // Native approvals use the engine's ordinary pending-input bridge when
+    // explicitly enabled; title-only and auto-approved runs stay unattended.
+    let approval_policy = if crate::prompt_for_approvals() && !request.auto_approve && !title_only {
+        "on-request"
+    } else {
+        "never"
+    };
     let start_tier = service_tier(&request);
 
     let start_params = {

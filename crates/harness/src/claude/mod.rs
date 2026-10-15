@@ -11,9 +11,9 @@
 //!   live against 2.1.228: `can_use_tool` control requests arrive and
 //!   allow/deny responses are honored). The alternative channel — an MCP
 //!   permission tool — needs a server process and was rejected. Tool calls
-//!   auto-allow (zeron sessions run unattended, parity with the ACP
-//!   harness's preferred-allow behavior); `AskUserQuestion` round-trips
-//!   through [`RunControls::request_input`].
+//!   auto-allow by default. `ZERON_APPROVAL_MODE=prompt` routes permissions
+//!   through [`RunControls::request_input`] for runs without `auto_approve`;
+//!   `AskUserQuestion` always uses that bridge.
 //! - DONE is the CLI's own `result` frame, eagerly: background work (a
 //!   spawned subagent) never holds the turn. The CLI natively runs a second
 //!   wake turn when a background task finishes — a fresh `init` (same
@@ -940,7 +940,7 @@ async fn run_session(session: Session) {
                             }));
                             let _ = stdin_tx.send(StdinMsg::Line(line));
                         } else {
-                            handle_control_request(req, &request_input, &stdin_tx);
+                            handle_control_request(req, &request_input, &stdin_tx, crate::prompt_for_approvals() && !config.auto_approve);
                         }
                         continue;
                     }
@@ -1345,9 +1345,8 @@ type RequestInputFn = Box<
         + Sync,
 >;
 
-/// Serve one `can_use_tool` control request. Every tool is auto-approved
-/// (unattended parity — the CLI still blocks until SOME response arrives, so
-/// every request must be answered); `AskUserQuestion` is intercepted —
+/// Serve one `can_use_tool` request. Tool approvals optionally use the input
+/// bridge; unattended mode retains auto-approval. `AskUserQuestion` always
 /// surface the questions through the engine's input bridge (which owns the
 /// `InputRequested`/`InputResolved` lifecycle), wait for the user's answers
 /// (in a subtask so the frame loop keeps flowing), and hand them back keyed
@@ -1356,12 +1355,48 @@ fn handle_control_request(
     req: ControlRequestFrame,
     request_input: &Arc<RequestInputFn>,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
+    prompt_approval: bool,
 ) {
     if req.request.subtype != "can_use_tool" {
         tracing::debug!(
             target: "zeron_harness::claude",
             "unhandled control_request subtype: {}", req.request.subtype
         );
+        return;
+    }
+    if req.request.tool_name != "AskUserQuestion" && prompt_approval {
+        let request_input = Arc::clone(request_input);
+        let stdin_tx = stdin_tx.clone();
+        tokio::spawn(async move {
+            let question = UserInputQuestion {
+                id: uuid::Uuid::new_v4().to_string(),
+                header: "Approve tool".into(),
+                question: format!(
+                    "Claude wants to use {}. Allow it?\n{}",
+                    req.request.tool_name, req.request.input
+                ),
+                options: vec!["Yes".into(), "No".into()],
+                multi_select: false,
+                prefill: None,
+                multiline: false,
+            };
+            let answers = request_input(vec![question.clone()])
+                .await
+                .unwrap_or_default();
+            let allowed = answers.iter().any(|a| {
+                a.question_id == question.id
+                    && a.labels.iter().any(|l| l.eq_ignore_ascii_case("yes"))
+            });
+            let response = if allowed {
+                allow_response(req.request.input)
+            } else {
+                serde_json::json!({"behavior":"deny","message":"Tool permission declined"})
+            };
+            let _ = stdin_tx.send(StdinMsg::Line(control_response_line(
+                &req.request_id,
+                response,
+            )));
+        });
         return;
     }
     if req.request.tool_name != "AskUserQuestion" {
@@ -1530,5 +1565,52 @@ mod mcp_injection_tests {
             parsed["mcpServers"]["zeron"]["env"]["ZERON_CHAT_ID"],
             "chat-1"
         );
+    }
+}
+
+#[cfg(test)]
+mod controller_approval_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn permissions_use_input_bridge_and_default_to_deny() {
+        for answer in [Some("Yes"), Some("No"), None] {
+            let request_input: Arc<RequestInputFn> = Arc::new(Box::new(move |questions| {
+                assert_eq!(questions.len(), 1);
+                assert_eq!(questions[0].options, ["Yes", "No"]);
+                assert!(questions[0].question.contains("echo hello"));
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                if let Some(label) = answer {
+                    let _ = tx.send(vec![UserInputAnswer {
+                        question_id: questions[0].id.clone(),
+                        labels: vec![label.into()],
+                    }]);
+                }
+                rx
+            }));
+            let req = serde_json::from_value(serde_json::json!({
+                "type":"control_request", "request_id":"permission-1",
+                "request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"echo hello"}}
+            })).unwrap();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            handle_control_request(req, &request_input, &tx, true);
+            let StdinMsg::Line(line) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            else {
+                panic!("expected response");
+            };
+            let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(value["response"]["request_id"], "permission-1");
+            assert_eq!(
+                value["response"]["response"]["behavior"],
+                if answer == Some("Yes") {
+                    "allow"
+                } else {
+                    "deny"
+                }
+            );
+        }
     }
 }

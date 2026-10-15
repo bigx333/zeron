@@ -202,6 +202,17 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"turn":{"id":"publication-turn","status":"completed"}}}'
   ;;
 
+*scenario:prompt-approvals*)
+  for want in '"approvalPolicy":"on-request"' '"sandbox":"workspace-write"'; do
+    has "$thread_line" "$want" || { fail_turn "$tid" "prompt mode thread policy missing"; exit 0; }
+  done
+  for want in '"approvalPolicy":"on-request"' '"type":"workspaceWrite"'; do
+    has "$turnline" "$want" || { fail_turn "$tid" "prompt mode turn policy missing"; exit 0; }
+  done
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
 *scenario:happy*)
   # Verify the turn/start + thread/start params the harness must send.
   for want in '"method":"turn/start"' '"effort":"ultra"' '"model":"gpt-5.6-sol"' \

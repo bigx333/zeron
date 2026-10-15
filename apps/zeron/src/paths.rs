@@ -7,6 +7,27 @@ pub fn data_dir() -> PathBuf {
     resolve_data_dir(|name| std::env::var_os(name))
 }
 
+/// Integration configuration lives in the user's home, independently of data profiles.
+pub fn env_file() -> Option<PathBuf> {
+    resolve_env_file(|name| std::env::var_os(name), cfg!(windows))
+}
+
+fn resolve_env_file(
+    mut env: impl FnMut(&str) -> Option<OsString>,
+    windows: bool,
+) -> Option<PathBuf> {
+    // Explorer normally has USERPROFILE but no HOME. Prefer the native home on
+    // Windows so shell and desktop launches use the same integration settings.
+    let keys = if windows {
+        ["USERPROFILE", "HOME"]
+    } else {
+        ["HOME", "USERPROFILE"]
+    };
+    keys.into_iter()
+        .find_map(|name| env(name).filter(|value| !value.is_empty()))
+        .map(|home| PathBuf::from(home).join(".zeron").join("env"))
+}
+
 fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
     if let Some(dir) = env("ZERON_DATA_DIR") {
         return PathBuf::from(dir);
@@ -52,6 +73,23 @@ mod tests {
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| value.into())
         })
+    }
+
+    #[test]
+    fn integration_config_uses_windows_profile_without_home() {
+        let native = OsString::from("native-profile");
+        let path = resolve_env_file(|name| (name == "USERPROFILE").then(|| native.clone()), true);
+        assert_eq!(path, Some(PathBuf::from("native-profile/.zeron/env")));
+        let path = resolve_env_file(
+            |name| match name {
+                "HOME" => Some("shell-home".into()),
+                "USERPROFILE" => Some(native.clone()),
+                _ => None,
+            },
+            true,
+        );
+        assert_eq!(path, Some(PathBuf::from("native-profile/.zeron/env")));
+        assert_eq!(resolve_env_file(|_| None, true), None);
     }
 
     #[test]
