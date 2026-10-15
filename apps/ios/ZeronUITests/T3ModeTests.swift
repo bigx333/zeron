@@ -120,6 +120,31 @@ final class T3ModeTests: XCTestCase {
         snapshot(app, "t3-row-actions")
         app.buttons["Snooze"].tap()
         XCTAssertTrue(app.buttons["1 Hour"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["1 Week"].exists)
+
+        // Custom…: units stay disabled until the amount is a positive number.
+        app.buttons["Custom…"].tap()
+        let dialog = app.alerts["Snooze For…"]
+        XCTAssertTrue(dialog.waitForExistence(timeout: 3))
+        let minutes = dialog.buttons["Minutes"]
+        XCTAssertFalse(minutes.isEnabled)
+        let amount = dialog.textFields["custom-snooze-amount"]
+        amount.tap()
+        amount.typeText("0")
+        XCTAssertFalse(minutes.isEnabled)
+        amount.typeText(XCUIKeyboardKey.delete.rawValue + "90")
+        XCTAssertTrue(minutes.isEnabled)
+        snapshot(app, "t3-custom-snooze")
+        minutes.tap()
+
+        // The row parks on the folded Snoozed shelf for 90 minutes.
+        let snoozed = app.cells["section-t3-snoozed"]
+        XCTAssertTrue(snoozed.waitForExistence(timeout: 5))
+        XCTAssertEqual(snoozed.value as? String, "Collapsed")
+        XCTAssertFalse(app.cells[id].exists)
+        snoozed.tap()
+        XCTAssertTrue(app.cells[id].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.cells[id].label.contains("Snoozed, wakes in"))
     }
 
     func testOptionsMenuTogglesBackToDefault() {

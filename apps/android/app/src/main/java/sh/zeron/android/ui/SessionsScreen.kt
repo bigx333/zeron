@@ -625,6 +625,7 @@ fun SessionItem(
     var menu by remember { mutableStateOf(false) }
     var moving by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
+    var customizing by remember { mutableStateOf(false) }
     val haptics = LocalHapticFeedback.current
     val model = actions.model
     val mode = actions.mode
@@ -701,10 +702,12 @@ fun SessionItem(
                 settle = { actions.archive(row) },
                 unsettle = { model.unarchive(row.id) },
                 snooze = { model.snooze(row.id, it) },
+                customSnooze = { customizing = true },
             ),
             onDismiss = { sheet.value = false },
         )
     }
+    if (customizing) CustomSnoozeDialog(onDismiss = { customizing = false }) { model.snooze(row.id, it) }
     if (renaming) RenameDialog(row.title, onDismiss = { renaming = false }) { model.rename(row.id, it) }
 }
 

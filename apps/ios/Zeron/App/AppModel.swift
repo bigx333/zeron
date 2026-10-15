@@ -588,13 +588,12 @@ final class AppModel {
     @discardableResult
     func unarchive(_ id: String) -> Bool { attempt("unarchive") { try $0.unarchiveSession(chatId: id) } }
 
-    /// The snooze presets every snooze menu offers.
+    /// The snooze presets every snooze menu offers, before its "Custom…".
     static let snoozePresets: [(title: String, seconds: UInt32)] = [
         ("15 Minutes", 15 * 60),
         ("1 Hour", 60 * 60),
         ("4 Hours", 4 * 60 * 60),
         ("1 Day", 24 * 60 * 60),
-        ("1 Week", 7 * 24 * 60 * 60),
     ]
 
     @discardableResult

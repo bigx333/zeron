@@ -28,13 +28,36 @@ enum class SidebarMode {
 /** A snooze length offered on every touch surface (sheet, swipe, header menu). */
 data class SnoozeOption(val label: String, val short: String, val seconds: UInt)
 
+/** The presets; anything else is Custom… ([customSnooze]). */
 val SnoozeOptions = listOf(
     SnoozeOption("15 minutes", "15m", 15u * 60u),
     SnoozeOption("1 hour", "1h", 60u * 60u),
     SnoozeOption("4 hours", "4h", 4u * 60u * 60u),
     SnoozeOption("1 day", "1d", 24u * 60u * 60u),
-    SnoozeOption("1 week", "1w", 7u * 24u * 60u * 60u),
 )
+
+/** A Custom… snooze's unit. */
+enum class SnoozeUnit(val label: String, val singular: String, val short: String, val seconds: Long) {
+    Minutes("Minutes", "minute", "m", 60),
+    Hours("Hours", "hour", "h", 3_600),
+    Days("Days", "day", "d", 86_400);
+
+    /** The most of this unit the core takes (its duration is u32 seconds). */
+    val max: Long get() = UInt.MAX_VALUE.toLong() / seconds
+}
+
+/**
+ * A Custom… snooze from what was typed: a whole number from 1 up to the
+ * unit's [SnoozeUnit.max], else null (the dialog keeps Snooze disabled).
+ */
+fun customSnooze(amount: String, unit: SnoozeUnit): SnoozeOption? {
+    val text = amount.trim()
+    if (text.isEmpty() || !text.all { it in '0'..'9' }) return null
+    val n = text.toLongOrNull() ?: return null
+    if (n < 1 || n > unit.max) return null
+    val label = "$n ${unit.singular}${if (n == 1L) "" else "s"}"
+    return SnoozeOption(label, "$n${unit.short}", (n * unit.seconds).toUInt())
+}
 
 /** The T3 shelves; each folds on its own, kept on this device. */
 enum class Shelf(val id: String, val title: String) {
