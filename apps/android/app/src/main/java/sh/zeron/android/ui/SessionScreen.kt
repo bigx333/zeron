@@ -165,6 +165,7 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
     val subtitle = composer.host.name?.let { "$project @ $it" } ?: project
     var overflow by remember { mutableStateOf(false) }
     var snoozing by remember { mutableStateOf(false) }
+    var customSnooze by remember { mutableStateOf(false) }
     val mode by model.sidebarMode.collectAsState()
     val clipboard = LocalClipboardManager.current
 
@@ -250,7 +251,8 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
 
     viewing?.let { ImageViewer(it) { viewing = null } }
 
-    if (snoozing) SnoozeSheet(row, onDismiss = { snoozing = false }) { model.snooze(chatId, it) }
+    if (snoozing) SnoozeSheet(row, onDismiss = { snoozing = false }, onCustom = { customSnooze = true }) { model.snooze(chatId, it) }
+    if (customSnooze) CustomSnoozeDialog(onDismiss = { customSnooze = false }) { model.snooze(chatId, it) }
 
     sheet?.let { s ->
         ModalBottomSheet(onDismissRequest = { sheet = null }) {

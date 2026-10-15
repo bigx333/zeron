@@ -25,8 +25,34 @@ class T3Test {
 
     @Test
     fun snoozePresetsAreTheDesktopLengths() {
-        assertEquals(listOf("15m", "1h", "4h", "1d", "1w"), SnoozeOptions.map { it.short })
-        assertEquals(listOf(900u, 3_600u, 14_400u, 86_400u, 604_800u), SnoozeOptions.map { it.seconds })
+        assertEquals(listOf("15m", "1h", "4h", "1d"), SnoozeOptions.map { it.short })
+        assertEquals(listOf(900u, 3_600u, 14_400u, 86_400u), SnoozeOptions.map { it.seconds })
+    }
+
+    @Test
+    fun customSnoozeTakesWholePositiveAmounts() {
+        assertEquals(SnoozeOption("3 hours", "3h", 10_800u), customSnooze("3", SnoozeUnit.Hours))
+        assertEquals(SnoozeOption("1 day", "1d", 86_400u), customSnooze(" 1 ", SnoozeUnit.Days))
+        assertEquals(SnoozeOption("1 minute", "1m", 60u), customSnooze("01", SnoozeUnit.Minutes))
+        // A week or two is Custom… now that 1w isn't a preset.
+        assertEquals(SnoozeOption("14 days", "14d", 1_209_600u), customSnooze("14", SnoozeUnit.Days))
+        for (bad in listOf("", "  ", "0", "000", "-1", "+2", "1.5", "1e3", "abc", "3h")) {
+            assertNull("'$bad' should not snooze", customSnooze(bad, SnoozeUnit.Hours))
+        }
+    }
+
+    @Test
+    fun customSnoozeFitsTheCoresU32Seconds() {
+        // u32 seconds = 4 294 967 295: the largest whole amount of each unit is allowed, one more is not.
+        assertEquals(71_582_788L, SnoozeUnit.Minutes.max)
+        assertEquals(1_193_046L, SnoozeUnit.Hours.max)
+        assertEquals(49_710L, SnoozeUnit.Days.max)
+        for (unit in SnoozeUnit.entries) {
+            val top = customSnooze("${unit.max}", unit)!!
+            assertEquals((unit.max * unit.seconds).toUInt(), top.seconds)
+            assertNull(customSnooze("${unit.max + 1}", unit))
+        }
+        assertNull(customSnooze("99999999999999999999", SnoozeUnit.Minutes))
     }
 
     @Test
