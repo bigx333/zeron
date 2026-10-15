@@ -151,85 +151,89 @@ mod tests {
     }
     #[tokio::test]
     async fn retries_keep_body_and_event_id_and_sign_each_request() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use axum::{
+            Router,
+            http::{HeaderMap, StatusCode},
+            routing::post,
+        };
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let receiver = tokio::spawn(async move {
-            let mut requests = Vec::new();
-            for attempt in 0..2 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut bytes = Vec::new();
-                let (head_end, length) = loop {
-                    let mut chunk = [0; 4096];
-                    let count = stream.read(&mut chunk).await.unwrap();
-                    assert!(count > 0);
-                    bytes.extend_from_slice(&chunk[..count]);
-                    if let Some(pos) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let headers = String::from_utf8_lossy(&bytes[..pos]);
-                        let length = headers
-                            .lines()
-                            .find_map(|line| {
-                                line.to_ascii_lowercase()
-                                    .strip_prefix("content-length: ")
-                                    .map(|s| s.parse::<usize>().unwrap())
-                            })
-                            .unwrap();
-                        break (pos + 4, length);
+        let (sent, mut received) = mpsc::channel(2);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/events",
+            post(move |headers: HeaderMap, body: String| {
+                let sent = sent.clone();
+                let attempts = attempts.clone();
+                async move {
+                    let attempt = attempts.fetch_add(1, Ordering::Relaxed);
+                    sent.send((headers, body)).await.unwrap();
+                    if attempt == 0 {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    } else {
+                        StatusCode::NO_CONTENT
                     }
-                };
-                while bytes.len() < head_end + length {
-                    let mut chunk = [0; 4096];
-                    let count = stream.read(&mut chunk).await.unwrap();
-                    assert!(count > 0);
-                    bytes.extend_from_slice(&chunk[..count]);
                 }
-                requests.push((
-                    String::from_utf8(bytes[..head_end].to_vec()).unwrap(),
-                    String::from_utf8(bytes[head_end..head_end + length].to_vec()).unwrap(),
-                ));
-                let response = if attempt == 0 {
-                    "HTTP/1.1 500 Retry\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                } else {
-                    "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                };
-                stream.write_all(response.as_bytes()).await.unwrap();
-            }
-            requests
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
         });
+        // Port-discovery probes must neither panic the receiver nor count as
+        // webhook delivery attempts. Only POST /events reaches the handler.
+        let probe = reqwest::Client::new();
+        assert_eq!(
+            probe
+                .head(format!("http://{address}/"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            probe
+                .get(format!("http://{address}/events"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert!(received.try_recv().is_err());
         let secret = "test-only-signing-secret-1234567890";
         let notifier = Notifier::start(&format!("http://{address}/events"), secret.into()).unwrap();
-        // Exercise the worker without constructing a workspace.
         notifier
             .tx
             .as_ref()
             .unwrap()
             .try_send(json!({"id":"stable-event","type":"agent.notification"}))
             .unwrap();
-        let requests = tokio::time::timeout(Duration::from_secs(5), receiver)
-            .await
-            .unwrap()
-            .unwrap();
+        let requests = tokio::time::timeout(Duration::from_secs(5), async {
+            vec![
+                received.recv().await.unwrap(),
+                received.recv().await.unwrap(),
+            ]
+        })
+        .await
+        .unwrap();
         assert_eq!(requests[0].1, requests[1].1);
         for (headers, body) in requests {
-            let header = |key: &str| {
-                headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case(key)
-                            .then(|| value.trim().to_owned())
-                    })
-                    .unwrap()
-            };
+            let header = |key: &str| headers.get(key).unwrap().to_str().unwrap();
             assert_eq!(header("x-zeron-event-id"), "stable-event");
             assert_eq!(
                 header("x-zeron-signature"),
                 format!(
                     "sha256={}",
-                    signature(secret, &header("x-zeron-timestamp"), &body)
+                    signature(secret, header("x-zeron-timestamp"), &body)
                 )
             );
         }
+        server.abort();
     }
 
     #[tokio::test]
