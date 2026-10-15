@@ -8551,6 +8551,11 @@ impl Transcript {
 /// Keep routing instructions in the stored prompt for agents, but show a
 /// concise attribution in the human transcript (including existing messages).
 fn agent_message_display(text: &str) -> String {
+    if let Some(rest) = text.strip_prefix("[Message from external controller ")
+        && let Some((label, body)) = rest.split_once("]\n\n")
+    {
+        return format!("Message from {label}\n\n{body}");
+    }
     let Some(rest) = text.strip_prefix("[Message from Zeron chat ") else {
         return text.to_owned();
     };

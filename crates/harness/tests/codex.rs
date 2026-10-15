@@ -2023,3 +2023,41 @@ async fn external_voice_keeps_canonical_events_without_any_local_helper() {
     token.cancel();
     pump.abort();
 }
+
+#[tokio::test]
+async fn prompt_mode_preserves_requested_sandbox_on_the_wire() {
+    // A child process isolates the mode setting from concurrently running tests.
+    if std::env::var_os("ZERON_TEST_APPROVAL_CHILD").is_none() {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "prompt_mode_preserves_requested_sandbox_on_the_wire",
+                "--nocapture",
+            ])
+            .env("ZERON_TEST_APPROVAL_CHILD", "1")
+            .env("ZERON_APPROVAL_MODE", "prompt")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("scenario:prompt-approvals");
+    req.auto_approve = false;
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}

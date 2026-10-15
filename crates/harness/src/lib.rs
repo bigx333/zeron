@@ -24,6 +24,11 @@ use zeron_proto::{
     UserInputAnswer, UserInputQuestion,
 };
 
+/// Opt-in native permission prompts; existing unattended behavior is the default.
+pub(crate) fn prompt_for_approvals() -> bool {
+    std::env::var("ZERON_APPROVAL_MODE").is_ok_and(|mode| mode.trim() == "prompt")
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HarnessError {
     #[error("harness binary not found: {0}")]
@@ -353,6 +358,7 @@ pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub(crate) mod executable;
+mod input_tasks;
 pub mod install;
 pub(crate) mod jsonrpc;
 pub mod mock;

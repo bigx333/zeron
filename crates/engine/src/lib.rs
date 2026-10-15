@@ -30,6 +30,7 @@ mod http_error;
 pub mod instance_lock;
 pub mod local_import;
 mod model_catalogs;
+pub mod notify;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;
@@ -254,6 +255,12 @@ impl EngineCore {
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
+        let notifier =
+            notify::Notifier::from_env().map_err(|error| EngineError::Other(error.to_string()))?;
+        if notifier.enabled() {
+            sessions.set_notifier(notifier.clone());
+            workspace.set_notifier(notifier);
+        }
         match sessions.recover_stale() {
             Ok(0) => {}
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
@@ -921,6 +928,26 @@ impl Engine {
         // injected MCP server must dial back into THIS engine.
         runtime.core().sessions.set_ipc_port(config.ipc_port);
 
+        let http_server = if let Some(http) = zeron_mcp::HttpConfig::from_env(None)
+            .map_err(|error| EngineError::Other(error.to_string()))?
+        {
+            let listener = tokio::net::TcpListener::bind(http.bind).await?;
+            let service = runtime.core().rpc_service();
+            let label = http.sender_label.clone();
+            let factory = Arc::new(move || {
+                zeron_mcp::Tools::new(Arc::new(zeron_mcp::Zeron::with_client(
+                    zeron_rpc::memory_client(service.clone()),
+                    zeron_mcp::Origin::default(),
+                )))
+                .with_sender_label(label.clone())
+            });
+            // Validate configuration synchronously so startup failures are visible.
+            factory().map_err(|error| EngineError::Other(error.to_string()))?;
+            Some(tokio::spawn(zeron_mcp::serve_http(listener, http, factory)))
+        } else {
+            None
+        };
+
         tokio::select! {
             result = shutdown_signal() => result?,
             requested = stop_rx.recv() => {
@@ -939,6 +966,9 @@ impl Engine {
         }
         tracing::info!("shutting down");
         server.abort();
+        if let Some(server) = http_server {
+            server.abort();
+        }
         runtime.shutdown().await;
         Ok(())
     }
