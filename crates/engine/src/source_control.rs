@@ -971,7 +971,9 @@ impl GitHubCli {
         {
             return Ok(page);
         }
-        let page = self.fetch_list_page(repository, filter, after, refresh).await?;
+        let page = self
+            .fetch_list_page(repository, filter, after, refresh)
+            .await?;
         if let Some((store, account)) = stored {
             store.save(&account, repository, filter, &page).await;
         }
@@ -2479,15 +2481,21 @@ mod tests {
         async fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError> {
             let target = PathBuf::from(&request.args[3]);
             self.requests.lock().unwrap().push(request.clone());
-            if let Some(barrier) = &self.barrier { barrier.wait().await; }
+            if let Some(barrier) = &self.barrier {
+                barrier.wait().await;
+            }
             let source = self.source.to_string_lossy();
             let destination = target.to_string_lossy();
             let mut args = vec!["clone"];
-            if self.fail_checkout { args.push("--no-checkout"); }
+            if self.fail_checkout {
+                args.push("--no-checkout");
+            }
             args.extend(["--", &source, &destination]);
             run_git(self.source.parent().unwrap(), &args);
             run_git(&target, &["remote", "set-url", "origin", &request.args[2]]);
-            if self.fail_checkout { return command_failure("fatal: unable to checkout working tree"); }
+            if self.fail_checkout {
+                return command_failure("fatal: unable to checkout working tree");
+            }
             command_success("")
         }
     }
@@ -2611,15 +2619,27 @@ mod tests {
     #[tokio::test]
     async fn github_projects_failed_checkout_is_preserved_and_never_reused_as_complete() {
         let dir = tempfile::tempdir().unwrap();
-        let runner = Arc::new(LocalCloneRunner { source: local_clone_source(dir.path()),
-            requests: Mutex::new(Vec::new()), barrier: None, fail_checkout: true });
+        let runner = Arc::new(LocalCloneRunner {
+            source: local_clone_source(dir.path()),
+            requests: Mutex::new(Vec::new()),
+            barrier: None,
+            fail_checkout: true,
+        });
         let github = GitHubCli::with_runner(runner.clone());
         let repos = crate::Repos::new(&dir.path().join("engine"), "local");
-        assert!(repos.clone_github_repo(&github, "octocat/project").await.is_err());
+        assert!(
+            repos
+                .clone_github_repo(&github, "octocat/project")
+                .await
+                .is_err()
+        );
         let checkout = dir.path().join("engine/repos/github.com/octocat/project");
         assert!(checkout.join(".git").is_dir());
         assert!(!checkout.join("README.md").exists());
-        let error = repos.clone_github_repo(&github, "octocat/project").await.unwrap_err();
+        let error = repos
+            .clone_github_repo(&github, "octocat/project")
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("Clone did not finish"));
         assert!(checkout.join(".git").is_dir());
         assert!(repos.list().await.is_empty());
@@ -2627,18 +2647,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn github_projects_different_destinations_clone_concurrently_without_losing_registration() {
+    async fn github_projects_different_destinations_clone_concurrently_without_losing_registration()
+    {
         let dir = tempfile::tempdir().unwrap();
         let barrier = Arc::new(tokio::sync::Barrier::new(3));
-        let runner = Arc::new(LocalCloneRunner { source: local_clone_source(dir.path()),
-            requests: Mutex::new(Vec::new()), barrier: Some(barrier.clone()), fail_checkout: false });
+        let runner = Arc::new(LocalCloneRunner {
+            source: local_clone_source(dir.path()),
+            requests: Mutex::new(Vec::new()),
+            barrier: Some(barrier.clone()),
+            fail_checkout: false,
+        });
         let github = GitHubCli::with_runner(runner.clone());
         let repos = crate::Repos::new(&dir.path().join("engine"), "local");
-        let first = { let (repos, github) = (repos.clone(), github.clone());
-            tokio::spawn(async move { repos.clone_github_repo(&github, "octocat/project").await }) };
-        let second = { let (repos, github) = (repos.clone(), github.clone());
-            tokio::spawn(async move { repos.clone_github_repo(&github, "organization/project").await }) };
-        tokio::time::timeout(Duration::from_secs(2), barrier.wait()).await
+        let first = {
+            let (repos, github) = (repos.clone(), github.clone());
+            tokio::spawn(async move { repos.clone_github_repo(&github, "octocat/project").await })
+        };
+        let second = {
+            let (repos, github) = (repos.clone(), github.clone());
+            tokio::spawn(async move {
+                repos
+                    .clone_github_repo(&github, "organization/project")
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), barrier.wait())
+            .await
             .expect("unrelated clones must both start without waiting for one another");
         let (first, second) = tokio::join!(first, second);
         assert_ne!(first.unwrap().unwrap().path, second.unwrap().unwrap().path);
@@ -2649,15 +2683,23 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn github_projects_clone_deadline_includes_waiting_for_the_same_destination() {
         let dir = tempfile::tempdir().unwrap();
-        let runner = Arc::new(LocalCloneRunner { source: local_clone_source(dir.path()),
-            requests: Mutex::new(Vec::new()), barrier: Some(Arc::new(tokio::sync::Barrier::new(2))), fail_checkout: false });
+        let runner = Arc::new(LocalCloneRunner {
+            source: local_clone_source(dir.path()),
+            requests: Mutex::new(Vec::new()),
+            barrier: Some(Arc::new(tokio::sync::Barrier::new(2))),
+            fail_checkout: false,
+        });
         let github = GitHubCli::with_runner(runner.clone());
         let repos = crate::Repos::new(&dir.path().join("engine"), "local");
-        let first = { let (repos, github) = (repos.clone(), github.clone());
-            tokio::spawn(async move { repos.clone_github_repo(&github, "octocat/project").await }) };
+        let first = {
+            let (repos, github) = (repos.clone(), github.clone());
+            tokio::spawn(async move { repos.clone_github_repo(&github, "octocat/project").await })
+        };
         tokio::task::yield_now().await;
-        let second = { let (repos, github) = (repos.clone(), github.clone());
-            tokio::spawn(async move { repos.clone_github_repo(&github, "octocat/project").await }) };
+        let second = {
+            let (repos, github) = (repos.clone(), github.clone());
+            tokio::spawn(async move { repos.clone_github_repo(&github, "octocat/project").await })
+        };
         tokio::task::yield_now().await;
         tokio::time::advance(GITHUB_CLONE_TIMEOUT).await;
         for outcome in [first.await.unwrap(), second.await.unwrap()] {
@@ -2672,13 +2714,22 @@ mod tests {
         use serde_json::json;
         use zeron_rpc::methods;
         let dir = tempfile::tempdir().unwrap();
-        let core = crate::EngineCore::assemble(dir.path(), Arc::new(crate::HarnessRegistry::new()),
-            zeron_proto::HarnessId::Mock, None).unwrap();
+        let core = crate::EngineCore::assemble(
+            dir.path(),
+            Arc::new(crate::HarnessRegistry::new()),
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .unwrap();
         let client = zeron_rpc::memory_client(core.rpc_service());
-        let request = |id| json!({"op":"createSpace", "spaceId":id,
-            "deviceId":core.device_id, "path":"/managed/project", "gitDetected":true});
-        let (first, second) = tokio::join!(client.call(methods::MUTATE, request("first")),
-            client.call(methods::MUTATE, request("second")));
+        let request = |id| {
+            json!({"op":"createSpace", "spaceId":id,
+            "deviceId":core.device_id, "path":"/managed/project", "gitDetected":true})
+        };
+        let (first, second) = tokio::join!(
+            client.call(methods::MUTATE, request("first")),
+            client.call(methods::MUTATE, request("second"))
+        );
         let (first, second) = (first.unwrap(), second.unwrap());
         assert_eq!(first["space"]["id"], second["space"]["id"]);
         assert_eq!(first["space"]["path"], "/managed/project");
@@ -3203,9 +3254,8 @@ mod tests {
 
     #[tokio::test]
     async fn ssh_alias_remote_matches_through_ssh_config() {
-        let runner = FakeProcessRunner::with_responses([command_success(
-            "user git\nhostname github.com\n",
-        )]);
+        let runner =
+            FakeProcessRunner::with_responses([command_success("user git\nhostname github.com\n")]);
         let resolver = ChangeRequestResolver {
             inspector: GitCheckoutInspector::new(runner.clone()),
             github: GitHubCli::with_runner(runner.clone()),
@@ -3228,7 +3278,10 @@ mod tests {
                 .as_deref(),
             Some("acme/zeron")
         );
-        assert_eq!(resolver.github_slug("https://gitlab.com/acme/zeron").await, None);
+        assert_eq!(
+            resolver.github_slug("https://gitlab.com/acme/zeron").await,
+            None
+        );
         assert_eq!(runner.requests().len(), 1);
     }
 
@@ -3696,7 +3749,13 @@ mod tests {
         assert_eq!(first.next_cursor.as_deref(), Some("Y3Vyc29yOjUw"));
         assert_eq!(first.total_count, Some(120));
         let second = github
-            .list_page("acme/zeron", filter, first.next_cursor.as_deref(), false, false)
+            .list_page(
+                "acme/zeron",
+                filter,
+                first.next_cursor.as_deref(),
+                false,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(second.items[0].number, 2);
@@ -4439,10 +4498,10 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             // Git reports slash-separated paths on Windows, while settings
             // retain canonical Win32 prefixes. Compare the actual directory.
             assert!(
-                refs.iter().any(|entry| entry
-                    .worktree_path
-                    .as_ref()
-                    .is_some_and(|listed| same_file::is_same_file(listed, path).unwrap_or(false))),
+                refs.iter()
+                    .any(|entry| entry.worktree_path.as_ref().is_some_and(|listed| {
+                        same_file::is_same_file(listed, path).unwrap_or(false)
+                    })),
                 "Git refs must include worktree {path}; got {refs:?}"
             );
         }
@@ -4515,7 +4574,10 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             ],
         );
         run_git(&checkout, &["config", "branch.main.remote", "upstream"]);
-        run_git(&checkout, &["config", "branch.main.merge", "refs/heads/main"]);
+        run_git(
+            &checkout,
+            &["config", "branch.main.merge", "refs/heads/main"],
+        );
 
         let resolver = ChangeRequestResolver::new();
         let source = resolver

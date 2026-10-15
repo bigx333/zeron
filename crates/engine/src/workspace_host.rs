@@ -1067,7 +1067,8 @@ impl WorkspaceHost {
         name: Option<String>,
         git_detected: bool,
     ) -> Result<(), EngineError> {
-        self.get_or_create_space(space_id, device_id, path, name, git_detected).map(drop)
+        self.get_or_create_space(space_id, device_id, path, name, git_detected)
+            .map(drop)
     }
 
     /// Resolve duplicates and insert under the same registry lock. Callers
@@ -1081,8 +1082,9 @@ impl WorkspaceHost {
         git_detected: bool,
     ) -> Result<Space, EngineError> {
         self.mutate(|doc| {
-            if let Some(existing) = doc.read_spaces()?.into_iter()
-                .find(|space| space.id == space_id || (space.device_id == device_id && space.path == path)) {
+            if let Some(existing) = doc.read_spaces()?.into_iter().find(|space| {
+                space.id == space_id || (space.device_id == device_id && space.path == path)
+            }) {
                 return Ok(existing);
             }
             let space = Space {

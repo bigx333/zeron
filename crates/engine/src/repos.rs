@@ -269,12 +269,17 @@ impl Repos {
         std::fs::create_dir_all(&self.inner.data_dir)?;
         let mut file = tempfile::NamedTempFile::new_in(&self.inner.data_dir)?;
         file.write_all(json.as_bytes())?;
-        file.persist(self.registry_path()).map_err(|error| EngineError::from(error.error))?;
+        file.persist(self.registry_path())
+            .map_err(|error| EngineError::from(error.error))?;
         Ok(())
     }
 
     fn register(&self, path: &str) -> Result<(), EngineError> {
-        let _registry = self.inner.registry_lock.lock().unwrap_or_else(|error| error.into_inner());
+        let _registry = self
+            .inner
+            .registry_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut paths = self.load_paths();
         paths.push(path.to_string());
         self.save_paths(&paths)
@@ -677,9 +682,12 @@ impl Repos {
         // 15-minute deadline. A failed predecessor cannot give a retry a fresh
         // 14-minute budget after it has already waited in the queue.
         let deadline = tokio::time::Instant::now() + crate::source_control::GITHUB_CLONE_TIMEOUT;
-        tokio::time::timeout_at(deadline,
+        tokio::time::timeout_at(
+            deadline,
             self.clone_github_repo_inner(github, repository, deadline),
-        ).await.map_err(|_| EngineError::Other("GitHub clone timed out".into()))?
+        )
+        .await
+        .map_err(|_| EngineError::Other("GitHub clone timed out".into()))?
     }
 
     async fn clone_github_repo_inner(
@@ -689,7 +697,11 @@ impl Repos {
         deadline: tokio::time::Instant,
     ) -> Result<Repo, EngineError> {
         let clone_lock = {
-            let mut locks = self.inner.github_clones.lock().unwrap_or_else(|error| error.into_inner());
+            let mut locks = self
+                .inner
+                .github_clones
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             locks.retain(|_, lock| lock.strong_count() > 0);
             let entry = locks.entry(repository.to_ascii_lowercase()).or_default();
             match entry.upgrade() {
@@ -733,7 +745,9 @@ impl Repos {
                     target.display()
                 )));
             }
-            if std::fs::read_to_string(&marker).ok().as_deref() != Some(&repository.to_ascii_lowercase()) {
+            if std::fs::read_to_string(&marker).ok().as_deref()
+                != Some(&repository.to_ascii_lowercase())
+            {
                 return Err(EngineError::Other(format!(
                     "Clone did not finish: {}. Existing files were preserved. Repair the checkout and add it as a folder, or move it aside before retrying.",
                     target.display()
