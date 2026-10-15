@@ -1279,6 +1279,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func startVoice(hostDeviceId: String, voice: String?, media: VoiceMediaListener, listener: VoiceSessionListener)  -> VoiceCall
     
+    /**
+     * Select the microphone gate before preparing media, so push-to-talk
+     * never briefly starts transmitting while the call connects.
+     */
+    func startVoiceWithInputMode(hostDeviceId: String, voice: String?, inputMode: VoiceInputMode, media: VoiceMediaListener, listener: VoiceSessionListener)  -> VoiceCall
+    
 }
 /**
  * One signed-in account (or Demo mode). Create one per sign-in; call
@@ -2161,6 +2167,24 @@ open func startVoice(hostDeviceId: String, voice: String?, media: VoiceMediaList
             self.uniffiCloneHandle(),
         FfiConverterString.lower(hostDeviceId),
         FfiConverterOptionString.lower(voice),
+        FfiConverterTypeVoiceMediaListener_lower(media),
+        FfiConverterTypeVoiceSessionListener_lower(listener),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Select the microphone gate before preparing media, so push-to-talk
+     * never briefly starts transmitting while the call connects.
+     */
+open func startVoiceWithInputMode(hostDeviceId: String, voice: String?, inputMode: VoiceInputMode, media: VoiceMediaListener, listener: VoiceSessionListener) -> VoiceCall  {
+    return try!  FfiConverterTypeVoiceCall_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_start_voice_with_input_mode(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(hostDeviceId),
+        FfiConverterOptionString.lower(voice),
+        FfiConverterTypeVoiceInputMode_lower(inputMode),
         FfiConverterTypeVoiceMediaListener_lower(media),
         FfiConverterTypeVoiceSessionListener_lower(listener),uniffiCallStatus
     )
@@ -4730,7 +4754,19 @@ public protocol VoiceCallProtocol: AnyObject, Sendable {
      */
     func completeMedia(requestId: UInt64, failure: VoiceMediaFailure?, sdp: String?, microphone: UInt16, speaker: UInt16) 
     
+    /**
+     * Switching modes always requires a fresh hold. A mute toggle cannot
+     * bypass push-to-talk, including notification or lock-screen actions.
+     */
+    func setInputMode(mode: VoiceInputMode) 
+    
     func setMuted(muted: Bool) 
+    
+    /**
+     * Platforms aggregate touch holds, and release on focus
+     * loss, cancelled gestures, navigation and backgrounding.
+     */
+    func setPushToTalkHeld(held: Bool) 
     
     func stop() 
     
@@ -4804,11 +4840,37 @@ open func completeMedia(requestId: UInt64, failure: VoiceMediaFailure?, sdp: Str
 }
 }
     
+    /**
+     * Switching modes always requires a fresh hold. A mute toggle cannot
+     * bypass push-to-talk, including notification or lock-screen actions.
+     */
+open func setInputMode(mode: VoiceInputMode)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_voicecall_set_input_mode(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeVoiceInputMode_lower(mode),uniffiCallStatus
+    )
+}
+}
+    
 open func setMuted(muted: Bool)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_voicecall_set_muted(
             self.uniffiCloneHandle(),
         FfiConverterBool.lower(muted),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Platforms aggregate touch holds, and release on focus
+     * loss, cancelled gestures, navigation and backgrounding.
+     */
+open func setPushToTalkHeld(held: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_voicecall_set_push_to_talk_held(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(held),uniffiCallStatus
     )
 }
 }
@@ -14580,6 +14642,75 @@ public func FfiConverterTypeVoiceEndReason_lower(_ value: VoiceEndReason) -> Rus
 
 
 /**
+ * Device-local microphone behavior, shared by Swift and Kotlin clients.
+ */
+
+public enum VoiceInputMode: Equatable, Hashable {
+    
+    case handsFree
+    case pushToTalk
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension VoiceInputMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVoiceInputMode: FfiConverterRustBuffer {
+    typealias SwiftType = VoiceInputMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VoiceInputMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .handsFree
+        
+        case 2: return .pushToTalk
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: VoiceInputMode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .handsFree:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .pushToTalk:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVoiceInputMode_lift(_ buf: RustBuffer) throws -> VoiceInputMode {
+    return try FfiConverterTypeVoiceInputMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVoiceInputMode_lower(_ value: VoiceInputMode) -> RustBuffer {
+    return FfiConverterTypeVoiceInputMode.lower(value)
+}
+
+
+
+/**
  * Why a platform media operation failed.
  */
 
@@ -17601,6 +17732,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice() != 62086) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice_with_input_mode() != 45682) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_uploadprogress_on_progress() != 40458) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17667,7 +17801,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_voicecall_complete_media() != 130) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_voicecall_set_input_mode() != 1567) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_voicecall_set_muted() != 41942) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_voicecall_set_push_to_talk_held() != 28424) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_voicecall_stop() != 33696) {

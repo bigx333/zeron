@@ -74,6 +74,7 @@ fun VoiceSettingsScreen(controller: VoiceController, onBack: () -> Unit) {
     val chosen = remember(all, selectedHost) { controller.startHost()?.id }
     val haptics = LocalHapticFeedback.current
     var styles by remember { mutableStateOf(false) }
+    var inputModes by remember { mutableStateOf(false) }
     val list = rememberLazyListState()
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -206,11 +207,40 @@ fun VoiceSettingsScreen(controller: VoiceController, onBack: () -> Unit) {
             }
             footer("Applies to your next call.")
 
+            section("Microphone")
+            item {
+                Box(Modifier.padding(horizontal = 16.dp)) {
+                    SegmentedListItem(
+                        onClick = { inputModes = true },
+                        shapes = segmentedShapes(0, 1),
+                        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                        leadingContent = { IconTile(R.drawable.zi_microphone) },
+                        supportingContent = { Text(if (s.pushToTalk) "Push to talk" else "Hands-free") },
+                        trailingContent = { ZIcon(R.drawable.zi_alt_arrow_down, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                    ) { Text("Voice input mode") }
+                    ChoiceMenu(
+                        inputModes,
+                        { inputModes = false },
+                        listOf(MenuSection(null, listOf(
+                            MenuChoice("Hands-free", !s.pushToTalk) {
+                                haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                                controller.selectInputMode(false)
+                            },
+                            MenuChoice("Push to talk", s.pushToTalk) {
+                                haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                                controller.selectInputMode(true)
+                            },
+                        ))),
+                    )
+                }
+            }
+            footer(if (s.pushToTalk) "Hold the microphone button to transmit. Release to mute." else "Your microphone stays on until you mute it.")
+
             section("During a call")
             item {
                 val tips = listOf(
                     Triple(R.drawable.zi_smartphone, "Hold it to your ear", "The screen turns off and Codex plays through the earpiece."),
-                    Triple(R.drawable.zi_phone_hang_up, "Lock your phone", "The call keeps going. Its notification has Mute and End; an incoming call ends it."),
+                    Triple(R.drawable.zi_phone_hang_up, "Lock your phone", if (s.pushToTalk) "The call continues with your microphone muted. Return to Zeron and hold to talk." else "The call keeps going. Its notification has Mute and End; an incoming call ends it."),
                     Triple(R.drawable.zi_microphone, "Start from the bottom bar", "Tap the microphone; hold it to switch device or voice."),
                 )
                 Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {

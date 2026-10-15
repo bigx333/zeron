@@ -33,6 +33,10 @@ final class VoiceStageViewController: UIViewController {
     private let badge = UIView()
     private let bar = Glass.surface()
     private let controls = UIStackView()
+    private let talkSlot = UIView()
+    private let talk = TalkDiscControl()
+    private var endWidth: NSLayoutConstraint?
+    private var captionBottom: NSLayoutConstraint!
     private lazy var mute = Self.callButton(symbol: "mic.fill", tint: Palette.text, background: Palette.controlFill) { [weak self] in
         self?.voice.toggleMute()
     }
@@ -49,6 +53,7 @@ final class VoiceStageViewController: UIViewController {
         self?.dismiss(animated: true)
     }
     private var shownMuted: Bool?
+    private var shownPushToTalk: Bool?
 
     init(app: AppModel) {
         self.app = app
@@ -83,6 +88,7 @@ final class VoiceStageViewController: UIViewController {
         status.textColor = Palette.text
         status.textAlignment = .center
         status.accessibilityTraits = .updatesFrequently
+        status.accessibilityIdentifier = "voice-input-status"
         caption.font = Fonts.ui(.sans, 16)
         caption.textColor = Palette.secondary
         caption.textAlignment = .center
@@ -118,6 +124,17 @@ final class VoiceStageViewController: UIViewController {
         route.prioritizesVideoDevices = false
         routeWell.accessibilityLabel = "Audio output"
         mute.accessibilityIdentifier = "voice-mute"
+        talk.accessibilityIdentifier = "voice-hold-to-talk"
+        talk.addVoiceHoldActions { [weak self] held in
+            guard let self else { return }
+            let wasMuted = self.voice.muted
+            self.voice.hold(held, source: .stage)
+            if wasMuted != self.voice.muted { UIImpactFeedbackGenerator(style: held ? .medium : .soft).impactOccurred() }
+        }
+        endWidth = end.constraints.first { $0.firstAttribute == .width && $0.secondItem == nil }
+        let slotWidth = talkSlot.widthAnchor.constraint(equalToConstant: 132)
+        slotWidth.priority = UILayoutPriority(999)
+        NSLayoutConstraint.activate([slotWidth, talkSlot.heightAnchor.constraint(equalToConstant: 60)])
         end.accessibilityLabel = "End call"
         end.accessibilityIdentifier = "voice-end"
         retry.accessibilityIdentifier = "voice-retry"
@@ -125,10 +142,13 @@ final class VoiceStageViewController: UIViewController {
         controls.spacing = 14
         controls.alignment = .center
         controls.translatesAutoresizingMaskIntoConstraints = false
-        for v in [mute, routeWell, end, retry, close] { controls.addArrangedSubview(v) }
+        for v in [mute, routeWell, talkSlot, end, retry, close] { controls.addArrangedSubview(v) }
         bar.contentView.addSubview(controls)
         bar.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(bar)
+        talk.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(talk)
+        captionBottom = caption.bottomAnchor.constraint(lessThanOrEqualTo: bar.topAnchor, constant: -16)
 
         let side = orb.widthAnchor.constraint(equalToConstant: 340)
         side.priority = .defaultHigh
@@ -163,11 +183,15 @@ final class VoiceStageViewController: UIViewController {
             caption.topAnchor.constraint(equalTo: status.bottomAnchor, constant: 10),
             caption.leadingAnchor.constraint(equalTo: status.leadingAnchor),
             caption.trailingAnchor.constraint(equalTo: status.trailingAnchor),
-            caption.bottomAnchor.constraint(lessThanOrEqualTo: bar.topAnchor, constant: -16),
+            captionBottom,
             previousCaption.topAnchor.constraint(equalTo: caption.topAnchor),
             previousCaption.leadingAnchor.constraint(equalTo: caption.leadingAnchor),
             previousCaption.trailingAnchor.constraint(equalTo: caption.trailingAnchor),
 
+            talk.centerXAnchor.constraint(equalTo: talkSlot.centerXAnchor),
+            talk.centerYAnchor.constraint(equalTo: bar.topAnchor, constant: 16),
+            talk.widthAnchor.constraint(equalToConstant: 132),
+            talk.heightAnchor.constraint(equalToConstant: 132),
             bar.centerXAnchor.constraint(equalTo: safe.centerXAnchor),
             bar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20),
             controls.topAnchor.constraint(equalTo: bar.contentView.topAnchor, constant: 10),
@@ -191,6 +215,11 @@ final class VoiceStageViewController: UIViewController {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         wallpaper.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: min(view.bounds.height * 0.72, 760))
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        voice.hold(false, source: .stage)
+        super.viewWillDisappear(animated)
     }
 
     @objc private func swipeDown() { dismiss(animated: true) }
@@ -233,17 +262,28 @@ final class VoiceStageViewController: UIViewController {
             }
         }
         let ended = !voice.live
-        for v in [mute, routeWell, end] { v.isHidden = ended }
+        let pushToTalk = voice.pushToTalk && !ended
+        mute.isHidden = ended || pushToTalk
+        routeWell.isHidden = ended
+        end.isHidden = ended
+        talkSlot.isHidden = !pushToTalk
+        talk.isHidden = !pushToTalk
+        talk.update(active: pushToTalk && voice.active, muted: voice.muted, microphone: state?.microphone ?? 0)
+        endWidth?.constant = pushToTalk ? 60 : 88
+        captionBottom.constant = pushToTalk ? -66 : -16
         for v in [retry, close] { v.isHidden = !ended }
-        if shownMuted != voice.muted {
+        if shownMuted != voice.muted || shownPushToTalk != voice.pushToTalk {
             shownMuted = voice.muted
+            shownPushToTalk = voice.pushToTalk
             var config = mute.configuration
             config?.image = UIImage(systemName: voice.muted ? "mic.slash.fill" : "mic.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold))
-            // Inverted plate while muted, like the desktop call bar.
-            config?.baseBackgroundColor = voice.muted ? Palette.text : Palette.controlFill
-            config?.baseForegroundColor = voice.muted ? Palette.background : Palette.text
+            let highlighted = voice.pushToTalk ? !voice.muted : voice.muted
+            config?.baseBackgroundColor = highlighted ? Palette.text : Palette.controlFill
+            config?.baseForegroundColor = highlighted ? Palette.background : Palette.text
             mute.configuration = config
-            mute.accessibilityLabel = voice.muted ? "Unmute microphone" : "Mute microphone"
+            mute.accessibilityLabel = voice.pushToTalk ? "Hold to talk" : voice.muted ? "Unmute microphone" : "Mute microphone"
+            mute.accessibilityValue = voice.pushToTalk ? voice.muted ? "Microphone off" : "Transmitting" : nil
+            mute.accessibilityHint = voice.pushToTalk ? "Touch and hold to transmit. Release to mute." : nil
         }
     }
 
@@ -302,8 +342,10 @@ final class VoiceStageViewController: UIViewController {
         config.cornerStyle = .capsule
         let button = UIButton(configuration: config, primaryAction: UIAction { _ in action() })
         button.translatesAutoresizingMaskIntoConstraints = false
+        let widthConstraint = button.widthAnchor.constraint(equalToConstant: width)
+        widthConstraint.priority = UILayoutPriority(999)
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: width),
+            widthConstraint,
             button.heightAnchor.constraint(equalToConstant: 60),
         ])
         return button

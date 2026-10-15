@@ -10,7 +10,7 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
     private var appToken: AnyObject?
     private var signature = ""
 
-    enum Section: Int, Hashable { case hero, hosts, voice, call }
+    enum Section: Int, Hashable { case hero, hosts, voice, input, call }
 
     struct Row: Hashable {
         let id: String
@@ -56,7 +56,7 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
             cell.backgroundConfiguration = .clear()
         }
         let cell = UICollectionView.CellRegistration<UICollectionViewListCell, Row> { [weak self] cell, _, row in
-            var c = row.id == "style" ? UIListContentConfiguration.valueCell() : UIListContentConfiguration.subtitleCell()
+            var c = row.id == "style" || row.id == "input-mode" ? UIListContentConfiguration.valueCell() : UIListContentConfiguration.subtitleCell()
             c.text = row.title
             c.textProperties.font = Fonts.ui(.sansMedium, 16)
             c.textProperties.color = row.enabled ? Palette.text : Palette.tertiary
@@ -80,6 +80,9 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
             }
             if row.selected { accessories.append(.checkmark(options: .init(tintColor: Palette.accent))) }
             if row.id == "style", let menu = self?.styleMenu() {
+                accessories.append(.popUpMenu(menu, options: .init(tintColor: Palette.secondary)))
+            }
+            if row.id == "input-mode", let menu = self?.inputMenu() {
                 accessories.append(.popUpMenu(menu, options: .init(tintColor: Palette.secondary)))
             }
             cell.accessories = accessories
@@ -118,6 +121,7 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
         switch section {
         case .hosts: "Codex runs on"
         case .voice: "Voice"
+        case .input: "Microphone"
         case .call: "During a call"
         default: nil
         }
@@ -129,6 +133,9 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
             ? "End the call to change devices."
             : "Audio stays on this iPhone. Codex, its sign-in and its tools run on the device you choose."
         case .voice: "Applies to your next call."
+        case .input: app.voice.pushToTalk
+            ? "Hold the microphone button to transmit. Release to mute."
+            : "Your microphone stays on until you mute it."
         default: nil
         }
     }
@@ -140,13 +147,13 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
         let voice = app.voice
         let devices = self.devices
         // Level frames during a call must not rebuild the list.
-        let signature = "\(voice.live)|\(voice.selectedHost ?? "")|\(voice.selectedStyle ?? "")|\(voice.styles)|"
+        let signature = "\(voice.live)|\(voice.selectedHost ?? "")|\(voice.selectedStyle ?? "")|\(voice.styles)|\(voice.inputMode)|"
             + devices.map { "\($0.id):\($0.online):\($0.capabilities)" }.joined()
         guard signature != self.signature else { return }
         self.signature = signature
 
         var s = NSDiffableDataSourceSnapshot<Section, Row>()
-        s.appendSections([.hero, .hosts, .voice, .call])
+        s.appendSections([.hero, .hosts, .voice, .input, .call])
         s.appendItems([Row(id: "hero", title: "")], toSection: .hero)
         let chosen = voice.startHost?.id
         if devices.isEmpty {
@@ -167,9 +174,10 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
             }, toSection: .hosts)
         }
         s.appendItems([Row(id: "style", title: "Voice", symbol: "person.wave.2")], toSection: .voice)
+        s.appendItems([Row(id: "input-mode", title: "Voice input mode", symbol: "mic")], toSection: .input)
         s.appendItems([
             Row(id: "tip-ear", title: "Hold it to your ear", subtitle: "The screen turns off and Codex plays through the earpiece.", symbol: "ear", enabled: true),
-            Row(id: "tip-lock", title: "Lock your iPhone", subtitle: "The call keeps going. An incoming call ends it.", symbol: "lock", enabled: true),
+            Row(id: "tip-lock", title: "Lock your iPhone", subtitle: voice.pushToTalk ? "The call continues with your microphone muted. Return to Zeron and hold to talk." : "The call keeps going. An incoming call ends it.", symbol: "lock", enabled: true),
             Row(id: "tip-bar", title: "Start from the bottom bar", subtitle: "Tap the waveform; hold it to switch device or voice.", symbol: "waveform", enabled: true),
         ], toSection: .call)
         dataSource.apply(s, animatingDifferences: view.window != nil)
@@ -185,7 +193,7 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
 
     func collectionView(_ collectionView: UICollectionView, shouldHighlightItemAt path: IndexPath) -> Bool {
         guard let row = dataSource.itemIdentifier(for: path) else { return false }
-        return (row.id.hasPrefix("host-") && row.enabled) || row.id == "style"
+        return (row.id.hasPrefix("host-") && row.enabled) || row.id == "style" || row.id == "input-mode"
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt path: IndexPath) {
@@ -204,6 +212,17 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
         return UIMenu(options: .singleSelection, children: styles.map { style in
             UIAction(title: style?.capitalized ?? "Codex default", state: style == voice.selectedStyle ? .on : .off) { _ in
                 voice.selectedStyle = style
+                UISelectionFeedbackGenerator().selectionChanged()
+            }
+        })
+    }
+
+    private func inputMenu() -> UIMenu {
+        let voice = app.voice
+        let modes: [(String, VoiceInputMode)] = [("Hands-free", .handsFree), ("Push to talk", .pushToTalk)]
+        return UIMenu(options: .singleSelection, children: modes.map { title, mode in
+            UIAction(title: title, state: mode == voice.inputMode ? .on : .off) { _ in
+                voice.inputMode = mode
                 UISelectionFeedbackGenerator().selectionChanged()
             }
         })

@@ -1,7 +1,45 @@
 import XCTest
+import UIKit
 @testable import Zeron
 
 final class RemoteVoiceLifecycleTests: XCTestCase {
+    @MainActor
+    func testTalkDiscReleasesHoldWhenDisabledOrRemoved() {
+        let control = TalkDiscControl(frame: CGRect(x: 0, y: 0, width: 132, height: 132))
+        var held = false
+        control.addVoiceHoldActions { held = $0 }
+        control.update(active: true, muted: true, microphone: 0)
+        control.sendActions(for: .touchDown)
+        XCTAssertTrue(held)
+        control.update(active: false, muted: true, microphone: 0)
+        XCTAssertFalse(held)
+        control.update(active: true, muted: true, microphone: 0)
+        control.sendActions(for: .touchDown)
+        XCTAssertTrue(held)
+        control.didMoveToWindow()
+        XCTAssertFalse(held)
+    }
+
+    @MainActor
+    func testHoldButtonClosesOnReleaseDragOutAndCancellation() {
+        for ending: UIControl.Event in [.touchUpInside, .touchUpOutside, .touchDragExit, .touchCancel] {
+            let button = UIButton()
+            var held = false
+            button.addVoiceHoldActions { held = $0 }
+            button.sendActions(for: .touchDown)
+            XCTAssertTrue(held)
+            button.sendActions(for: ending)
+            XCTAssertFalse(held)
+            // Returning inside only opens while the finger is still down.
+            if ending == .touchDragExit {
+                button.sendActions(for: .touchDragEnter)
+                XCTAssertTrue(held)
+                button.sendActions(for: .touchUpInside)
+                XCTAssertFalse(held)
+            }
+        }
+    }
+
     func testCancelledContinuationIgnoresLateNativeSuccess() async {
         let slot = VoiceContinuation<String>()
         slot.finish(.failure(CancellationError()))
