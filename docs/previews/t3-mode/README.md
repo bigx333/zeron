@@ -1,4 +1,4 @@
-# T3 Mode mobile screenshots
+# T3 Mode screenshots
 
 Native captures from the isolated demo workspace. These show the actual app, including touch menus and live thread state.
 
@@ -7,6 +7,15 @@ Snoozing moves a thread to the Snoozed shelf, collapsed by default. Opening or r
 The four presets are 15 minutes, 1 hour, 4 hours and 1 day. A compact ⋯ button expands contextual wake times, followed by a native date-and-time picker. Earlier captures may still show the replaced 1 Week preset or the former custom-duration form.
 
 Some captures show “in 60m”; the current code displays “in 1h” after the rounding fix.
+
+## Desktop
+
+Native fixture captures of the compact snooze card and its inline custom field.
+
+| Screen | Dark | Light |
+| --- | --- | --- |
+| Presets and wake-time choices | [Open](desktop-t3-quick-snooze-dark.png) | [Open](desktop-t3-quick-snooze-light-opaque.png) |
+| Custom duration in place | [Open](desktop-t3-custom-snooze-dark.png) | [Open](desktop-t3-custom-snooze-light-opaque.png) |
 
 ## Android
 
