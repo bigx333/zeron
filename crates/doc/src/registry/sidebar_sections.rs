@@ -10,24 +10,6 @@ const SECTIONS: &str = "sidebarSections";
 const LOCATIONS: &str = "sidebarLocations";
 
 impl RegistryDoc {
-    pub(super) fn observe_sidebar_row(&mut self, kind: &str, id: &str) {
-        if let Some(clock) = self
-            .overlay_row(kind, id)
-            .and_then(|r| r.max_clock().map(str::to_owned))
-        {
-            let mut parts = clock.splitn(3, '-');
-            if let (Some(ms), Some(counter)) = (
-                parts.next().and_then(|v| v.parse::<i64>().ok()),
-                parts.next().and_then(|v| v.parse::<u32>().ok()),
-            ) {
-                if (ms, counter) > (self.clock.last_ms, self.clock.counter) {
-                    self.clock.last_ms = ms;
-                    self.clock.counter = counter;
-                }
-            }
-        }
-    }
-
     fn sidebar_location(&self, id: &str, pin: Option<&RegistryRow>) -> String {
         let location = self.overlay_row(LOCATIONS, id);
         // Older apps write only pinned. Honor a later legacy toggle while
@@ -60,8 +42,8 @@ impl RegistryDoc {
     }
 
     pub(super) fn write_sidebar_location(&mut self, id: &str, location: &str) {
-        self.observe_sidebar_row(LOCATIONS, id);
-        self.observe_sidebar_row(KIND_SIDEBAR_PINS, id);
+        self.observe_row(LOCATIONS, id);
+        self.observe_row(KIND_SIDEBAR_PINS, id);
         self.write(
             LOCATIONS,
             id,
@@ -234,8 +216,8 @@ impl RegistryDoc {
         after: &Option<String>,
         before: &Option<String>,
     ) -> Result<(), DocError> {
-        self.observe_sidebar_row(LOCATIONS, session);
-        self.observe_sidebar_row(KIND_SIDEBAR_PINS, session);
+        self.observe_row(LOCATIONS, session);
+        self.observe_row(KIND_SIDEBAR_PINS, session);
         let (key, hlc) = self.place_in_sidebar_section(section, session, after, before)?;
         self.enqueue_ops(vec![RowOp {
             kind: LOCATIONS.into(),
@@ -334,7 +316,7 @@ impl RegistryDoc {
             }
             Rename { id, name } => {
                 if self.live_sidebar_section(id) {
-                    self.observe_sidebar_row(SECTIONS, id);
+                    self.observe_row(SECTIONS, id);
                     self.write(
                         SECTIONS,
                         id,
@@ -345,7 +327,7 @@ impl RegistryDoc {
             }
             Collapse { id, collapsed } => {
                 if self.live_sidebar_section(id) {
-                    self.observe_sidebar_row(SECTIONS, id);
+                    self.observe_row(SECTIONS, id);
                     self.write(
                         SECTIONS,
                         id,
@@ -355,7 +337,7 @@ impl RegistryDoc {
                 }
             }
             Delete { id } => {
-                self.observe_sidebar_row(SECTIONS, id);
+                self.observe_row(SECTIONS, id);
                 self.write(
                     SECTIONS,
                     id,
@@ -379,7 +361,7 @@ impl RegistryDoc {
                     return Err(DocError::Schema("Session no longer exists".into()));
                 }
                 // Keep legacy clients from displaying section members as pins.
-                self.observe_sidebar_row(KIND_SIDEBAR_PINS, session_id);
+                self.observe_row(KIND_SIDEBAR_PINS, session_id);
                 self.write(
                     KIND_SIDEBAR_PINS,
                     session_id,

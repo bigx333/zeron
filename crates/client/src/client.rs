@@ -268,18 +268,22 @@ impl ClientInner {
         let _ = self.registry_write(|doc| doc.set_chat_seen(chat_id, Utc::now()));
     }
 
-    /// Sending a message resumes a parked thread; viewing, warming its
-    /// session and receiving agent output leave the snooze untouched.
-    pub(crate) fn clear_snooze_on_send(self: &Arc<Self>, chat_id: &str) {
-        if !self
-            .workspace
-            .chat(chat_id)
-            .is_some_and(|chat| chat.snoozed_until.is_some())
-        {
+    /// Sending a message revives a parked thread: archived or snoozed, the
+    /// user is acting in it again (the engine's `unarchive_on_send` does the
+    /// same for desktop sends). Viewing, warming its session and receiving
+    /// agent output leave both alone. Best-effort — the message itself is
+    /// already durably written.
+    pub(crate) fn revive_on_send(self: &Arc<Self>, chat_id: &str) {
+        let Some(chat) = self.workspace.chat(chat_id) else {
+            return;
+        };
+        if !chat.archived && chat.snoozed_until.is_none() {
             return;
         }
-        if let Err(error) = self.registry_write(|doc| doc.set_chat_snoozed_until(chat_id, None)) {
-            tracing::warn!(%chat_id, %error, "could not clear snooze on send");
+        // One write clears both: unarchiving also nulls the snooze.
+        let result = self.registry_write(|doc| doc.set_chat_archived(chat_id, false));
+        if let Err(error) = result {
+            tracing::warn!(%chat_id, %error, "could not revive chat on send");
         }
     }
 
