@@ -183,6 +183,9 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
         stop.clone(),
     );
     a.set_ice_servers(Vec::new()).unwrap();
+    // Both peers run in this process: keep bulk-transfer/churn measurements
+    // independent of VPN/LAN routing and interface MTUs on the test host.
+    a.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
     let viewer_catalog =
         Catalog::open(temp.path().join("b.json"), "b".into(), "Laptop".into()).unwrap();
     viewer_catalog
@@ -190,6 +193,7 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
         .unwrap();
     let (mut b, mut b_out) = Peers::new("b".into(), Arc::new(NoLocal), stop.clone());
     b.set_ice_servers(Vec::new()).unwrap();
+    b.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
     let peer_b = b.clone();
     tokio::spawn(async move {
         while let Some(message) = a_out.recv().await {
@@ -224,7 +228,7 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
         .build()
         .unwrap();
 
-    let round = |client: reqwest::Client, url: String, hostname: String| async move {
+    let round = |client: reqwest::Client, url: String, hostname: String| tokio::time::timeout(Duration::from_secs(40), async move {
         let text = client.get(&url).send().await.unwrap().text().await.unwrap();
         assert!(text.starts_with("server:"), "{text}");
         let body = vec![9u8; 64 * 1024 + 3];
@@ -269,7 +273,7 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
         assert!(ws.next().await.unwrap().unwrap().is_text());
         ws.close(None).await.unwrap();
         let _ = ws.next().await;
-    };
+    });
     let hostname = service.hostname.clone();
     let quiesce = |active: Arc<AtomicUsize>| async move {
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -284,13 +288,17 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
 
     // Warm up: pairs the WebRTC peer and fills connection pools.
     for _ in 0..3 {
-        round(client.clone(), url.clone(), hostname.clone()).await;
+        round(client.clone(), url.clone(), hostname.clone())
+            .await
+            .expect("preview HTTP/WebSocket request round stalled");
     }
     quiesce(active.clone()).await;
     let tasks_before = alive_tasks();
     let rss_before = rss_kb();
     for i in 0..iterations {
-        round(client.clone(), url.clone(), hostname.clone()).await;
+        round(client.clone(), url.clone(), hostname.clone())
+            .await
+            .expect("preview HTTP/WebSocket request round stalled");
         if (i + 1) % 50 == 0 {
             quiesce(active.clone()).await;
             eprintln!(
@@ -319,8 +327,12 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(6);
     for i in 0..churn {
-        b.remove("a").await;
-        round(client.clone(), url.clone(), hostname.clone()).await;
+        tokio::time::timeout(Duration::from_secs(10), b.remove("a"))
+            .await
+            .expect("preview peer removal stalled");
+        round(client.clone(), url.clone(), hostname.clone())
+            .await
+            .expect("preview HTTP/WebSocket request round stalled");
         if (i + 1) % 4 == 0 {
             quiesce(active.clone()).await;
             eprintln!(
