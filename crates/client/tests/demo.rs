@@ -636,3 +636,22 @@ fn provider_switch_needs_a_host_that_switches() {
     model.model = Some("another-model".into());
     client.set_session_config("chat-blog", &model).unwrap();
 }
+
+#[test]
+fn queue_send_mode_changes_publish_workspace_updates() {
+    use zeron_proto::QueueSendMode::{Queue, Steer};
+    let (client, _directory) = demo(fast());
+    assert_eq!(client.queue_send_mode(), None);
+    let before = client.workspace().revision;
+    client.set_queue_send_mode(Steer).unwrap();
+    assert_eq!(client.queue_send_mode(), Some(Steer));
+    let after = client.workspace().revision;
+    assert!(
+        after > before,
+        "preference-only writes must notify mobile observers"
+    );
+    client.set_queue_send_mode(Queue).unwrap();
+    assert_eq!(client.queue_send_mode(), Some(Queue));
+    assert!(client.workspace().revision > after);
+    client.shutdown();
+}
