@@ -1385,9 +1385,8 @@ impl Client {
         if let Some(existing) = self
             .inner
             .workspace
-            .state()
-            .0
-            .spaces
+            .snapshot()
+            .projects
             .iter()
             .find(|space| space.device_id == device_id && space.path == repo.path)
         {
@@ -1420,17 +1419,16 @@ impl Client {
                 "Project creation returned a different folder".into(),
             ));
         }
-        // Wait for registry synchronization so selecting the returned project
-        // can immediately create a session. This also supports older hosts
+        // Wait for the published workspace snapshot, not just its registry rows:
+        // callers select this project immediately. This also supports older hosts
         // whose mutation reply contains only {ok: true}.
         let wait = async {
             loop {
                 if let Some(space) = self
                     .inner
                     .workspace
-                    .state()
-                    .0
-                    .spaces
+                    .snapshot()
+                    .projects
                     .iter()
                     .find(|space| space.device_id == device_id && space.path == repo.path)
                 {
