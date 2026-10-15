@@ -27,7 +27,9 @@ echo "kotlin bindings: $OUT/kotlin"
 if command -v cargo-ndk >/dev/null && [[ -n "${ANDROID_NDK_HOME:-}" ]]; then
   ABIS=()
   for abi in ${ZERON_ANDROID_ABIS:-arm64-v8a x86_64}; do ABIS+=(-t "$abi"); done
-  cargo ndk "${ABIS[@]}" -o "$OUT/jniLibs" \
+  # Native dependencies use the shared C++ runtime; cargo-ndk also copies it
+  # into each ABI's jniLibs directory so the installed APK can load the core.
+  cargo ndk "${ABIS[@]}" --link-libcxx-shared -o "$OUT/jniLibs" \
     build --locked -p zeron-mobile --lib --profile mobile
   echo "jniLibs: $OUT/jniLibs"
 else
