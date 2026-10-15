@@ -79,6 +79,9 @@ temporarily fails, with persistence retried in the background and at shutdown.
 Refreshes finish saving replacement credentials even if the requesting client
 disconnects, and engine shutdown drains outstanding refreshes. Authentication
 failures from an older credential version cannot invalidate a newer slot.
+Successful probes and requests also recover errors only for the credential
+version they used. Each probe retains its completion time so a slow account's
+probe cannot make another account's older result supersede live quota headers.
 
 Settings and non-secret observations live under the existing device-local
 `agent-accounts` directory, in `pool.json` and `pool-state.json`. Credential slots
@@ -111,7 +114,7 @@ loading, `bb pool` commands and BB parent-server proxying are not used by Zeron.
 Validated on macOS on 2026-10-15:
 
 - `cargo check --locked -p zeron` passed.
-- The engine account suite passed all 104 tests, including 34 pool tests, along with all 18
+- The engine account suite passed all 107 tests, including 37 pool tests, along with all 18
   account/upload/title integration tests, using isolated credentials and local
   mock upstreams.
 - `cargo test -p zeron-harness --lib --tests -- --test-threads=1` passed,

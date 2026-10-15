@@ -937,6 +937,11 @@ impl AgentAccounts {
                     .is_some_and(|entry| {
                         entry.error.is_none()
                             && entry.fetched_at.is_some_and(|at| at > observation.error_at)
+                            && entry.usage_credentials.as_deref() == Some(fingerprint.as_str())
+                            && observation
+                                .error_credentials
+                                .as_deref()
+                                .is_none_or(|failed| failed == fingerprint)
                     });
                 if observation
                     .error_credentials
@@ -1011,13 +1016,27 @@ impl AgentAccounts {
     }
 
     fn accept_pool_account(&self, slot: &Slot, family: &str, session: Option<&str>) {
+        let fingerprint = credentials_fingerprint(&slot.credentials);
+        if self
+            .read_slot(slot.harness, &slot.id)
+            .is_none_or(|current| credentials_fingerprint(&current.credentials) != fingerprint)
+        {
+            return;
+        }
         let settings = lock(&self.inner.pool.config);
         let config = provider(&settings, slot.harness).unwrap();
         let mut state = lock(&self.inner.pool.state);
         let now = now_ms();
         let observation = state.observations.entry(slot.id.clone()).or_default();
         observation.last_used_at = Some(now);
-        observation.error = None;
+        if observation
+            .error_credentials
+            .as_deref()
+            .is_none_or(|failed| failed == fingerprint)
+        {
+            observation.error = None;
+            observation.error_credentials = None;
+        }
         if config.routing_mode == AccountPoolRoutingMode::Sequential {
             // A family-only detour must not replace a healthy shared binding.
             let prior = session

@@ -482,6 +482,9 @@ struct UsageSnapshot {
     windows: Vec<AgentUsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     plan_label: Option<String>,
+    /// The credential version actually sent by a probe that can refresh first.
+    #[serde(skip)]
+    credential_version: Option<String>,
 }
 
 /// Why a usage probe produced no windows. Drives the backoff and the reason
@@ -591,6 +594,11 @@ struct UsageEntry {
     usage: Option<UsageSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fetched_at: Option<i64>,
+    /// Version that produced the retained successful measurement, including
+    /// when a later attempt failed. A success from an old token cannot recover
+    /// an authentication error against a newer slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage_credentials: Option<String>,
     /// The last probe's failure; cleared by the next success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<ProbeError>,
@@ -633,6 +641,7 @@ impl UsageEntry {
             Ok(usage) => {
                 self.usage = Some(usage);
                 self.fetched_at = Some(now);
+                self.usage_credentials = Some(credentials);
                 self.error = None;
                 self.retry_at = None;
                 self.credentials = None;
@@ -2638,8 +2647,14 @@ impl AgentAccounts {
                 }
                 claimed.push(key.clone());
                 probes.push(async move {
-                    let result = self.probe_usage(harness, slot, active).await;
-                    (key, credentials, result)
+                    let mut result = self.probe_usage(harness, slot, active).await;
+                    let completed_at = now_ms();
+                    let credentials = result
+                        .as_mut()
+                        .ok()
+                        .and_then(|snapshot| snapshot.credential_version.take())
+                        .unwrap_or(credentials);
+                    (key, credentials, result, completed_at)
                 });
             }
         }
@@ -2651,13 +2666,12 @@ impl AgentAccounts {
             return;
         }
         let results = futures::future::join_all(probes).await;
-        let now = now_ms();
         let mut usage = lock(&self.inner.usage);
-        for (key, credentials, result) in results {
+        for (key, credentials, result, completed_at) in results {
             usage
                 .entry(key)
                 .or_default()
-                .record(result, credentials, now);
+                .record(result, credentials, completed_at);
         }
         // Drop entries for accounts that no longer have a slot (forgotten).
         let live: std::collections::HashSet<String> = targets
@@ -2750,7 +2764,19 @@ impl AgentAccounts {
                 if !is_active && self.inner.endpoints.allow_slot_refresh =>
             {
                 match self.refresh_claude_slot(slot).await? {
-                    Some(fresh) => self.claude_usage_request(Some(slot), &fresh).await,
+                    Some(_) => {
+                        let refreshed = self.read_slot(slot.harness, &slot.id).ok_or(
+                            ProbeError::NoCredentials {
+                                why: NoCredentials::Missing,
+                            },
+                        )?;
+                        let access =
+                            str_field(&refreshed.credentials["claudeAiOauth"], "accessToken")
+                                .ok_or(ProbeError::NoCredentials {
+                                    why: NoCredentials::Missing,
+                                })?;
+                        self.claude_usage_request(Some(&refreshed), &access).await
+                    }
                     // Refresh in flight elsewhere (single-flight) — report
                     // the original rejection; the next probe sees the result.
                     None => Err(ProbeError::Unauthorized { status }),
@@ -2777,9 +2803,10 @@ impl AgentAccounts {
                 .header("Content-Type", "application/json"),
         )
         .await?;
-        let snapshot =
+        let mut snapshot =
             claude_usage_windows(&body).ok_or_else(|| schema_error("claude-code", &body))?;
         if let Some(slot) = slot {
+            snapshot.credential_version = Some(credentials_fingerprint(&slot.credentials));
             self.record_claude_pool_probe(slot, &body, &snapshot);
         }
         Ok(snapshot)
@@ -2862,6 +2889,7 @@ impl AgentAccounts {
             .map(|window| UsageSnapshot {
                 windows: vec![window],
                 plan_label: None,
+                ..Default::default()
             })
             .ok_or_else(|| schema_error("cursor", &body))
     }
@@ -3677,6 +3705,7 @@ fn codex_usage_snapshot_labeled(
     Some(UsageSnapshot {
         windows,
         plan_label,
+        ..Default::default()
     })
 }
 
@@ -3703,6 +3732,7 @@ fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
     (!buckets.is_empty()).then_some(UsageSnapshot {
         windows,
         plan_label: None,
+        ..Default::default()
     })
 }
 
@@ -4630,6 +4660,7 @@ mod probe_tests {
                 resets_at: None,
             }],
             plan_label: None,
+            ..Default::default()
         }
     }
 

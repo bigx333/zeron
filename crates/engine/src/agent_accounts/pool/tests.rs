@@ -38,6 +38,14 @@ async fn upstream<F>(handler: F) -> Upstream
 where
     F: Fn(reqwest::header::HeaderMap, Bytes) -> Response<TestBody> + Send + Sync + 'static,
 {
+    async_upstream(move |headers, body| std::future::ready(handler(headers, body))).await
+}
+
+async fn async_upstream<F, Fut>(handler: F) -> Upstream
+where
+    F: Fn(reqwest::header::HeaderMap, Bytes) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Response<TestBody>> + Send + 'static,
+{
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
         .unwrap();
@@ -59,7 +67,7 @@ where
                             return Ok::<_, Infallible>(reply(404, "not a fixture request"));
                         }
                         let body = body.collect().await.unwrap().to_bytes();
-                        Ok::<_, Infallible>(handler(parts.headers, body))
+                        Ok::<_, Infallible>(handler(parts.headers, body).await)
                     }
                 });
                 let _ = http1::Builder::new()
@@ -1556,4 +1564,244 @@ async fn an_expired_cached_live_token_rereads_the_cli_renewal_without_refreshing
             .iter()
             .all(|status| status.status != AccountPoolStatus::LiveExpired)
     );
+}
+
+fn probe_body(harness: HarnessId) -> String {
+    if harness == HarnessId::ClaudeCode {
+        serde_json::json!({"seven_day":{"utilization":10}}).to_string()
+    } else {
+        serde_json::json!({"rate_limit":{"primary_window":{
+            "used_percent":10,"limit_window_seconds":604800
+        }}})
+        .to_string()
+    }
+}
+
+fn rotate_test_access(accounts: &AgentAccounts, old: &Slot) -> Slot {
+    let mut current = old.clone();
+    if old.harness == HarnessId::ClaudeCode {
+        current.credentials["claudeAiOauth"]["accessToken"] = "new-rejected-token".into();
+    } else {
+        current.credentials["tokens"]["access_token"] = "new-rejected-token".into();
+    }
+    accounts.write_slot(&current).unwrap();
+    current
+}
+
+#[tokio::test]
+async fn a_slow_peer_probe_cannot_make_an_older_result_override_new_headers() {
+    for harness in [HarnessId::ClaudeCode, HarnessId::Codex] {
+        let (_root, initial) = fixture();
+        let waiting = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (signal, finish) = (waiting.clone(), release.clone());
+        let source = async_upstream(move |headers, _| {
+            let (signal, finish) = (signal.clone(), finish.clone());
+            async move {
+                if headers["authorization"] == "Bearer slow-peer" {
+                    signal.notify_one();
+                    finish.notified().await;
+                }
+                reply(200, probe_body(harness))
+            }
+        })
+        .await;
+        let mut endpoints = initial.inner.endpoints.clone();
+        endpoints.claude_usage = format!("{}/usage", source.url);
+        endpoints.codex_usage = endpoints.claude_usage.clone();
+        let accounts = AgentAccounts::with_endpoints(
+            initial.inner.config.clone(),
+            endpoints,
+            Default::default(),
+        );
+        let a = slot(&accounts, harness, "quick-probe");
+        let b = slot(&accounts, harness, "slow-peer");
+        enable(&accounts, harness, &[&a, &b]);
+        let batch = tokio::spawn({
+            let (accounts, a, b) = (accounts.clone(), a.clone(), b.clone());
+            async move {
+                accounts
+                    .refresh_usage_scoped(&[(harness, &a, true), (harness, &b, true)], false)
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !accounts
+                .list_pool_test_windows(&a)
+                .iter()
+                .any(|w| w.used_fraction == 0.1)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(3)).await;
+        let mut headers = reqwest::header::HeaderMap::new();
+        let reset = ((now_ms() + 60_000) / 1000).to_string();
+        if harness == HarnessId::ClaudeCode {
+            headers.insert(
+                "anthropic-ratelimit-unified-7d-utilization",
+                "1".parse().unwrap(),
+            );
+            headers.insert(
+                "anthropic-ratelimit-unified-7d-reset",
+                reset.parse().unwrap(),
+            );
+        } else {
+            headers.insert("x-codex-primary-used-percent", "100".parse().unwrap());
+            headers.insert("x-codex-primary-window-minutes", "10080".parse().unwrap());
+            headers.insert("x-codex-primary-reset-at", reset.parse().unwrap());
+        }
+        http::observe(&accounts, &a, &headers, "other");
+        tokio::time::sleep(Duration::from_millis(3)).await;
+        release.notify_one();
+        batch.await.unwrap();
+        let candidates =
+            accounts.pool_candidates(harness, "other", None, &HashSet::new(), now_ms());
+        assert!(candidates.iter().all(|s| s.id != a.id));
+        let snapshot = accounts.list(false).await.unwrap();
+        assert_eq!(
+            snapshot
+                .accounts
+                .iter()
+                .find(|s| s.id == a.id)
+                .unwrap()
+                .usage_windows[0]
+                .used_fraction,
+            1.0
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_delayed_old_probe_cannot_recover_an_error_against_new_credentials() {
+    for harness in [HarnessId::ClaudeCode, HarnessId::Codex] {
+        let (_root, initial) = fixture();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (signal, finish) = (started.clone(), release.clone());
+        let source = async_upstream(move |_, _| {
+            let (signal, finish) = (signal.clone(), finish.clone());
+            async move {
+                signal.notify_one();
+                finish.notified().await;
+                reply(200, probe_body(harness))
+            }
+        })
+        .await;
+        let mut endpoints = initial.inner.endpoints.clone();
+        endpoints.claude_usage = format!("{}/usage", source.url);
+        endpoints.codex_usage = endpoints.claude_usage.clone();
+        let accounts = AgentAccounts::with_endpoints(
+            initial.inner.config.clone(),
+            endpoints,
+            Default::default(),
+        );
+        let old = slot(&accounts, harness, "old-probe-token");
+        enable(&accounts, harness, &[&old]);
+        let probe = tokio::spawn({
+            let (accounts, old) = (accounts.clone(), old.clone());
+            async move {
+                accounts
+                    .refresh_usage_scoped(&[(harness, &old, true)], false)
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        let current = rotate_test_access(&accounts, &old);
+        http::mark_error(&accounts, &current, "Needs sign-in").await;
+        tokio::time::sleep(Duration::from_millis(3)).await;
+        release.notify_one();
+        probe.await.unwrap();
+        assert!(
+            accounts
+                .pool_candidates(harness, "other", None, &HashSet::new(), now_ms())
+                .is_empty()
+        );
+        assert_eq!(
+            accounts.pool_snapshot().accounts[0].status,
+            AccountPoolStatus::NeedsSignIn
+        );
+        // A success using this exact current version can still recover it.
+        lock(&accounts.inner.usage)
+            .get_mut(&usage_key(harness, &old.account_key))
+            .unwrap()
+            .checked_at = 0;
+        release.notify_one();
+        accounts
+            .refresh_usage_scoped(&[(harness, &current, true)], false)
+            .await;
+        assert_eq!(
+            accounts
+                .pool_candidates(harness, "other", None, &HashSet::new(), now_ms())
+                .len(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_delayed_old_inference_success_cannot_clear_a_new_token_error() {
+    for harness in [HarnessId::ClaudeCode, HarnessId::Codex] {
+        let (_root, accounts) = fixture();
+        let old = slot(&accounts, harness, "old-inference-token");
+        enable(&accounts, harness, &[&old]);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (signal, finish) = (started.clone(), release.clone());
+        let source = async_upstream(move |_, _| {
+            let (signal, finish) = (signal.clone(), finish.clone());
+            async move {
+                signal.notify_one();
+                finish.notified().await;
+                reply(200, "ok")
+            }
+        })
+        .await;
+        point_to(&accounts, &source);
+        let route = accounts
+            .pool_route(harness, "late-success")
+            .await
+            .unwrap()
+            .unwrap();
+        let request = tokio::spawn(async move {
+            let path = if harness == HarnessId::ClaudeCode {
+                "/v1/messages"
+            } else {
+                "/responses"
+            };
+            reqwest::Client::new()
+                .post(format!("{}{path}", route.base_url))
+                .bearer_auth(route.token)
+                .body("{}")
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        let current = rotate_test_access(&accounts, &old);
+        http::mark_error(&accounts, &current, "Needs sign-in").await;
+        release.notify_one();
+        assert_eq!(request.await.unwrap(), "ok");
+        assert!(
+            accounts
+                .pool_candidates(harness, "other", None, &HashSet::new(), now_ms())
+                .is_empty()
+        );
+        assert_eq!(
+            accounts.pool_snapshot().accounts[0].status,
+            AccountPoolStatus::NeedsSignIn
+        );
+    }
 }
