@@ -405,6 +405,60 @@ async fn session_send_round_trips_through_the_chat_room() {
     offline.shutdown();
 }
 
+/// A thread settled on the desktop comes back on every device once the phone
+/// sends to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn phone_send_revives_a_thread_archived_on_the_host() {
+    let edge = MockEdge::start().await;
+    let host = HostRegistry::start(&edge).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    tokio::task::spawn_blocking({
+        let client = client.clone();
+        move || {
+            wait_for("chat row", Duration::from_secs(10), || {
+                client.workspace().device(HOST).is_some_and(|d| d.online)
+                    && client.workspace().session(CHAT).is_some()
+            })
+        }
+    })
+    .await
+    .unwrap();
+    let session = client.open_session(CHAT).unwrap();
+    session.set_view_attached(true);
+
+    host.doc.lock().unwrap().set_chat_archived(CHAT, true).unwrap();
+    host.client.nudge();
+    tokio::task::spawn_blocking({
+        let client = client.clone();
+        move || {
+            wait_for("phone sees the archive", Duration::from_secs(10), || {
+                client.workspace().session(CHAT).is_some_and(|r| r.archived)
+            })
+        }
+    })
+    .await
+    .unwrap();
+
+    session.send(SendRequest::text("back to this")).unwrap();
+    let ws = client.workspace();
+    let row = ws.session(CHAT).unwrap();
+    assert!(!row.archived, "revived locally: {row:?}");
+    let doc = host.doc.clone();
+    tokio::task::spawn_blocking(move || {
+        wait_for("host sees the revive", Duration::from_secs(10), || {
+            doc.lock()
+                .unwrap()
+                .chat(CHAT)
+                .unwrap()
+                .is_some_and(|c| !c.archived)
+        })
+    })
+    .await
+    .unwrap();
+    client.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sends_survive_a_room_outage_and_deliver_on_rejoin() {
     let edge = MockEdge::start().await;

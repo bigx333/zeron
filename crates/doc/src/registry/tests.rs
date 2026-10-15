@@ -588,6 +588,33 @@ fn field_mutators_round_trip() {
 }
 
 #[test]
+fn a_write_after_a_skewed_peer_still_wins() {
+    // `a` (the desktop) runs five minutes ahead of `b` (the phone).
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    a.upsert_chat(&chat("chat-1", "a")).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    a.clock.last_ms = Utc::now().timestamp_millis() + 300_000;
+    a.set_chat_archived("chat-1", true).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert!(b.chat("chat-1").unwrap().unwrap().archived);
+
+    // The phone replies seconds later by its own clock: the revive must land.
+    b.set_chat_archived("chat-1", false).unwrap();
+    assert!(
+        !b.chat("chat-1").unwrap().unwrap().archived,
+        "local write lost"
+    );
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for doc in [&a, &b] {
+        let row = doc.chat("chat-1").unwrap().unwrap();
+        assert!(!row.archived);
+    }
+}
+
+#[test]
 fn delete_chat_tombstones_row_and_session() {
     let mut ws = RegistryDoc::new("dev-a");
     ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
