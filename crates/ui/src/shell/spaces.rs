@@ -7666,6 +7666,7 @@ mod tests {
             branch: None,
             checkout_id: None,
             source_context: None,
+            snoozed_until: None,
             config: None,
             last_message_preview: None,
             last_message_at: Some(Utc.timestamp_opt(10, 0).unwrap()),

@@ -69,6 +69,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
         cwd: Some("/Users/dev/live".into()),
         branch: Some("main".into()),
         checkout_id: None,
+        snoozed_until: None,
         source_context: Some(zeron_proto::ConversationSourceContext {
             checkout_id: "co-live".into(),
             repo_root: "/Users/dev/live".into(),
@@ -181,6 +182,7 @@ async fn registry_mirrors_writes_both_ways_and_persists() {
     // Phone writes reach the host.
     client.pin_session(CHAT).unwrap();
     client.rename_session(CHAT, "Renamed on phone").unwrap();
+    client.snooze_session(CHAT, 3_600).unwrap();
     let doc = host.doc.clone();
     tokio::task::spawn_blocking(move || {
         wait_for(
@@ -189,6 +191,10 @@ async fn registry_mirrors_writes_both_ways_and_persists() {
             || {
                 let doc = doc.lock().unwrap();
                 doc.chat(CHAT).unwrap().and_then(|c| c.title).as_deref() == Some("Renamed on phone")
+                    && doc
+                        .chat(CHAT)
+                        .unwrap()
+                        .is_some_and(|c| c.is_snoozed(Utc::now()))
                     && doc
                         .sidebar_preferences()
                         .is_some_and(|p| p.pinned_session_ids == vec![CHAT.to_owned()])
@@ -236,7 +242,37 @@ async fn registry_mirrors_writes_both_ways_and_persists() {
     let row = ws.session(CHAT).expect("restored from disk");
     assert!(row.archived && row.title == "Renamed on phone");
     assert!(ws.pins_ready, "sidebar prefs persisted");
+    // The host is unavailable: snooze still commits to the local registry,
+    // unsets Settled, and survives another app launch before reconnecting.
+    offline.snooze_session(CHAT, 3_600).unwrap();
+    let ws = offline.workspace();
+    assert!(ws.session(CHAT).unwrap().snoozed);
+    assert!(!ws.session(CHAT).unwrap().archived);
+    assert_eq!(ids_for_test(&ws.t3_front.snoozed), [CHAT]);
+    offline.on_background();
     offline.shutdown();
+    drop(offline);
+    let mut config = ClientConfig::new("http://127.0.0.1:9", dir.path());
+    config.device_id = "ios-live".into();
+    let offline = Client::new(
+        config,
+        Credentials::Dev {
+            user_id: "user-1".into(),
+            org_id: "org-1".into(),
+        },
+        Arc::new(NullListener),
+    )
+    .unwrap();
+    assert!(offline.workspace().session(CHAT).unwrap().snoozed);
+    offline.wake_session(CHAT).unwrap();
+    let ws = offline.workspace();
+    assert_eq!(ids_for_test(&ws.t3_front.pinned), [CHAT]);
+    assert!(ws.t3_front.snoozed.is_empty());
+    offline.shutdown();
+}
+
+fn ids_for_test(rows: &[Arc<zeron_client::SessionRow>]) -> Vec<&str> {
+    rows.iter().map(|row| row.id.as_str()).collect()
 }
 
 /// Host side of one turn: adopt the phone's run command, write the user

@@ -164,6 +164,8 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
     val project = row?.project?.name ?: "No project"
     val subtitle = composer.host.name?.let { "$project @ $it" } ?: project
     var overflow by remember { mutableStateOf(false) }
+    var snoozing by remember { mutableStateOf(false) }
+    val mode by model.sidebarMode.collectAsState()
     val clipboard = LocalClipboardManager.current
 
     // Flat Material chrome: the header sits on the page and takes the
@@ -202,10 +204,15 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
                         listOfNotNull(
                             MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
                             row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
-                            row?.let {
-                                MenuAction("Archive", ZIcons.Archive) {
-                                    model.archive(chatId)
-                                    onBack()
+                            // T3: snooze lengths in a sheet (touch, no hover); a snoozed chat wakes from here.
+                            row?.takeIf { mode.isT3 && !it.archived }?.let { MenuAction(if (it.snoozed) "Snooze again…" else "Snooze…", ZIcons.Snooze) { snoozing = true } },
+                            row?.takeIf { it.snoozed }?.let { MenuAction("Wake now", ZIcons.Wake) { model.wake(chatId) } },
+                            row?.let { r ->
+                                if (r.archived) {
+                                    MenuAction(mode.unsettle, ZIcons.Unarchive) { model.unarchive(chatId) }
+                                } else {
+                                    // Back to the list only once it's really gone from it.
+                                    MenuAction(mode.settle, if (mode.isT3) ZIcons.Settle else ZIcons.Archive) { if (model.archive(chatId)) onBack() }
                                 }
                             },
                         ),
@@ -243,6 +250,8 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
     }
 
     viewing?.let { ImageViewer(it) { viewing = null } }
+
+    if (snoozing) SnoozeSheet(row, onDismiss = { snoozing = false }) { model.snooze(chatId, it) }
 
     sheet?.let { s ->
         ModalBottomSheet(onDismissRequest = { sheet = null }) {
