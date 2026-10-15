@@ -122,22 +122,23 @@ final class T3ModeTests: XCTestCase {
         XCTAssertTrue(app.buttons["1 Hour"].waitForExistence(timeout: 3))
         XCTAssertFalse(app.buttons["1 Week"].exists)
 
-        // Custom…: units stay disabled until the amount is a positive number.
-        app.buttons["Custom…"].tap()
-        let dialog = app.alerts["Snooze For…"]
-        XCTAssertTrue(dialog.waitForExistence(timeout: 3))
-        let minutes = dialog.buttons["Minutes"]
-        XCTAssertFalse(minutes.isEnabled)
-        let amount = dialog.textFields["custom-snooze-amount"]
-        amount.tap()
-        amount.typeText("0")
-        XCTAssertFalse(minutes.isEnabled)
-        amount.typeText(XCUIKeyboardKey.delete.rawValue + "90")
-        XCTAssertTrue(minutes.isEnabled)
-        snapshot(app, "t3-custom-snooze")
-        minutes.tap()
+        // Past the presets: wake times, not a duration form.
+        // Menu items with a subtitle may fold it into their label.
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Tomorrow Morning'")).firstMatch.exists)
+        XCTAssertFalse(app.buttons["Custom…"].exists)
+        snapshot(app, "t3-snooze-until-menu")
+        app.buttons["Pick Date & Time…"].tap()
 
-        // The row parks on the folded Snoozed shelf for 90 minutes.
+        // The sheet opens on tomorrow morning and names the exact wake time.
+        let confirm = app.buttons["snooze-until-confirm"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        XCTAssertTrue(confirm.isEnabled)
+        XCTAssertTrue(confirm.label.hasPrefix("Snooze until "))
+        XCTAssertTrue(app.datePickers["snooze-until-picker"].exists)
+        snapshot(app, "t3-snooze-until-picker")
+        confirm.tap()
+
+        // The row parks on the folded Snoozed shelf until then.
         let snoozed = app.cells["section-t3-snoozed"]
         XCTAssertTrue(snoozed.waitForExistence(timeout: 5))
         XCTAssertEqual(snoozed.value as? String, "Collapsed")
@@ -189,8 +190,15 @@ final class T3ModeTests: XCTestCase {
                     snooze.tap()
                     if app.buttons["1 Hour"].waitForExistence(timeout: 3) {
                         capture(app, "t3-\(look)-row-snooze-menu")
-                        // Park it so the Snoozed shelf has a row to show.
-                        app.buttons["1 Hour"].tap()
+                        // The date & time sheet; confirming parks the row so
+                        // the Snoozed shelf has something to show.
+                        app.buttons["Pick Date & Time…"].tap()
+                        let confirm = app.buttons["snooze-until-confirm"]
+                        if confirm.waitForExistence(timeout: 5) {
+                            settle(app)
+                            capture(app, "t3-\(look)-snooze-until-picker")
+                            confirm.tap()
+                        }
                     }
                 }
                 dismissMenus(app)

@@ -349,7 +349,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         if app.t3Mode {
             items.append(Self.snoozeMenu(app: app, id: id) { [weak self] in
                 guard let self else { return }
-                CustomSnooze.present(from: self) { seconds, title in self.app.snooze(id, seconds: seconds, title: title) }
+                SnoozeUntil.pickDate(from: self) { [weak self] date in self?.app.snooze(id, until: date) }
             })
         }
         items += [
@@ -383,11 +383,11 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
 
     /// Snooze presets as a submenu. A snoozed session offers them too, to
     /// re-time it; its deadline or a sent message is what clears the snooze.
-    /// `custom` opens the custom-duration dialog ("Custom…", last).
-    static func snoozeMenu(app: AppModel, id: String, custom: @escaping () -> Void) -> UIMenuElement {
+    /// The presets, then "until" wake times; `pickDate` opens the picker.
+    static func snoozeMenu(app: AppModel, id: String, pickDate: @escaping () -> Void) -> UIMenuElement {
         UIMenu(title: "Snooze", image: UIImage(systemName: "clock"), children: AppModel.snoozePresets.map { preset in
             UIAction(title: preset.title) { _ in app.snooze(id, seconds: preset.seconds, title: preset.title) }
-        } + [UIAction(title: "Custom…", image: UIImage(systemName: "slider.horizontal.3")) { _ in custom() }])
+        } + SnoozeUntil.menuElements(snooze: { app.snooze(id, until: $0) }, pickDate: pickDate))
     }
 
     func presentSnoozeSheet(_ id: String, from view: UIView) {
@@ -397,9 +397,16 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                 self?.app.snooze(id, seconds: preset.seconds, title: preset.title)
             })
         }
-        sheet.addAction(UIAlertAction(title: "Custom…", style: .default) { [weak self] _ in
+        // Action sheets have no subtitles: the wake time rides the title.
+        let now = Date()
+        for s in SnoozeUntil.suggestions(now: now) {
+            sheet.addAction(UIAlertAction(title: "\(s.title) · \(SnoozeUntil.label(s.date, now: now))", style: .default) { [weak self] _ in
+                self?.app.snooze(id, until: s.date)
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "Pick Date & Time…", style: .default) { [weak self] _ in
             guard let self else { return }
-            CustomSnooze.present(from: self) { seconds, title in self.app.snooze(id, seconds: seconds, title: title) }
+            SnoozeUntil.pickDate(from: self) { [weak self] date in self?.app.snooze(id, until: date) }
         })
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         sheet.popoverPresentationController?.sourceView = view

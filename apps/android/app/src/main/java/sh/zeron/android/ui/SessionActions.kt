@@ -55,25 +55,32 @@ import sh.zeron.android.core.Shelf
 import sh.zeron.android.core.SidebarMode
 import sh.zeron.android.core.SnoozeOption
 import sh.zeron.android.core.SnoozeOptions
-import sh.zeron.android.core.SnoozeUnit
-import sh.zeron.android.core.customSnooze
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
+import sh.zeron.android.core.snoozeShortcuts
+import sh.zeron.android.core.snoozeUntil
+import sh.zeron.android.core.wakeTimeLabel
+import java.time.LocalDate
+import java.time.ZonedDateTime
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ButtonGroupDefaults
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.SelectableDates
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.ToggleButton
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import sh.zeron.android.core.snoozeCaption
 import sh.zeron.android.design.HarnessMark
 import sh.zeron.android.design.ZIcon
@@ -88,8 +95,8 @@ class SheetCallbacks(
     val settle: () -> Unit,
     val unsettle: () -> Unit,
     val snooze: (SnoozeOption) -> Unit,
-    /** Custom…: the duration dialog, owned by the row. */
-    val customSnooze: () -> Unit,
+    /** Pick date & time…: the pickers, owned by the row (they outlive the sheet). */
+    val pickDateTime: () -> Unit,
 )
 
 /**
@@ -111,7 +118,8 @@ fun SessionActionsSheet(row: SessionRow, mode: SidebarMode, callbacks: SheetCall
         }
     }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
-        Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 24.dp)) {
+        // Scrolls once ⋯ unfolds "Snooze until" past a small screen.
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, bottom = 24.dp)) {
             Row(Modifier.padding(start = 8.dp, bottom = 20.dp), verticalAlignment = Alignment.CenterVertically) {
                 HarnessTile(row)
                 Spacer(Modifier.width(14.dp))
@@ -142,7 +150,7 @@ fun SessionActionsSheet(row: SessionRow, mode: SidebarMode, callbacks: SheetCall
                         haptics.performHapticFeedback(HapticFeedbackType.Confirm)
                         then { callbacks.snooze(option) }
                     },
-                    onCustom = { then(callbacks.customSnooze) },
+                    onPickDateTime = { then(callbacks.pickDateTime) },
                 )
                 Spacer(Modifier.height(20.dp))
             }
@@ -179,12 +187,13 @@ fun SessionActionsSheet(row: SessionRow, mode: SidebarMode, callbacks: SheetCall
 
 /** Just the snooze lengths, from the open session's header menu. */
 @Composable
-fun SnoozeSheet(row: SessionRow?, onDismiss: () -> Unit, onCustom: () -> Unit, onSnooze: (SnoozeOption) -> Unit) {
+fun SnoozeSheet(row: SessionRow?, onDismiss: () -> Unit, onPickDateTime: () -> Unit, onSnooze: (SnoozeOption) -> Unit) {
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
-        Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 24.dp)) {
+        // Scrolls once ⋯ unfolds "Snooze until" past a small screen.
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, bottom = 24.dp)) {
             Text("Snooze", style = MaterialTheme.typography.headlineSmallEmphasized, modifier = Modifier.padding(start = 8.dp))
             Text(
                 if (row?.snoozed == true) "Wakes ${snoozeCaption(row.snoozeLabel, row.snoozedUntilMs)} — pick a new time" else "Out of the inbox until it wakes",
@@ -203,7 +212,7 @@ fun SnoozeSheet(row: SessionRow?, onDismiss: () -> Unit, onCustom: () -> Unit, o
                     haptics.performHapticFeedback(HapticFeedbackType.Confirm)
                     then { onSnooze(option) }
                 },
-                onCustom = { then(onCustom) },
+                onPickDateTime = { then(onPickDateTime) },
             )
         }
     }
@@ -211,10 +220,16 @@ fun SnoozeSheet(row: SessionRow?, onDismiss: () -> Unit, onCustom: () -> Unit, o
 
 private class SheetItem(val label: String, val icon: Int, val accent: Boolean = false, val onClick: () -> Unit)
 
-/** The snooze presets as one row of shape-morphing tonal buttons, then Custom… beneath. */
+/**
+ * The presets as one row of shape-morphing tonal buttons, ending in ⋯. ⋯
+ * unfolds "Snooze until" in place: local-time shortcuts with their wake time,
+ * then Pick date & time… ([onPickDateTime]).
+ */
 @Composable
-fun SnoozeChoices(onPick: (SnoozeOption) -> Unit, onCustom: () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+fun SnoozeChoices(onPick: (SnoozeOption) -> Unit, onPickDateTime: () -> Unit) {
+    var more by rememberSaveable { mutableStateOf(false) }
+    val still = sh.zeron.android.voice.rememberReducedMotion()
+    Column {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             for (option in SnoozeOptions) {
                 FilledTonalButton(
@@ -224,86 +239,160 @@ fun SnoozeChoices(onPick: (SnoozeOption) -> Unit, onCustom: () -> Unit) {
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 56.dp)
-                        .semantics { contentDescription = "Snooze ${option.label}" },
+                        .semantics { contentDescription = "Snooze ${option.phrase}" },
                 ) { Text(option.short, style = MaterialTheme.typography.titleMediumEmphasized) }
             }
+            // Square-ish, same height: more choices, not a fifth length.
+            val container by animateColorAsState(
+                if (more) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer,
+                if (still) snap() else MaterialTheme.motionScheme.defaultEffectsSpec(),
+                label = "snooze-more",
+            )
+            FilledTonalButton(
+                onClick = { more = !more },
+                shapes = ButtonDefaults.shapes(),
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = container,
+                    contentColor = if (more) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer,
+                ),
+                contentPadding = PaddingValues(0.dp),
+                modifier = Modifier
+                    .size(width = 56.dp, height = 56.dp)
+                    .semantics {
+                        contentDescription = "More snooze options"
+                        stateDescription = if (more) "Expanded" else "Collapsed"
+                    },
+            ) { ZIcon(ZIcons.More, null, Modifier.size(22.dp)) }
         }
-        // Full width, so the label reads at any font scale.
-        OutlinedButton(
-            onClick = onCustom,
-            shapes = ButtonDefaults.shapes(),
-            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-        ) {
-            ZIcon(ZIcons.Effort, null, Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Custom…")
+        AnimatedVisibility(
+            more,
+            enter = if (still) EnterTransition.None else expandVertically(MaterialTheme.motionScheme.defaultSpatialSpec()) + fadeIn(MaterialTheme.motionScheme.defaultEffectsSpec()),
+            exit = if (still) ExitTransition.None else shrinkVertically(MaterialTheme.motionScheme.fastSpatialSpec()) + fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()),
+        ) { SnoozeUntilList(onPick, onPickDateTime) }
+    }
+}
+
+/** "Snooze until": the shortcuts, each with its wake time, then Pick date & time…. */
+@Composable
+private fun SnoozeUntilList(onPick: (SnoozeOption) -> Unit, onPickDateTime: () -> Unit) {
+    val context = LocalContext.current
+    val is24Hour = android.text.format.DateFormat.is24HourFormat(context)
+    // Shortcuts are read when the list opens (6 PM drops out within the hour, not live).
+    val now = remember { ZonedDateTime.now() }
+    val shortcuts = remember(now) { snoozeShortcuts(now) }
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(Modifier.padding(top = 16.dp)) {
+        Text(
+            "Snooze until",
+            style = MaterialTheme.typography.titleSmallEmphasized,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(start = 12.dp, bottom = 10.dp),
+        )
+        val count = shortcuts.size + 1
+        Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+            shortcuts.forEachIndexed { i, shortcut ->
+                val time = wakeTimeLabel(shortcut.at, now, is24Hour)
+                SegmentedListItem(
+                    onClick = { snoozeUntil(shortcut.at, ZonedDateTime.now(), time)?.let(onPick) },
+                    shapes = segmentedShapes(i, count),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    leadingContent = {
+                        IconTile(
+                            when (shortcut.title) {
+                                "This evening" -> ZIcons.Moon
+                                "Tomorrow morning" -> ZIcons.Sun
+                                else -> ZIcons.Calendar
+                            },
+                        )
+                    },
+                    trailingContent = { Text(time, style = MaterialTheme.typography.labelLarge, color = muted) },
+                    modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = "Snooze until ${shortcut.title.lowercase()}, $time" },
+                ) { Text(shortcut.title) }
+            }
+            SegmentedListItem(
+                onClick = onPickDateTime,
+                shapes = segmentedShapes(count - 1, count),
+                colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                leadingContent = { IconTile(ZIcons.Snooze) },
+                trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(18.dp), tint = muted) },
+            ) { Text("Pick date & time…") }
         }
     }
 }
 
 /**
- * Custom… snooze: a whole number and Minutes / Hours / Days. Snooze stays
- * disabled until it's 1 or more and fits the core's u32 seconds.
+ * Pick date & time…: the Material date picker (today on), then the time
+ * picker. Snooze stays disabled until the moment is ahead; confirming snoozes.
  */
 @Composable
-fun CustomSnoozeDialog(onDismiss: () -> Unit, onSnooze: (SnoozeOption) -> Unit) {
-    var amount by rememberSaveable { mutableStateOf("") }
-    var unit by rememberSaveable { mutableStateOf(SnoozeUnit.Hours) }
-    val option = customSnooze(amount, unit)
-    val invalid = amount.isNotEmpty() && option == null
-    val focus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { focus.requestFocus() }
-    fun confirm() {
-        val picked = option ?: return
-        onDismiss()
-        onSnooze(picked)
+fun SnoozeDateTimeDialogs(onDismiss: () -> Unit, onSnooze: (SnoozeOption) -> Unit) {
+    val context = LocalContext.current
+    val is24Hour = android.text.format.DateFormat.is24HourFormat(context)
+    val zone = remember { java.time.ZoneId.systemDefault() }
+    val today = remember { LocalDate.now(zone) }
+    // The picker speaks UTC midnights; anything before today is out, and so is past the core's u32 seconds.
+    val utcMidnight = { d: LocalDate -> d.atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli() }
+    val lastYear = today.year + 135
+    val dateState = rememberDatePickerState(
+        initialSelectedDateMillis = utcMidnight(today.plusDays(1)),
+        yearRange = today.year..lastYear,
+        selectableDates = object : SelectableDates {
+            override fun isSelectableDate(utcTimeMillis: Long) = utcTimeMillis >= utcMidnight(today)
+            override fun isSelectableYear(year: Int) = year in today.year..lastYear
+        },
+    )
+    var date by rememberSaveable { mutableStateOf<Long?>(null) }
+    val picked = date
+    if (picked == null) {
+        DatePickerDialog(
+            onDismissRequest = onDismiss,
+            confirmButton = {
+                TextButton(onClick = { date = dateState.selectedDateMillis }, enabled = dateState.selectedDateMillis != null) { Text("Next") }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        ) { DatePicker(dateState, title = { Text("Snooze until", Modifier.padding(start = 24.dp, end = 12.dp, top = 16.dp)) }) }
+        return
     }
+    val day = java.time.Instant.ofEpochMilli(picked).atZone(java.time.ZoneOffset.UTC).toLocalDate()
+    val timeState = rememberTimePickerState(initialHour = 9, initialMinute = 0, is24Hour = is24Hour)
+    // The clock keeps moving while the picker is up: re-read it so a time that slips into the past shows as such.
+    var now by remember { mutableStateOf(ZonedDateTime.now(zone)) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(15_000)
+            now = ZonedDateTime.now(zone)
+        }
+    }
+    val at = day.atTime(timeState.hour, timeState.minute).atZone(zone)
+    val label = wakeTimeLabel(at, now, is24Hour)
+    val ahead = snoozeUntil(at, now, label) != null
     AlertDialog(
         onDismissRequest = onDismiss,
-        icon = { ZIcon(ZIcons.Snooze, null) },
-        title = { Text("Snooze for…") },
+        title = { Text(if (day == today) "Today" else day.format(java.time.format.DateTimeFormatter.ofPattern("EEE, MMM d"))) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(
-                    amount,
-                    // Digits only; ten is more than any unit allows, and the check below says so.
-                    { typed -> amount = typed.filter { it in '0'..'9' }.take(10) },
-                    singleLine = true,
-                    shape = RoundedCornerShape(16.dp),
-                    label = { Text("Amount") },
-                    isError = invalid,
-                    supportingText = {
-                        Text(
-                            when {
-                                invalid -> "Enter 1 to ${unit.max} ${unit.label.lowercase()}"
-                                option != null -> "Wakes in ${option.label}"
-                                else -> "How long to keep it out of the inbox"
-                            },
-                        )
-                    },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { confirm() }),
-                    modifier = Modifier.fillMaxWidth().focusRequester(focus),
+            Column(Modifier.verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
+                TimePicker(timeState)
+                Text(
+                    if (ahead) "Wakes $label" else "Pick a time later than now",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (ahead) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween)) {
-                    val units = SnoozeUnit.entries
-                    units.forEachIndexed { index, u ->
-                        ToggleButton(
-                            checked = unit == u,
-                            onCheckedChange = { unit = u },
-                            modifier = Modifier.weight(1f).semantics { role = Role.RadioButton },
-                            shapes = when (index) {
-                                0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
-                                units.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
-                                else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
-                            },
-                        ) { Text(u.label, maxLines = 1) }
-                    }
-                }
             }
         },
-        confirmButton = { TextButton(onClick = ::confirm, enabled = option != null) { Text("Snooze") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    // The duration is measured at the press, so the wake time stays the one picked.
+                    val pressed = ZonedDateTime.now(zone)
+                    now = pressed
+                    val option = snoozeUntil(at, pressed, wakeTimeLabel(at, pressed, is24Hour)) ?: return@TextButton
+                    onDismiss()
+                    onSnooze(option)
+                },
+                enabled = ahead,
+            ) { Text("Snooze") }
+        },
+        dismissButton = { TextButton(onClick = { date = null }) { Text("Back") } },
     )
 }
 

@@ -1,5 +1,12 @@
 package sh.zeron.android.core
 
+import java.time.DayOfWeek
+import java.time.Duration
+import java.time.LocalDate
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.time.temporal.TemporalAdjusters
+import java.util.Locale
 import uniffi.zeron_core.FrontPage
 import uniffi.zeron_core.SessionRow
 import uniffi.zeron_core.WorkspaceSnapshot
@@ -25,39 +32,68 @@ enum class SidebarMode {
     }
 }
 
-/** A snooze length offered on every touch surface (sheet, swipe, header menu). */
-data class SnoozeOption(val label: String, val short: String, val seconds: UInt)
+/**
+ * A snooze, as the core takes it (seconds from now). [phrase] finishes
+ * "Snooze …" / "Snoozed …": "for 1 hour", "until Thu 9:00 AM".
+ */
+data class SnoozeOption(val phrase: String, val short: String, val seconds: UInt)
 
-/** The presets; anything else is Custom… ([customSnooze]). */
+/** The presets; past them, ⋯ asks when it should come back ([snoozeShortcuts], or a picked date and time). */
 val SnoozeOptions = listOf(
-    SnoozeOption("15 minutes", "15m", 15u * 60u),
-    SnoozeOption("1 hour", "1h", 60u * 60u),
-    SnoozeOption("4 hours", "4h", 4u * 60u * 60u),
-    SnoozeOption("1 day", "1d", 24u * 60u * 60u),
+    SnoozeOption("for 15 minutes", "15m", 15u * 60u),
+    SnoozeOption("for 1 hour", "1h", 60u * 60u),
+    SnoozeOption("for 4 hours", "4h", 4u * 60u * 60u),
+    SnoozeOption("for 1 day", "1d", 24u * 60u * 60u),
 )
 
-/** A Custom… snooze's unit. */
-enum class SnoozeUnit(val label: String, val singular: String, val short: String, val seconds: Long) {
-    Minutes("Minutes", "minute", "m", 60),
-    Hours("Hours", "hour", "h", 3_600),
-    Days("Days", "day", "d", 86_400);
+/** A "Snooze until" shortcut in local time. */
+data class SnoozeShortcut(val title: String, val at: ZonedDateTime)
 
-    /** The most of this unit the core takes (its duration is u32 seconds). */
-    val max: Long get() = UInt.MAX_VALUE.toLong() / seconds
+/**
+ * The local-time shortcuts under ⋯: This evening (6 PM, while that's over an
+ * hour away), Tomorrow morning (9 AM), and Next week (Monday 9 AM, unless
+ * that's tomorrow).
+ */
+fun snoozeShortcuts(now: ZonedDateTime): List<SnoozeShortcut> {
+    val today = now.toLocalDate()
+    fun at(date: LocalDate, hour: Int) = date.atTime(hour, 0).atZone(now.zone)
+    val evening = at(today, 18)
+    val tomorrow = at(today.plusDays(1), 9)
+    val nextWeek = at(today.with(TemporalAdjusters.next(DayOfWeek.MONDAY)), 9)
+    return buildList {
+        if (Duration.between(now, evening) > Duration.ofHours(1)) add(SnoozeShortcut("This evening", evening))
+        add(SnoozeShortcut("Tomorrow morning", tomorrow))
+        if (nextWeek != tomorrow) add(SnoozeShortcut("Next week", nextWeek))
+    }
 }
 
 /**
- * A Custom… snooze from what was typed: a whole number from 1 up to the
- * unit's [SnoozeUnit.max], else null (the dialog keeps Snooze disabled).
+ * Seconds from now until [wakeMs], for the core's duration API: rounded up to
+ * the minute, at least a minute, at most u32. Null once it's not ahead.
  */
-fun customSnooze(amount: String, unit: SnoozeUnit): SnoozeOption? {
-    val text = amount.trim()
-    if (text.isEmpty() || !text.all { it in '0'..'9' }) return null
-    val n = text.toLongOrNull() ?: return null
-    if (n < 1 || n > unit.max) return null
-    val label = "$n ${unit.singular}${if (n == 1L) "" else "s"}"
-    return SnoozeOption(label, "$n${unit.short}", (n * unit.seconds).toUInt())
+fun secondsUntil(wakeMs: Long, nowMs: Long): UInt? {
+    val left = wakeMs - nowMs
+    if (left <= 0) return null
+    val seconds = (left + 59_999) / 60_000 * 60
+    return seconds.coerceIn(60, UInt.MAX_VALUE.toLong()).toUInt()
 }
+
+/** "6:00 PM" today, "Thu 9:00 AM" within the week, "Oct 22, 9:00 AM" later, with the year once it isn't this one. */
+fun wakeTimeLabel(at: ZonedDateTime, now: ZonedDateTime, is24Hour: Boolean, locale: Locale = Locale.getDefault()): String {
+    val time = if (is24Hour) "HH:mm" else "h:mm a"
+    val days = Duration.between(now.toLocalDate().atStartOfDay(), at.toLocalDate().atStartOfDay()).toDays()
+    val pattern = when {
+        days == 0L -> time
+        days in 1..6 -> "EEE $time"
+        at.year == now.year -> "MMM d, $time"
+        else -> "MMM d, yyyy, $time"
+    }
+    return at.format(DateTimeFormatter.ofPattern(pattern, locale))
+}
+
+/** Snooze until [at] (labelled [label]), or null when that's not ahead of [now]. */
+fun snoozeUntil(at: ZonedDateTime, now: ZonedDateTime, label: String): SnoozeOption? =
+    secondsUntil(at.toInstant().toEpochMilli(), now.toInstant().toEpochMilli())?.let { SnoozeOption("until $label", label, it) }
 
 /** The T3 shelves; each folds on its own, kept on this device. */
 enum class Shelf(val id: String, val title: String) {

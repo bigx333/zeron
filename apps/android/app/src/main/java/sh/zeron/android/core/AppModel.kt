@@ -611,7 +611,7 @@ class AppModel(private val app: Application) {
     /** Snooze out of the inbox until the core wakes it, with an Undo snackbar. */
     fun snooze(id: String, option: SnoozeOption): Boolean {
         if (!report("snooze", "Couldn't snooze. Try again.") { it.snoozeSession(id, option.seconds) }) return false
-        toast("Snoozed for ${option.label}", "Undo") { wake(id) }
+        toast("Snoozed ${option.phrase}", "Undo") { wake(id) }
         return true
     }
 
