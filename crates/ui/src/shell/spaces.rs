@@ -4301,7 +4301,7 @@ impl Shell {
         let mode = self.settings.sidebar_mode;
         let labels = [
             "Default",
-            "T3 Mode",
+            "T3",
             "By device",
             "By project",
             "None",
