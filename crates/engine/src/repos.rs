@@ -710,7 +710,9 @@ impl Repos {
             .data_dir
             .join("repos")
             .join("github.com")
-            .join(repository);
+            // GitHub repository identity is case-insensitive. Stable spelling
+            // also keeps returned paths/project IDs equal on every host OS.
+            .join(repository.to_ascii_lowercase());
         let marker = target.join(".git").join(GITHUB_CLONE_MARKER);
         if target.exists() {
             let remote = self

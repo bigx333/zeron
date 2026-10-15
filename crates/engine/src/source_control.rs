@@ -2578,6 +2578,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn github_projects_repository_casing_reuses_one_checkout_and_project_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(LocalCloneRunner {
+            source: local_clone_source(dir.path()),
+            requests: Mutex::new(Vec::new()),
+            barrier: None,
+            fail_checkout: false,
+        });
+        let github = GitHubCli::with_runner(runner.clone());
+        let repos = crate::Repos::new(&dir.path().join("engine"), "host");
+        let first = repos
+            .clone_github_repo(&github, "Owner/Repo")
+            .await
+            .unwrap();
+        let retry = repos
+            .clone_github_repo(&github, "owner/repo")
+            .await
+            .unwrap();
+        assert_eq!(first, retry);
+        assert!(
+            Path::new(&first.path).ends_with(Path::new("github.com").join("owner").join("repo"))
+        );
+        assert_eq!(
+            zeron_proto::project_identity::github_project_space_id("host", &first.path),
+            zeron_proto::project_identity::github_project_space_id("host", &retry.path)
+        );
+        assert_eq!(runner.requests.lock().unwrap().len(), 1);
+        assert_eq!(repos.list().await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn github_projects_failed_checkout_is_preserved_and_never_reused_as_complete() {
         let dir = tempfile::tempdir().unwrap();
         let runner = Arc::new(LocalCloneRunner { source: local_clone_source(dir.path()),
