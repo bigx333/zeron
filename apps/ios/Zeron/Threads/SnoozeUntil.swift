@@ -77,7 +77,7 @@ enum SnoozeUntil {
     @MainActor
     static func pickDate(from host: UIViewController, snooze: @escaping (Date) -> Void) {
         let picker = SnoozeDatePickerController(snooze: snooze)
-        let show = { [weak host] in host?.present(picker, animated: true) }
+        let show: () -> Void = { [weak host] in host?.present(picker, animated: true) }
         if let outgoing = host.presentedViewController {
             if outgoing.isBeingDismissed,
                outgoing.transitionCoordinator?.animate(alongsideTransition: nil, completion: { _ in show() }) == true {
