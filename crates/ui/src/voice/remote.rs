@@ -36,7 +36,7 @@ pub(super) async fn run(
     voice: Option<String>,
     cancel: CancellationToken,
     events: mpsc::Sender<VoiceEvent>,
-    mut controls: mpsc::Receiver<super::VoiceControl>,
+    muted: watch::Receiver<bool>,
 ) -> Result<(), VoiceRejection> {
     let client = Arc::new(
         engine
@@ -51,20 +51,8 @@ pub(super) async fn run(
         .await
         .ok()
         .flatten();
-    let media = Arc::new(Media(zeron_voice_media::DesktopMedia::for_codex(
-        codex.as_deref(),
-    )?));
-    let (mute_tx, muted) = watch::channel(false);
-    let call =
-        zeron_voice_session::run(control, media, config, voice, cancel.clone(), events, muted);
-    tokio::pin!(call);
-    loop {
-        tokio::select! {biased;
-            result=&mut call=>return result,
-            command=controls.recv()=>match command {
-                Some(super::VoiceControl::Mute(value))=>{mute_tx.send_replace(value);},
-                None=>{cancel.cancel();return (&mut call).await;},
-            }
-        }
-    }
+    let media = Arc::new(Media(
+        zeron_voice_media::DesktopMedia::for_codex(codex.as_deref())?.with_input(muted.clone()),
+    ));
+    zeron_voice_session::run(control, media, config, voice, cancel, events, muted).await
 }

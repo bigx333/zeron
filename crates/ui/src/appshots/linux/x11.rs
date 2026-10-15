@@ -81,7 +81,7 @@ fn run_shortcut(tx: mpsc::UnboundedSender<()>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn register_shortcut(
+pub(crate) fn register_shortcut(
     connection: &RustConnection,
     root: Window,
     shortcut: &super::super::shortcut::Shortcut,

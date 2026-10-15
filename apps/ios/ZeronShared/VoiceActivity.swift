@@ -12,6 +12,12 @@ struct VoiceActivityAttributes: ActivityAttributes {
         var muted: Bool
         /// When the call went live; nil while it connects.
         var since: Date?
+        /// Optional so activities created by older versions still decode.
+        var pushToTalk: Bool? = nil
+
+        var status: String {
+            pushToTalk == true && since != nil ? muted ? "Hold to talk in Zeron" : "Transmitting" : orb.status
+        }
     }
 
     /// The execution host Codex runs on ("Fedora", "MacBook Pro").

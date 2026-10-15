@@ -20,7 +20,11 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
-mod shortcut;
+pub(crate) mod shortcut;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::x11::register_shortcut as register_x11_shortcut;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::{HoldShortcut, register_hold_shortcut};
 pub(crate) use shortcut::capture_allowed;
 pub use shortcut::{set_recording, set_shortcut, validate_shortcut};
 

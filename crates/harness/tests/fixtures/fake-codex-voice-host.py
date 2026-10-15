@@ -35,7 +35,10 @@ try:
             if (root/'helper-mode').exists() and (root/'helper-mode').read_text().strip()=='stall-controls':
                 (root/'controls-stalled').write_text('true');time.sleep(60)
             send({'type':'audioControlsApplied'})
-        elif kind=='inspectAudio':send({'type':'audioState','state':{'microphonePeak':1024,'speakerPeak':0}})
+        elif kind=='inspectAudio':
+            if (root/'helper-mode').exists() and (root/'helper-mode').read_text().strip()=='stall-inspect':
+                (root/'inspect-stalled').write_text('true');time.sleep(60)
+            send({'type':'audioState','state':{'microphonePeak':1024,'speakerPeak':0}})
         elif kind=='close':send({'type':'closed'});break
         else:raise ValueError('unexpected command')
 finally:

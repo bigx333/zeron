@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -524,6 +525,8 @@ mod tests {
                 path: helper,
                 host: Default::default(),
                 stop: Default::default(),
+                input: None,
+                input_task: Default::default(),
             };
             media.prepare().await.unwrap();
             media.offer().await.unwrap();
@@ -537,6 +540,161 @@ mod tests {
             assert_eq!(media.levels().await.unwrap(), (1024, 0));
             media.stop.cancel();
         }
+    }
+
+    #[cfg(unix)]
+    async fn input_media(
+        muted: bool,
+    ) -> (
+        tempfile::TempDir,
+        Arc<DesktopMedia>,
+        tokio::sync::watch::Sender<bool>,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        use zeron_voice_session::VoiceMediaEndpoint;
+        let dir = tempfile::tempdir().unwrap();
+        let codex = codex_package(dir.path(), "0.160.0", true);
+        let helper = installed_helper(&codex).unwrap();
+        std::fs::write(
+            &helper,
+            include_bytes!("../../harness/tests/fixtures/fake-codex-voice-host.py"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (input, receiver) = tokio::sync::watch::channel(muted);
+        let media = Arc::new(
+            DesktopMedia {
+                path: helper,
+                host: Default::default(),
+                stop: Default::default(),
+                input: None,
+                input_task: Default::default(),
+            }
+            .with_input(receiver),
+        );
+        media.prepare().await.unwrap();
+        media.offer().await.unwrap();
+        media
+            .apply_answer(zeron_proto::voice::remote::Sdp::new("fixture-answer".into()).unwrap())
+            .await
+            .unwrap();
+        (dir, media, input)
+    }
+
+    #[cfg(unix)]
+    async fn wait_until(mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn last_mute(dir: &Path) -> bool {
+        std::fs::read_to_string(dir.join("helper-wire.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|frame| frame["type"] == "setAudioControls")
+            .last()
+            .unwrap()["controls"]["microphoneMuted"]
+            .as_bool()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_gate_uses_latest_release_on_activation_and_follows_ui_without_runner_calls() {
+        use zeron_voice_session::VoiceMediaEndpoint;
+        let (dir, media, input) = input_media(false).await;
+        input.send_replace(true);
+        // The runner's captured value can be stale after negotiation.
+        media.set_muted(false).await.unwrap();
+        assert!(last_mute(dir.path()));
+        input.send_replace(false);
+        wait_until(|| !last_mute(dir.path())).await;
+        input.send_replace(true);
+        wait_until(|| last_mute(dir.path())).await;
+        assert!(
+            !media.stop.is_cancelled(),
+            "healthy release keeps the call alive"
+        );
+        media.levels().await.unwrap();
+        media.close();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_gate_rechecks_release_after_waiting_for_the_pipe_on_activation() {
+        use zeron_voice_session::VoiceMediaEndpoint;
+        let (dir, media, input) = input_media(false).await;
+        let pipe = media.host.lock().await;
+        let active_media = media.clone();
+        let activation = tokio::spawn(async move { active_media.set_muted(false).await });
+        wait_until(|| media.input_task.lock().unwrap().is_some()).await;
+        input.send_replace(true);
+        drop(pipe);
+        activation.await.unwrap().unwrap();
+        let wire = std::fs::read_to_string(dir.path().join("helper-wire.jsonl")).unwrap();
+        for frame in wire
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        {
+            if frame["type"] == "setAudioControls" {
+                assert_eq!(frame["controls"]["microphoneMuted"], true);
+            }
+        }
+        assert!(!media.stop.is_cancelled());
+        media.close();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_release_closes_helper_behind_a_stalled_level_reply() {
+        use zeron_voice_session::VoiceMediaEndpoint;
+        let (dir, media, input) = input_media(false).await;
+        media.set_muted(false).await.unwrap();
+        std::fs::write(dir.path().join("helper-mode"), "stall-inspect").unwrap();
+        let levels_media = media.clone();
+        let levels = tokio::spawn(async move { levels_media.levels().await });
+        wait_until(|| dir.path().join("inspect-stalled").exists()).await;
+        let released = tokio::time::Instant::now();
+        input.send_replace(true);
+        tokio::time::timeout(Duration::from_millis(500), media.stop.cancelled())
+            .await
+            .unwrap();
+        assert!(released.elapsed() < Duration::from_millis(500));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), levels)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            media.set_muted(false).await.is_err(),
+            "a dead helper must fail the session"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_release_closes_helper_behind_a_stalled_unmute_reply() {
+        use zeron_voice_session::VoiceMediaEndpoint;
+        let (dir, media, input) = input_media(true).await;
+        media.set_muted(true).await.unwrap();
+        std::fs::write(dir.path().join("helper-mode"), "stall-controls").unwrap();
+        input.send_replace(false);
+        wait_until(|| dir.path().join("controls-stalled").exists()).await;
+        input.send_replace(true);
+        tokio::time::timeout(Duration::from_millis(500), media.stop.cancelled())
+            .await
+            .unwrap();
+        assert!(media.levels().await.is_err());
+        assert!(media.set_muted(false).await.is_err());
     }
 
     #[test]
@@ -584,8 +742,10 @@ mod tests {
 /// Instantiate one per call. Closing cannot wait behind a locked helper pipe.
 pub struct DesktopMedia {
     path: std::path::PathBuf,
-    host: tokio::sync::Mutex<Option<NativeHost>>,
+    host: Arc<tokio::sync::Mutex<Option<NativeHost>>>,
     stop: tokio_util::sync::CancellationToken,
+    input: Option<tokio::sync::watch::Receiver<bool>>,
+    input_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 impl DesktopMedia {
     /// See [`media_helper`]: the local standalone Codex unless a development
@@ -595,9 +755,61 @@ impl DesktopMedia {
             path: media_helper(codex_executable)?,
             host: Default::default(),
             stop: Default::default(),
+            input: None,
+            input_task: Default::default(),
         })
     }
+
+    /// Follow the viewport's authoritative input directly, independently of
+    /// the session runner's level-meter requests. Activation still waits for
+    /// the first set_muted call, after muted transport negotiation completes.
+    pub fn with_input(mut self, input: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.input = Some(input);
+        self
+    }
 }
+
+/// A wedged helper must never keep transmitting behind a pending meter or
+/// control reply. The deadline covers both the pipe lock and the full exchange;
+/// closing the token kills the helper and makes the session report failure.
+async fn follow_input(
+    host: Arc<tokio::sync::Mutex<Option<NativeHost>>>,
+    stop: tokio_util::sync::CancellationToken,
+    mut input: tokio::sync::watch::Receiver<bool>,
+    ready: tokio::sync::oneshot::Sender<Result<(), VoiceRejection>>,
+) {
+    let mut ready = Some(ready);
+    let result = async {
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => return Err(VoiceRejection::Protocol),
+                result = tokio::time::timeout(Duration::from_millis(100), async {
+                    let mut state = host.lock().await;
+                    let host = state.as_mut().ok_or(VoiceRejection::InvalidLease)?;
+                    // Read after acquiring the pipe: a release during a meter
+                    // request must supersede any earlier queued unmute.
+                    let muted = *input.borrow_and_update();
+                    host.controls(muted).await
+                }) => result.map_err(|_| VoiceRejection::Protocol)??,
+            }
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(Ok(()));
+            }
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => return Err(VoiceRejection::Protocol),
+                changed = input.changed() => changed.map_err(|_| VoiceRejection::Protocol)?,
+            }
+        }
+    }
+    .await;
+    stop.cancel();
+    if let Some(ready) = ready {
+        let _ = ready.send(result);
+    }
+}
+
 #[async_trait::async_trait]
 impl zeron_voice_session::VoiceMediaEndpoint for DesktopMedia {
     async fn prepare(&self) -> Result<(), VoiceRejection> {
@@ -638,6 +850,31 @@ impl zeron_voice_session::VoiceMediaEndpoint for DesktopMedia {
         host.expect(json!({"type":"setAudioControls","controls":{"microphoneMuted":true,"speakerSuppressed":true}}),"audioControlsApplied",5).await
     }
     async fn set_muted(&self, muted: bool) -> Result<(), VoiceRejection> {
+        if let Some(input) = &self.input {
+            let initial = {
+                let mut task = self.input_task.lock().unwrap();
+                if task.is_none() {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    *task = Some(tokio::spawn(follow_input(
+                        self.host.clone(),
+                        self.stop.clone(),
+                        input.clone(),
+                        tx,
+                    )));
+                    Some(rx)
+                } else {
+                    None
+                }
+            };
+            if let Some(initial) = initial {
+                initial.await.map_err(|_| VoiceRejection::Protocol)??;
+            }
+            return if self.stop.is_cancelled() {
+                Err(VoiceRejection::Protocol)
+            } else {
+                Ok(())
+            };
+        }
         self.host
             .lock()
             .await
@@ -662,5 +899,8 @@ impl zeron_voice_session::VoiceMediaEndpoint for DesktopMedia {
 impl Drop for DesktopMedia {
     fn drop(&mut self) {
         self.stop.cancel();
+        if let Some(task) = self.input_task.get_mut().unwrap().take() {
+            task.abort();
+        }
     }
 }

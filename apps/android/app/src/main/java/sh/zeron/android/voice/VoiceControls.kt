@@ -144,10 +144,12 @@ fun VoiceStartButton(
 @Composable
 fun VoiceCallStrip(controller: VoiceController, onOpenStage: () -> Unit, modifier: Modifier = Modifier, showTitle: Boolean = true) {
     val s by controller.snapshot.collectAsState()
+    val microphoneHighlighted = if (s.pushToTalk) !s.muted else s.muted
     val haptics = LocalHapticFeedback.current
     val now by rememberSecondTicker()
     val elapsed = s.elapsedText(now)
-    val detail = if (s.active) listOfNotNull(elapsed, if (s.muted) "Muted" else null).joinToString(" · ") else "Connecting…"
+    val input = if (s.pushToTalk) if (s.muted) "Hold to talk" else "Transmitting" else if (s.muted) "Muted" else null
+    val detail = if (!s.active) "Connecting…" else if (s.pushToTalk) input.orEmpty() else listOfNotNull(elapsed, input).joinToString(" · ")
     Row(
         modifier
             .clip(RoundedCornerShape(28.dp))
@@ -171,6 +173,9 @@ fun VoiceCallStrip(controller: VoiceController, onOpenStage: () -> Unit, modifie
             Text(detail, fontFamily = GeistMono, fontWeight = FontWeight.Medium, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Spacer(Modifier.width(8.dp))
+        if (s.pushToTalk) {
+            TalkPill(controller, s)
+        } else {
         FilledIconButton(
             onClick = {
                 haptics.performHapticFeedback(if (s.muted) HapticFeedbackType.ToggleOff else HapticFeedbackType.ToggleOn)
@@ -178,11 +183,12 @@ fun VoiceCallStrip(controller: VoiceController, onOpenStage: () -> Unit, modifie
             },
             shapes = IconButtonDefaults.shapes(),
             colors = IconButtonDefaults.filledIconButtonColors(
-                containerColor = if (s.muted) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceContainerHighest,
-                contentColor = if (s.muted) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurface,
+                containerColor = if (microphoneHighlighted) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceContainerHighest,
+                contentColor = if (microphoneHighlighted) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurface,
             ),
             modifier = Modifier.size(40.dp),
-        ) { ZIcon(if (s.muted) R.drawable.zi_microphone_off else R.drawable.zi_microphone, if (s.muted) "Unmute microphone" else "Mute microphone", Modifier.size(20.dp)) }
+        ) { ZIcon(if (s.muted) R.drawable.zi_microphone_off else R.drawable.zi_microphone, if (s.pushToTalk) "Hold to talk" else if (s.muted) "Unmute microphone" else "Mute microphone", Modifier.size(20.dp)) }
+        }
         Spacer(Modifier.width(6.dp))
         FilledIconButton(
             onClick = {
