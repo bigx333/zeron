@@ -114,9 +114,9 @@ loading, `bb pool` commands and BB parent-server proxying are not used by Zeron.
 Validated on macOS on 2026-10-15:
 
 - `cargo check --locked -p zeron` passed.
-- The engine account suite passed all 107 tests, including 37 pool tests, along with all 18
-  account/upload/title integration tests, using isolated credentials and local
-  mock upstreams.
+- The full engine library suite passed (545 tests, 2 ignored), including all 37
+  pool tests. All 18 account/upload/title integration tests passed, using
+  isolated credentials and local mock upstreams.
 - `cargo test -p zeron-harness --lib --tests -- --test-threads=1` passed,
   including all 327 library tests and the native Claude/Codex protocol fixtures.
 - All 1,796 UI library tests passed with `--test-threads=1`; the parallel UI run
@@ -126,6 +126,9 @@ Validated on macOS on 2026-10-15:
   case; a protocol regression test verifies recovery without losing history.
 - [Native captures](screenshots/account-pool/README.md) were reviewed in light
   and dark appearances, wide and narrow layouts, and embedded provider settings.
+- Five independent Codex review rounds covered the full feature. The final
+  review at `ed0a7e54` reported no actionable findings after the earlier findings
+  were fixed and covered by regressions.
 
 Provider request tests use isolated credentials and local mock upstreams. No
 live-provider inference smoke test was run.
