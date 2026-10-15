@@ -45,7 +45,7 @@ class TranscriptPalette(dark: Boolean, scheme: ColorScheme) {
                 ColorRole.TABLE_HEADER_BACKGROUND -> c(0xF3F3F5, 0x121215)
                 ColorRole.USER_BUBBLE -> scheme.surfaceContainerHigh.toArgb()
                 ColorRole.CHIP_BACKGROUND -> c(0xE7E7EB, 0x1C1C20)
-                ColorRole.SYNTAX_KEYWORD -> c(0x5B43E8, 0x8B7CF6)
+                ColorRole.SYNTAX_KEYWORD -> c(0x105FD9, 0x57A8FF)
                 ColorRole.SYNTAX_STRING -> c(0x15803D, 0x34D399)
                 ColorRole.SYNTAX_COMMENT -> c(0x6B7280, 0x92929A)
                 ColorRole.SYNTAX_NUMBER, ColorRole.SYNTAX_CONSTANT -> c(0xA16207, 0xFACC15)

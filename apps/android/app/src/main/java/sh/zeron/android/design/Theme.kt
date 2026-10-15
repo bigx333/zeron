@@ -24,13 +24,13 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-/** Zeron Light / Zeron Dark (crates/theme builtins): cool neutrals, violet accent. */
+/** Zeron Light / Zeron Dark (crates/theme builtins): cool neutrals, Nova blue accent. */
 private val ZeronLight = lightColorScheme(
-    primary = Color(0xFF5B43E8),
+    primary = Color(0xFF105FD9),
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFE5E0FF),
-    onPrimaryContainer = Color(0xFF1E0E6B),
-    inversePrimary = Color(0xFF8B7CF6),
+    primaryContainer = Color(0xFFDCE8FF),
+    onPrimaryContainer = Color(0xFF0B2A6B),
+    inversePrimary = Color(0xFF57A8FF),
     secondary = Color(0xFF5E5A71),
     onSecondary = Color.White,
     secondaryContainer = Color(0xFFE4E1F0),
@@ -45,7 +45,7 @@ private val ZeronLight = lightColorScheme(
     onSurface = Color(0xFF27272C),
     surfaceVariant = Color(0xFFE7E7EB),
     onSurfaceVariant = Color(0xFF62626A),
-    surfaceTint = Color(0xFF5B43E8),
+    surfaceTint = Color(0xFF105FD9),
     surfaceBright = Color(0xFFFFFFFF),
     surfaceDim = Color(0xFFE2E2E6),
     surfaceContainerLowest = Color(0xFFFFFFFF),
@@ -65,11 +65,11 @@ private val ZeronLight = lightColorScheme(
 )
 
 private val ZeronDark = darkColorScheme(
-    primary = Color(0xFF8B7CF6),
-    onPrimary = Color(0xFF1A0F5C),
-    primaryContainer = Color(0xFF2F2670),
-    onPrimaryContainer = Color(0xFFE5E0FF),
-    inversePrimary = Color(0xFF5B43E8),
+    primary = Color(0xFF57A8FF),
+    onPrimary = Color(0xFF0A2350),
+    primaryContainer = Color(0xFF1C3A78),
+    onPrimaryContainer = Color(0xFFDCE8FF),
+    inversePrimary = Color(0xFF105FD9),
     secondary = Color(0xFFC8C3DC),
     onSecondary = Color(0xFF302D40),
     secondaryContainer = Color(0xFF26242F),
@@ -84,7 +84,7 @@ private val ZeronDark = darkColorScheme(
     onSurface = Color(0xFFE8E8EA),
     surfaceVariant = Color(0xFF1C1C20),
     onSurfaceVariant = Color(0xFFA9A9AE),
-    surfaceTint = Color(0xFF8B7CF6),
+    surfaceTint = Color(0xFF57A8FF),
     surfaceBright = Color(0xFF26262A),
     surfaceDim = Color(0xFF060606),
     surfaceContainerLowest = Color(0xFF000000),
