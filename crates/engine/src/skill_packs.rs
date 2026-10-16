@@ -1052,23 +1052,30 @@ async fn install_at(paths: &Paths, token: &str, auto_update: bool) -> Result<Ski
 async fn ensure_full_clone(checkout: &Path) -> Result<(), String> {
     // Any marker counts: the promisor ones are cleared only after the full
     // fetch succeeds, so an interrupted migration is retried next time.
-    let mut partial = false;
-    for key in [
-        "remote.origin.partialclonefilter",
-        "remote.origin.promisor",
-        "extensions.partialclone",
-    ] {
+    let filtered = git(
+        Some(checkout),
+        &["config", "--get", "remote.origin.partialclonefilter"],
+    )
+    .await
+    .is_ok();
+    let mut partial = filtered;
+    for key in ["remote.origin.promisor", "extensions.partialclone"] {
         partial |= git(Some(checkout), &["config", "--get", key]).await.is_ok();
     }
     if !partial {
         return Ok(());
     }
-    // Without the filter the refetch downloads everything a full clone has.
-    let _ = git(
-        Some(checkout),
-        &["config", "--unset-all", "remote.origin.partialclonefilter"],
-    )
-    .await;
+    // Without the filter the refetch downloads everything a full clone has;
+    // a filter that can't be removed (a locked config) must stop here, or
+    // the refetch would quietly stay partial.
+    if filtered {
+        git(
+            Some(checkout),
+            &["config", "--unset-all", "remote.origin.partialclonefilter"],
+        )
+        .await
+        .map_err(|error| format!("Couldn't finish downloading the pack: {error}"))?;
+    }
     git_in(
         Some(checkout),
         true,
@@ -1774,6 +1781,19 @@ mod tests {
         assert!(!missing.lines().any(|line| line.starts_with('?')));
         // Already full: nothing to do.
         ensure_full_clone(&checkout).await.unwrap();
+    }
+
+    /// A filter that can't be removed stops the migration instead of letting
+    /// a filtered refetch pass for a full one.
+    #[tokio::test]
+    async fn a_stuck_filter_stops_the_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run(&repo, &["init", "-q"]);
+        run(&repo, &["config", "remote.origin.partialclonefilter", "blob:none"]);
+        std::fs::write(repo.join(".git/config.lock"), "").unwrap();
+        assert!(ensure_full_clone(&repo).await.is_err());
     }
 
     /// Live: `cargo test -p zeron-engine skill_packs::tests::live -- --ignored`.
