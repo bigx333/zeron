@@ -5813,7 +5813,7 @@ impl Pickers {
                         "id":"gpt-5.4",
                         "label":"GPT-5.4",
                         "description":"Best for complex coding and reasoning",
-                        "reasoningLevels":["low","medium","high","xhigh"],
+                        "reasoningLevels":["low","medium","high","xhigh","ultra"],
                         "options":[
                             {
                                 "id":"serviceTier",
@@ -9881,7 +9881,7 @@ mod tests {
         );
         assert_eq!(
             models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
-            vec!["Opus 5.5", "Fable 5", "Sonnet 5", "Haiku 4.5", "Nova 1"]
+            vec!["Opus 5.5", "Fable 5", "Sonnet 5.5", "Haiku 5.5", "Nova 1"]
         );
         assert_eq!(
             models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),

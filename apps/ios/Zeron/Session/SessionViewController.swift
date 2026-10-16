@@ -103,6 +103,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             return .sent
         }
         composer.onStop = { [weak self] in self?.source.stop() }
+        composer.onChipTap = { [weak self] id, chip in
+            if id == "effort" { self?.showEffort(from: chip) }
+        }
         composer.text = Drafts.load(chatId)
         composer.mentionSearch = { [weak self] q in await self?.source.searchFiles(q) ?? [] }
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
@@ -351,6 +354,19 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
     @objc private func dismissComposer() {
         if composer.textView.isFirstResponder { composer.resignFirstResponder() }
+    }
+
+    /// The effort chip opens the effort slider by the chip; each level it
+    /// settles on applies to the session.
+    private func showEffort(from chip: UIView) {
+        guard presentedViewController == nil else { return }
+        Task { @MainActor [weak self, weak chip] in
+            guard let self, let choice = await self.source.effortChoice() else { return }
+            guard let chip, chip.window != nil, self.presentedViewController == nil else { return }
+            EffortSheetController.present(from: self, anchor: chip, choice: choice) { [weak self] level in
+                self?.source.setEffort(level)
+            }
+        }
     }
 
     /// Controls in the transcript (tool rows, copy, disclosure) keep their taps.

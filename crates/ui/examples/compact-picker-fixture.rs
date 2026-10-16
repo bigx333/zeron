@@ -178,6 +178,40 @@ fn main() -> anyhow::Result<()> {
             cx.spawn(async move |cx| {
                 let result: anyhow::Result<()> = async {
                     pause(cx).await;
+                    // The effort track at the model's default, the top tier
+                    // (heat, glow and the thumb's halo) and the lowest step,
+                    // then back to the default by keyboard.
+                    capture(window.into(), cx, &output, "compact-effort-default.png")?;
+                    for (key, name, level) in [
+                        ("end", "compact-effort-ultra.png", zeron_proto::ReasoningLevel::Ultra),
+                        ("left", "compact-effort-xhigh.png", zeron_proto::ReasoningLevel::XHigh),
+                        ("home", "compact-effort-low.png", zeron_proto::ReasoningLevel::Low),
+                    ] {
+                        press(window.into(), cx, key)?;
+                        pause(cx).await;
+                        pause(cx).await;
+                        window.update(cx, |view, _, cx| {
+                            let state = view.pickers.read(cx).fixture_compact_state(cx);
+                            assert_eq!(state.reasoning, Some(level));
+                        })?;
+                        capture(window.into(), cx, &output, name)?;
+                    }
+                    window.update(cx, |view, _, cx| {
+                        appearance::set_mode(appearance::AppearanceMode::Light, cx);
+                        cx.notify();
+                        let _ = view;
+                    })?;
+                    press(window.into(), cx, "end")?;
+                    pause(cx).await;
+                    pause(cx).await;
+                    capture(window.into(), cx, &output, "compact-effort-ultra-light.png")?;
+                    for key in ["home", "right", "right"] {
+                        press(window.into(), cx, key)?;
+                    }
+                    window.update(cx, |_, _, cx| {
+                        appearance::set_mode(appearance::AppearanceMode::Dark, cx);
+                    })?;
+                    pause(cx).await;
                     for (appearance, width, label) in [
                         (appearance::AppearanceMode::Dark, 840.0, "dark-wide"),
                         (appearance::AppearanceMode::Dark, 360.0, "dark-narrow"),
@@ -203,7 +237,7 @@ fn main() -> anyhow::Result<()> {
                     pause(cx).await;
                     window.update(cx, |view, _, cx| {
                         let state = view.pickers.read(cx).fixture_compact_state(cx);
-                        assert_eq!(state.reasoning, Some(zeron_proto::ReasoningLevel::XHigh));
+                        assert_eq!(state.reasoning, Some(zeron_proto::ReasoningLevel::Ultra));
                     })?;
                     capture(
                         window.into(),

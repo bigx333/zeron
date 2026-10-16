@@ -74,8 +74,12 @@ protocol SessionSource: AnyObject {
     func beginEdit(_ id: String) async -> String?
     /// Commit (text) or cancel (nil) the active edit.
     func finishEdit(text: String?) async
-    /// Menu for a composer chip (model, effort, branch…), or nil.
+    /// Menu for a composer chip (model, branch…), or nil.
     func chipMenu(_ id: String) -> UIMenu?
+    /// The session model's effort ladder for the effort popover (nil: none).
+    @MainActor func effortChoice() async -> EffortChoice?
+    /// Apply a reasoning effort (a wire value from `effortChoice`).
+    func setEffort(_ level: String)
     func loadImage(_ reference: String, into view: RemoteImageView)
     /// An attachment's picture, for opening it full size (an image chip or a
     /// host-path link). Throws why it can't be shown.
@@ -218,16 +222,22 @@ final class FixtureSessionSource: SessionSource {
                     }
                 }
             })
-        case "effort":
-            return UIMenu(title: "Reasoning effort", children: ["Low", "Medium", "High", "Max"].map { e in
-                UIAction(title: e, state: chrome.chips.first { $0.id == "effort" }?.title == e ? .on : .off) { [weak self] _ in
-                    self?.update { c in
-                        if let i = c.chips.firstIndex(where: { $0.id == "effort" }) { c.chips[i] = ComposerChip(id: "effort", title: e, symbol: "gauge.with.dots.needle.67percent") }
-                    }
-                }
-            })
         default:
             return nil
+        }
+    }
+
+    private static let efforts = ["low", "medium", "high", "max", "ultrathink"]
+    private var effort = "high"
+
+    @MainActor func effortChoice() async -> EffortChoice? {
+        EffortChoice(levels: Self.efforts, current: effort, defaultLevel: "high")
+    }
+
+    func setEffort(_ level: String) {
+        effort = level
+        update { c in
+            if let i = c.chips.firstIndex(where: { $0.id == "effort" }) { c.chips[i] = ComposerChip(id: "effort", title: reasoningLabel(level: level), symbol: "gauge.with.dots.needle.67percent") }
         }
     }
     func loadImage(_ reference: String, into view: RemoteImageView) {}

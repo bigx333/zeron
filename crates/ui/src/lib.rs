@@ -31,6 +31,7 @@ mod composer_markdown;
 mod context_usage;
 mod dictation;
 pub mod edge_fade;
+mod effort_slider;
 pub mod rounded_clip;
 pub mod file_icons;
 pub mod files;

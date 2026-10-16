@@ -426,7 +426,32 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "tool-detail")
     }
 
+    /// The effort popover lifts the slider's track out of the chip; it's a
+    /// custom adjustable control, so tests tap a point on it.
+    private func effortTrack(_ app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)["effort-track"].firstMatch
+    }
+
+    /// Tap the open popover's track at `position` (0: the lowest step, 1: the
+    /// highest) and return the level it names.
+    @discardableResult
+    private func pickEffort(_ app: XCUIApplication, at position: CGFloat) -> String {
+        let track = effortTrack(app)
+        XCTAssertTrue(track.waitForExistence(timeout: 5), "effort popover opens")
+        track.coordinate(withNormalizedOffset: CGVector(dx: position, dy: 0.5)).tap()
+        let level = track.value as? String ?? ""
+        XCTAssertFalse(level.isEmpty, "the track names its level")
+        return level
+    }
+
+    private func waitForLabel(_ element: XCUIElement, containing text: String, timeout: TimeInterval = 5) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", text), object: element)
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
+    }
+
     /// Regression: picking a reasoning effort from the composer chip crashed.
+    /// The chip opens the effort slider; a level applies at once, the popover
+    /// stays for another try, and Done or a tap outside closes it.
     func testEffortPickerInSession() {
         let app = launch(["-route", "chat:chat-deploy"])
         let input = app.textViews["composer-input"]
@@ -435,14 +460,23 @@ final class SessionFlowTests: XCTestCase {
         let chip = app.buttons["composer-chip-effort"]
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         chip.tap()
-        let item = app.collectionViews.buttons.element(boundBy: 0)
-        XCTAssertTrue(item.waitForExistence(timeout: 5), "effort levels load")
-        snapshot(app, "effort-menu")
-        item.tap()
+        snapshot(app, "effort-popover")
+        let low = pickEffort(app, at: 0.03)
+        XCTAssertTrue(waitForLabel(chip, containing: low), "chip names the picked effort, got \(chip.label)")
+        XCTAssertTrue(effortTrack(app).exists, "the popover stays up after a pick")
+        let high = pickEffort(app, at: 0.97)
+        XCTAssertNotEqual(high, low)
+        XCTAssertTrue(waitForLabel(chip, containing: high), "chip follows the next pick, got \(chip.label)")
+        snapshot(app, "effort-popover-top")
+        app.buttons["effort-done"].tap()
+        XCTAssertTrue(effortTrack(app).waitForNonExistence(timeout: 5), "Done closes the popover")
         XCTAssertTrue(input.waitForExistence(timeout: 5))
         XCTAssertEqual(app.state, .runningForeground)
+        // Again, closed with a tap outside.
         chip.tap()
-        XCTAssertTrue(app.collectionViews.buttons.element(boundBy: 0).waitForExistence(timeout: 5))
+        XCTAssertTrue(effortTrack(app).waitForExistence(timeout: 5))
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        XCTAssertTrue(effortTrack(app).waitForNonExistence(timeout: 5), "a tap outside closes the popover")
         XCTAssertEqual(app.state, .runningForeground)
     }
 
@@ -468,8 +502,10 @@ final class SessionFlowTests: XCTestCase {
         let effort = app.buttons["composer-chip-effort"]
         XCTAssertTrue(effort.waitForExistence(timeout: 5))
         effort.tap()
-        app.buttons["Low"].firstMatch.tap()
-        XCTAssertTrue(effort.label.contains("Low"))
+        let picked = pickEffort(app, at: 0.03)
+        XCTAssertTrue(waitForLabel(effort, containing: picked), "chip names the picked effort, got \(effort.label)")
+        app.buttons["effort-done"].tap()
+        XCTAssertTrue(effortTrack(app).waitForNonExistence(timeout: 5))
         // Drag the sheet away by its top edge.
         let bar = app.navigationBars["New Session"]
         let top = bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
@@ -479,7 +515,7 @@ final class SessionFlowTests: XCTestCase {
         accessory.tap()
         XCTAssertTrue(input.waitForExistence(timeout: 5))
         XCTAssertEqual(input.value as? String, "Half-written idea", "typed text comes back")
-        XCTAssertTrue(app.buttons["composer-chip-effort"].label.contains("Low"), "picked effort comes back")
+        XCTAssertTrue(app.buttons["composer-chip-effort"].label.contains(picked), "picked effort comes back")
 
         // Sending uses it up: the next page starts empty.
         app.buttons["composer-send"].tap()
@@ -496,9 +532,10 @@ final class SessionFlowTests: XCTestCase {
         let chip = app.buttons["composer-chip-effort"]
         XCTAssertTrue(chip.waitForExistence(timeout: 10))
         chip.tap()
-        let item = app.collectionViews.buttons.element(boundBy: 0)
-        XCTAssertTrue(item.waitForExistence(timeout: 5))
-        item.tap()
+        let top = pickEffort(app, at: 0.97)
+        XCTAssertTrue(waitForLabel(chip, containing: top), "chip names the picked effort, got \(chip.label)")
+        app.buttons["effort-done"].tap()
+        XCTAssertTrue(effortTrack(app).waitForNonExistence(timeout: 5))
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         XCTAssertEqual(app.state, .runningForeground)
     }

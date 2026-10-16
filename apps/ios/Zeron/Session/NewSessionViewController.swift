@@ -43,6 +43,8 @@ struct ModelChoice: Equatable {
     let description: String?
     let efforts: [String]
     let legacy: Bool
+    /// The model's own default effort (the effort slider's reset target).
+    var defaultEffort: String? = nil
 }
 
 /// "Ask anything" → a composer-first canvas. Context is set with native menus
@@ -143,7 +145,9 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             guard let self else { return UIMenu() }
             return AttachmentPicker.menu(host: self, limit: 8 - self.composer.images.count) { [weak self] in self?.composer.addImages($0) }
         }
-        composer.onChipTap = { _, _ in }
+        composer.onChipTap = { [weak self] id, chip in
+            if id == "effort" { self?.showEffort(from: chip) }
+        }
         composer.dictation = app.dictation
         composer.mentionSearch = { [weak self] q in
             guard let self, let p = self.project else { return [] }
@@ -214,7 +218,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private static func catalogModels() -> [ModelChoice] {
         fallbackHarnesses().filter(\.offered).flatMap { h in
-            fallbackModels(harness: h.id).map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, description: $0.description, efforts: $0.reasoningLevels, legacy: $0.legacy) }
+            fallbackModels(harness: h.id).map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, description: $0.description, efforts: $0.reasoningLevels, legacy: $0.legacy, defaultEffort: $0.defaultReasoning) }
         }
     }
 
@@ -269,21 +273,21 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             chips.append(ComposerChip(id: "project", title: "No project", symbol: "tray"))
             chips.append(ComposerChip(id: "host", title: host?.name ?? "Choose host", symbol: "desktopcomputer"))
         }
-        let model = models.first { $0.harness == draft.harness && $0.id == draft.model } ?? models.first { $0.harness == draft.harness }
+        let model = currentModel
         // Never the harness name in place of a model: a model this host
         // hasn't listed still gets its catalog label.
         let modelTitle = model?.label ?? draft.model.map { modelLabel(harness: draft.harness, model: $0) } ?? fallbackModels(harness: draft.harness).first?.label ?? HarnessNames.label(draft.harness)
         chips.append(ComposerChip(id: "model", title: modelTitle, symbol: nil, icon: BrandMarks.image(forModel: model?.id ?? draft.model, harness: draft.harness, side: 13)))
-        if let efforts = model?.efforts, !efforts.isEmpty {
-            chips.append(ComposerChip(id: "effort", title: (draft.effort ?? efforts[efforts.count / 2]).capitalized, symbol: "gauge.with.dots.needle.67percent"))
+        if let model, let level = effort(for: model) {
+            chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: level), symbol: "gauge.with.dots.needle.67percent"))
         }
         composer.chips = chips
+        // Effort opens its slider from the chip tap (a menu can't host it).
         composer.chipMenus = [
             "project": { [weak self] in self?.projectMenu() },
             "host": { [weak self] in self?.hostMenu() },
             "branch": { [weak self] in self?.branchMenu() },
             "model": { [weak self] in self?.modelMenu() },
-            "effort": { [weak self] in self?.effortMenu() },
         ]
         mark.image = BrandMarks.image(for: draft.harness, side: 34)
     }
@@ -421,14 +425,27 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         })
     }
 
-    private func effortMenu() -> UIMenu {
-        let model = models.first { $0.harness == draft.harness && $0.id == draft.model } ?? models.first { $0.harness == draft.harness }
-        return UIMenu(title: "Reasoning effort", children: (model?.efforts ?? []).map { e in
-            UIAction(title: e.capitalized, state: e == draft.effort ? .on : .off) { [weak self] _ in
-                self?.draft.effort = e
-                self?.refreshChips()
-            }
-        })
+    /// The draft's model, or the harness's first.
+    private var currentModel: ModelChoice? {
+        models.first { $0.harness == draft.harness && $0.id == draft.model } ?? models.first { $0.harness == draft.harness }
+    }
+
+    /// The effort the session will start with: the one picked, else the
+    /// model's default, else the middle of its ladder (nil: no ladder).
+    private func effort(for model: ModelChoice) -> String? {
+        guard !model.efforts.isEmpty else { return nil }
+        if let picked = draft.effort, model.efforts.contains(picked) { return picked }
+        if let d = model.defaultEffort, model.efforts.contains(d) { return d }
+        return model.efforts[model.efforts.count / 2]
+    }
+
+    private func showEffort(from chip: UIView) {
+        guard let model = currentModel, let current = effort(for: model) else { return }
+        let choice = EffortChoice(levels: model.efforts, current: current, defaultLevel: model.defaultEffort)
+        EffortSheetController.present(from: self, anchor: chip, choice: choice) { [weak self] level in
+            self?.draft.effort = level
+            self?.refreshChips()
+        }
     }
 
     /// False when the session couldn't be created (the prompt stays put).

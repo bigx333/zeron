@@ -62,8 +62,12 @@ final class CoreSessionSource: SessionSource {
         if let model = row?.modelLabel ?? row?.harnessLabel {
             chips.append(ComposerChip(id: "model", title: model, symbol: nil, icon: BrandMarks.image(forModel: row?.model, harness: row?.harness ?? "claude-code", side: 13)))
         }
-        if let r = row?.reasoning, !r.isEmpty {
-            chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: "gauge.with.dots.needle.67percent"))
+        // The effort shows whenever the model has a ladder, not only once a
+        // level was set: a session on the model's default names that default.
+        let harness = row?.harness ?? "claude-code"
+        let info = sessionModel(row?.model, in: models(harness: harness))
+        if let level = Self.effortLevel(reasoning: row?.reasoning, levels: info?.reasoningLevels ?? [], defaultLevel: info?.defaultReasoning) {
+            chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: level), symbol: "gauge.with.dots.needle.67percent"))
         }
         if let pr = row?.pullRequest {
             let state: SessionRowVM.PR = switch pr.state { case .open: .open; case .merged: .merged; case .closed: .closed }
@@ -240,19 +244,6 @@ final class CoreSessionSource: SessionSource {
                     }
                 }
             }])
-        case "effort":
-            return UIMenu(title: "Reasoning effort", children: [UIDeferredMenuElement { [weak self] done in
-                guard let self else { return done([]) }
-                Task { @MainActor in
-                    let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
-                    let levels = models.first { $0.id == row.model }?.reasoningLevels ?? models.first?.reasoningLevels ?? []
-                    done(levels.map { l in
-                        UIAction(title: reasoningLabel(level: l), state: l == row.reasoning ? .on : .off) { [weak self] _ in
-                            self?.setConfig { $0.reasoning = l }
-                        }
-                    })
-                }
-            }])
         case "pr":
             guard let url = row.pullRequest.flatMap({ URL(string: $0.url) }) else { return nil }
             return UIMenu(title: row.pullRequest?.title ?? "", children: [
@@ -262,6 +253,55 @@ final class CoreSessionSource: SessionSource {
         default:
             return nil
         }
+    }
+
+    /// The session's model catalog, keyed by host and harness: the built-in
+    /// one at once, then the host's own once it answers. Loaded up front,
+    /// because whether the effort chip shows depends on the model's ladder.
+    private var catalog: (key: String, models: [ModelInfo], fromHost: Bool)?
+
+    private func models(harness: String) -> [ModelInfo] {
+        let key = "\(hostDevice)\u{0}\(harness)"
+        if let catalog, catalog.key == key { return catalog.models }
+        let models = fallbackModels(harness: harness)
+        catalog = (key, models, false)
+        let device = hostDevice
+        if !device.isEmpty {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let listed = (try? await self.client.listModels(deviceId: device, harness: harness)) ?? []
+                guard !listed.isEmpty, self.catalog?.key == key else { return }
+                self.catalog = (key, listed, true)
+                self.refresh()
+            }
+        }
+        return models
+    }
+
+    private func sessionModel(_ id: String?, in models: [ModelInfo]) -> ModelInfo? {
+        models.first { $0.id == id } ?? models.first
+    }
+
+    /// The effort the chip names: the session's own, else the model's
+    /// default, else the middle of its ladder. Nil when there's nothing to
+    /// name (no ladder and no level set).
+    static func effortLevel(reasoning: String?, levels: [String], defaultLevel: String?) -> String? {
+        if let r = reasoning, !r.isEmpty { return r }
+        guard !levels.isEmpty else { return nil }
+        if let d = defaultLevel, levels.contains(d) { return d }
+        return levels[levels.count / 2]
+    }
+
+    @MainActor func effortChoice() async -> EffortChoice? {
+        guard let row = app?.row(chatId) else { return nil }
+        // The same catalog the chip was built from, so the two agree.
+        guard let model = sessionModel(row.model, in: models(harness: row.harness ?? "claude-code")), !model.reasoningLevels.isEmpty else { return nil }
+        let current = Self.effortLevel(reasoning: row.reasoning, levels: model.reasoningLevels, defaultLevel: model.defaultReasoning)
+        return EffortChoice(levels: model.reasoningLevels, current: current, defaultLevel: model.defaultReasoning)
+    }
+
+    func setEffort(_ level: String) {
+        setConfig { $0.reasoning = level }
     }
 
     private func setConfig(_ change: (inout ChatConfig) -> Void) {
