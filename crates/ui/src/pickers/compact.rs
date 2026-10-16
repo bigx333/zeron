@@ -19,6 +19,8 @@ pub(super) fn compact_list_height(rows: usize) -> f32 {
 // The effort track (see `effort_slider`): a 44px pill with the thumb inset
 // in it. Stops and pointer input share the thumb's centre inset.
 const SLIDER_HEIGHT: f32 = crate::effort_slider::TRACK_HEIGHT;
+/// The beat between the two knocks of crossing into the top effort tiers.
+pub(super) const PEAK_KNOCK_GAP: std::time::Duration = std::time::Duration::from_millis(70);
 /// Both header buttons fill the header's height, so they sit one card inset
 /// from the card's top and sides and their radius is concentric with its
 /// corners. The model's name titles it; the effort has its own row below.
@@ -659,6 +661,7 @@ impl Pickers {
     /// springs to it; nothing applies until release.
     pub(super) fn effort_press(&mut self, x: gpui::Pixels, cx: &mut Context<Self>) {
         self.effort_dragging = true;
+        self.effort_against_end = false;
         self.compact_motion.drag_fraction = None;
         self.compact_motion.effort_pending = None;
         self.effort_point(x, false, cx);
@@ -688,12 +691,31 @@ impl Pickers {
         if follow {
             let fraction = effort_slider::fraction_at(x, width, height);
             self.compact_motion.drag_fraction = Some(if count > 1 { fraction } else { 0.0 });
+            // Pushing past either end bumps once, until the pointer comes back.
+            let against = effort_slider::past_end(x, width, height);
+            if against && !self.effort_against_end {
+                crate::haptics::perform(crate::haptics::Feedback::Edge);
+            }
+            self.effort_against_end = against;
         }
-        if step != self.shown_effort_step(&effort) {
-            crate::haptics::selection_step();
-        }
+        let feedback = effort_slider::detent_feedback(self.shown_effort_step(&effort), step, &effort.peaks);
+        self.effort_feedback(feedback, cx);
         self.compact_motion.effort_pending = Some(step);
         cx.notify();
+    }
+
+    /// Plays a detent's trackpad feedback; crossing into the top tiers is a
+    /// firmer double knock.
+    fn effort_feedback(&mut self, feedback: Option<crate::haptics::Feedback>, cx: &mut Context<Self>) {
+        let Some(feedback) = feedback else { return };
+        crate::haptics::perform(feedback);
+        if feedback == crate::haptics::Feedback::Peak {
+            cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(PEAK_KNOCK_GAP).await;
+                crate::haptics::selection_step();
+            })
+            .detach();
+        }
     }
 
     /// Release applies the step the thumb springs to (the haptics already
@@ -718,16 +740,17 @@ impl Pickers {
             && !matches!(id, ModelSetting::Option(id) if hidden.contains(id))
     }
 
-    /// Apply a step from the keyboard, the reset button or a test, with
-    /// one haptic tick.
+    /// Apply a step from the keyboard, the reset button or a test, with its
+    /// trackpad feedback.
     pub(super) fn pick_compact_effort(
         &mut self,
         effort: CompactEffort,
         index: usize,
         cx: &mut Context<Self>,
     ) {
+        let feedback = effort_slider::detent_feedback(effort.selected, index, &effort.peaks);
         if self.apply_compact_effort(effort, index, cx) {
-            crate::haptics::selection_step();
+            self.effort_feedback(feedback, cx);
         }
     }
 

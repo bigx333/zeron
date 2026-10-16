@@ -797,6 +797,8 @@ pub struct Pickers {
     compact_strip_scroll: gpui::ScrollHandle,
     compact_strip_viewed: Option<usize>,
     effort_dragging: bool,
+    /// The pointer is pushing past an end of the effort track; it bumped once.
+    effort_against_end: bool,
     compact_motion: compact::CompactMotion,
     compact_keyboard: bool,
     effort_bounds: Option<gpui::Bounds<gpui::Pixels>>,
@@ -1071,6 +1073,7 @@ impl Pickers {
             compact_strip_scroll: gpui::ScrollHandle::new(),
             compact_strip_viewed: None,
             effort_dragging: false,
+            effort_against_end: false,
             compact_motion: compact::CompactMotion::default(),
             compact_keyboard: false,
             effort_bounds: None,
@@ -8991,6 +8994,52 @@ mod tests {
             .read_with(cx, |picker, cx| {
                 assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::High));
                 assert_eq!(crate::haptics::step_count() - haptics_before, 4);
+            })
+            .unwrap();
+        // Into the top tiers the trackpad knocks twice: firmly, then a tick.
+        use crate::haptics::Feedback;
+        handle
+            .update(cx, |picker, _, cx| {
+                let mut claude = bare_model("claude", "Claude model");
+                claude.reasoning_levels =
+                    vec![ReasoningLevel::Low, ReasoningLevel::High, ReasoningLevel::Ultracode];
+                picker
+                    .models
+                    .insert(HarnessId::ClaudeCode, Loadable::Ready(vec![claude]));
+                cx.notify();
+            })
+            .unwrap();
+        let played = handle.read_with(cx, |_, _| crate::haptics::played().len()).unwrap();
+        cx.simulate_keystrokes(handle.into(), "end");
+        cx.executor().advance_clock(compact::PEAK_KNOCK_GAP * 2);
+        cx.run_until_parked();
+        handle
+            .read_with(cx, |picker, cx| {
+                assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::Ultracode));
+                assert_eq!(crate::haptics::played()[played..], [Feedback::Peak, Feedback::Step]);
+            })
+            .unwrap();
+        // Dragging ticks once per detent crossed, and pushing past an end
+        // bumps once until the pointer comes back.
+        cx.simulate_keystrokes(handle.into(), "home");
+        let played = handle.read_with(cx, |_, _| crate::haptics::played().len()).unwrap();
+        handle
+            .update(cx, |picker, _, cx| {
+                picker.effort_bounds = Some(gpui::Bounds::new(
+                    gpui::point(px(0.0), px(0.0)),
+                    gpui::size(px(200.0), px(44.0)),
+                ));
+                picker.effort_press(px(22.0), cx);
+                picker.effort_drag(px(5.0), cx);
+                picker.effort_drag(px(2.0), cx);
+                picker.effort_drag(px(30.0), cx);
+                picker.effort_drag(px(5.0), cx);
+                picker.effort_release(cx);
+            })
+            .unwrap();
+        handle
+            .read_with(cx, |_, _| {
+                assert_eq!(crate::haptics::played()[played..], [Feedback::Edge, Feedback::Edge]);
             })
             .unwrap();
     }

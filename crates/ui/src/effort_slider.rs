@@ -122,6 +122,26 @@ pub(crate) fn step_fraction(step: usize, count: usize) -> f32 {
     }
 }
 
+/// The trackpad feedback for the thumb moving from step `from` to `to`:
+/// a tick per detent, a firmer knock crossing into the top tiers, nothing
+/// when it stays put.
+pub(crate) fn detent_feedback(from: usize, to: usize, peaks: &[bool]) -> Option<crate::haptics::Feedback> {
+    use crate::haptics::Feedback;
+    let peak = |i: usize| peaks.get(i).copied().unwrap_or(false);
+    (from != to).then(|| if to > from && peak(to) && !peak(from) { Feedback::Peak } else { Feedback::Step })
+}
+
+/// Whether a pointer `x` has run past either end of the thumb's travel (by
+/// more than a few pixels, so resting on the last step doesn't count).
+pub(crate) fn past_end(x: f32, width: f32, height: f32) -> bool {
+    let r = height / 2.0;
+    x < r - EDGE_SLACK || x > width - r + EDGE_SLACK
+}
+
+/// How far past the end of its travel the pointer goes before the track
+/// bumps back.
+const EDGE_SLACK: f32 = 6.0;
+
 /// Reset shows only while the shown step differs from the model's default.
 pub(crate) fn reset_visible(shown: usize, default: Option<usize>) -> bool {
     default.is_some_and(|default| default != shown)
@@ -592,6 +612,29 @@ fn paint_strips(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn detents_tick_and_knock_into_the_top_tiers() {
+        use crate::haptics::Feedback;
+        let peaks = [false, false, false, true, true];
+        assert_eq!(detent_feedback(1, 1, &peaks), None);
+        assert_eq!(detent_feedback(0, 1, &peaks), Some(Feedback::Step));
+        assert_eq!(detent_feedback(2, 3, &peaks), Some(Feedback::Peak));
+        // Within the top tiers, and on the way down, a plain tick.
+        assert_eq!(detent_feedback(3, 4, &peaks), Some(Feedback::Step));
+        assert_eq!(detent_feedback(4, 2, &peaks), Some(Feedback::Step));
+        // A jump from below straight into them still knocks.
+        assert_eq!(detent_feedback(0, 4, &peaks), Some(Feedback::Peak));
+    }
+
+    #[test]
+    fn only_running_past_the_travel_bumps() {
+        // A 200x44 track: the thumb travels 22..178.
+        assert!(!past_end(22.0, 200.0, 44.0));
+        assert!(!past_end(180.0, 200.0, 44.0));
+        assert!(past_end(10.0, 200.0, 44.0));
+        assert!(past_end(190.0, 200.0, 44.0));
+    }
     use super::*;
     use std::time::Duration;
 
