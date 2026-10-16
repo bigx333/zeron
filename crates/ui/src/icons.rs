@@ -322,6 +322,10 @@ pub fn model_vendor_mark(model_id: &str) -> Option<&'static str> {
         (LONGCAT_MARK, &["longcat"]),
     ];
     let name = model_id.rsplit('/').next().unwrap_or(model_id).to_ascii_lowercase();
+    // NVIDIA's Llama Nemotron family starts with `llama`.
+    if name.contains("nemotron") {
+        return Some(NVIDIA_MARK);
+    }
     VENDORS
         .iter()
         .find(|(_, prefixes)| prefixes.iter().any(|p| name.starts_with(p)))
@@ -490,6 +494,8 @@ mod tests {
         assert_eq!(model_vendor_mark("openrouter/qwen/qwen3.8-max"), Some(QWEN_MARK));
         assert_eq!(model_vendor_mark("GPT-5.5"), Some(OPENAI_MARK));
         assert_eq!(model_vendor_mark("cursor/sonnet-4.5"), Some(CLAUDE_MARK));
+        assert_eq!(model_vendor_mark("openrouter/nvidia/llama-3.3-nemotron-super-49b-v1"), Some(NVIDIA_MARK));
+        assert_eq!(model_vendor_mark("meta/llama-4-maverick"), Some(META_MARK));
         assert_eq!(model_vendor_mark("opencode/big-pickle"), None);
         assert_eq!(mark_brand(OPENAI_MARK), None);
         assert!(mark_brand(GEMINI_MARK).is_some());

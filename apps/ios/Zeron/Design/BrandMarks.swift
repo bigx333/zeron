@@ -484,8 +484,19 @@ enum ModelVendor: CaseIterable {
         default: break
         }
         let name = (modelId.split(separator: "/").last.map(String.init) ?? modelId).lowercased()
+        // NVIDIA's Llama Nemotron family starts with `llama`.
+        if name.contains("nemotron") { return .nvidia }
         return allCases.first { v in v.prefixes.contains { name.hasPrefix($0) } } ?? .other
     }
+}
+
+/// Whether models come through more than one provider (`anthropic/…` and
+/// `openrouter/…`), so same-named rows need their provider to tell apart.
+func spansProviders<T>(_ models: [T], id: (T) -> String) -> Bool {
+    Set(models.map { m -> String in
+        let id = id(m)
+        return id.contains("/") ? String(id.prefix { $0 != "/" }) : ""
+    }).count > 1
 }
 
 /// Models grouped by vendor in picker order; nil when they're all one

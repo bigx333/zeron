@@ -40,6 +40,7 @@ struct ModelChoice: Equatable {
     let harnessLabel: String
     let id: String
     let label: String
+    let description: String?
     let efforts: [String]
 }
 
@@ -212,7 +213,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private static func catalogModels() -> [ModelChoice] {
         fallbackHarnesses().filter(\.offered).flatMap { h in
-            fallbackModels(harness: h.id).map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels) }
+            fallbackModels(harness: h.id).map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, description: $0.description, efforts: $0.reasoningLevels) }
         }
     }
 
@@ -392,8 +393,9 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         let byHarness = Dictionary(grouping: models, by: \.harness)
         return UIMenu(title: "Model", children: byHarness.keys.sorted().map { h -> UIMenu in
             let models = byHarness[h]!
-            let action = { (m: ModelChoice) in
-                UIAction(title: m.label, state: m.harness == self.draft.harness && m.id == self.draft.model ? .on : .off) { [weak self] _ in
+            // Only a vendor group served by two providers names the provider.
+            let action = { (m: ModelChoice, describe: Bool) in
+                UIAction(title: m.label, subtitle: describe ? m.description : nil, state: m.harness == self.draft.harness && m.id == self.draft.model ? .on : .off) { [weak self] _ in
                     self?.draft.harness = m.harness
                     self?.draft.model = m.id
                     self?.draft.effort = nil
@@ -403,11 +405,12 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             let children: [UIMenuElement]
             if let groups = vendorGroups(models, harness: h, id: \.id) {
                 children = groups.map { g in
-                    UIMenu(title: g.vendor.title, subtitle: g.models.count == 1 ? "1 model" : "\(g.models.count) models",
-                           image: BrandMarks.image(for: g.vendor, harness: h, side: 16), children: g.models.map(action))
+                    let describe = spansProviders(g.models, id: \.id)
+                    return UIMenu(title: g.vendor.title, subtitle: g.models.count == 1 ? "1 model" : "\(g.models.count) models",
+                                  image: BrandMarks.image(for: g.vendor, harness: h, side: 16), children: g.models.map { action($0, describe) })
                 }
             } else {
-                children = models.map(action)
+                children = models.map { action($0, false) }
             }
             return UIMenu(title: models.first!.harnessLabel, image: BrandMarks.image(for: h, side: 16), options: .displayInline, children: children)
         })

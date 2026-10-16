@@ -138,6 +138,8 @@ enum class ModelVendor(val title: String, val mark: BrandMark?, private val pref
                 "codex" -> return OPENAI
             }
             val name = modelId.substringAfterLast('/').lowercase()
+            // NVIDIA's Llama Nemotron family starts with `llama`.
+            if ("nemotron" in name) return NVIDIA
             return entries.firstOrNull { v -> v.prefixes.any { name.startsWith(it) } } ?: OTHER
         }
     }

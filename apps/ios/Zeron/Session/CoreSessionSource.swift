@@ -219,18 +219,21 @@ final class CoreSessionSource: SessionSource {
                 Task { @MainActor in
                     let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
                     let grouped = vendorGroups(models, harness: harness, id: \.id)
-                    let action = { (m: ModelInfo) in
-                        UIAction(title: m.label, subtitle: grouped == nil ? m.description : nil, state: m.id == row.model ? .on : .off) { [weak self] _ in
+                    // Inside a vendor group the description (the provider, for
+                    // opencode) only matters when two providers serve it.
+                    let action = { (m: ModelInfo, describe: Bool) in
+                        UIAction(title: m.label, subtitle: describe ? m.description : nil, state: m.id == row.model ? .on : .off) { [weak self] _ in
                             self?.setConfig { $0.model = m.id }
                         }
                     }
                     if let grouped {
                         done(grouped.map { g in
-                            UIMenu(title: g.vendor.title, subtitle: g.models.count == 1 ? "1 model" : "\(g.models.count) models",
-                                   image: BrandMarks.image(for: g.vendor, harness: harness, side: 16), children: g.models.map(action))
+                            let describe = spansProviders(g.models, id: \.id)
+                            return UIMenu(title: g.vendor.title, subtitle: g.models.count == 1 ? "1 model" : "\(g.models.count) models",
+                                          image: BrandMarks.image(for: g.vendor, harness: harness, side: 16), children: g.models.map { action($0, describe) })
                         })
                     } else {
-                        done(models.map(action))
+                        done(models.map { action($0, true) })
                     }
                 }
             }])
