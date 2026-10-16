@@ -41,7 +41,7 @@ import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Send
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Schedule
-import sh.zeron.android.design.HarnessMark
+import sh.zeron.android.design.ModelMark
 import sh.zeron.android.transcript.TranscriptState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.focus.FocusRequester
@@ -309,10 +309,10 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
 
     val modelLabel = row?.modelLabel ?: row?.harnessLabel
     if (modelLabel != null) {
-        ContextChip(modelLabel, leading = { HarnessMark(harness, 14.dp) }, onClick = { open("model") }) {
-            ChoiceMenu(menu == "model", { menu = null }, listOf(MenuSection(row?.harnessLabel, models.orEmpty().map { m ->
-                MenuChoice(m.label, m.id == row?.model, m.description) { setConfig { it.copy(model = m.id) } }
-            })))
+        ContextChip(modelLabel, leading = { ModelMark(row?.model, harness, 14.dp) }, onClick = { open("model") }) {
+            ModelMenu(menu == "model", { menu = null }, listOf(ModelSection(row?.harnessLabel, harness, models.orEmpty(), { it.id == row?.model }) { m ->
+                setConfig { it.copy(model = m.id) }
+            }))
         }
     }
     row?.reasoning?.takeIf { it.isNotEmpty() }?.let { level ->

@@ -60,7 +60,7 @@ final class CoreSessionSource: SessionSource {
         next.placeholder = "Message \(row?.harnessLabel ?? "the agent")"
         var chips: [ComposerChip] = []
         if let model = row?.modelLabel ?? row?.harnessLabel {
-            chips.append(ComposerChip(id: "model", title: model, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "claude-code", side: 13)))
+            chips.append(ComposerChip(id: "model", title: model, symbol: nil, icon: BrandMarks.image(forModel: row?.model, harness: row?.harness ?? "claude-code", side: 13)))
         }
         if let r = row?.reasoning, !r.isEmpty {
             chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: "gauge.with.dots.needle.67percent"))
@@ -218,11 +218,20 @@ final class CoreSessionSource: SessionSource {
                 guard let self else { return done([]) }
                 Task { @MainActor in
                     let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
-                    done(models.map { m in
-                        UIAction(title: m.label, subtitle: m.description, state: m.id == row.model ? .on : .off) { [weak self] _ in
+                    let grouped = vendorGroups(models, id: \.id)
+                    let action = { (m: ModelInfo) in
+                        UIAction(title: m.label, subtitle: grouped == nil ? m.description : nil, state: m.id == row.model ? .on : .off) { [weak self] _ in
                             self?.setConfig { $0.model = m.id }
                         }
-                    })
+                    }
+                    if let grouped {
+                        done(grouped.map { g in
+                            UIMenu(title: g.vendor.title, subtitle: g.models.count == 1 ? "1 model" : "\(g.models.count) models",
+                                   image: BrandMarks.image(for: g.vendor, harness: harness, side: 16), children: g.models.map(action))
+                        })
+                    } else {
+                        done(models.map(action))
+                    }
                 }
             }])
         case "effort":

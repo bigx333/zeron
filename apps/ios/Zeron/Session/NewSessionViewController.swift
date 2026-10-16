@@ -271,7 +271,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         // Never the harness name in place of a model: a model this host
         // hasn't listed still gets its catalog label.
         let modelTitle = model?.label ?? draft.model.map { modelLabel(harness: draft.harness, model: $0) } ?? fallbackModels(harness: draft.harness).first?.label ?? HarnessNames.label(draft.harness)
-        chips.append(ComposerChip(id: "model", title: modelTitle, symbol: nil, icon: BrandMarks.image(for: draft.harness, side: 13)))
+        chips.append(ComposerChip(id: "model", title: modelTitle, symbol: nil, icon: BrandMarks.image(forModel: model?.id ?? draft.model, harness: draft.harness, side: 13)))
         if let efforts = model?.efforts, !efforts.isEmpty {
             chips.append(ComposerChip(id: "effort", title: (draft.effort ?? efforts[efforts.count / 2]).capitalized, symbol: "gauge.with.dots.needle.67percent"))
         }
@@ -390,15 +390,26 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private func modelMenu() -> UIMenu {
         let byHarness = Dictionary(grouping: models, by: \.harness)
-        return UIMenu(title: "Model", children: byHarness.keys.sorted().map { h in
-            UIMenu(title: byHarness[h]!.first!.harnessLabel, image: BrandMarks.image(for: h, side: 16), options: .displayInline, children: byHarness[h]!.map { m in
-                UIAction(title: m.label, state: m.harness == draft.harness && m.id == draft.model ? .on : .off) { [weak self] _ in
+        return UIMenu(title: "Model", children: byHarness.keys.sorted().map { h -> UIMenu in
+            let models = byHarness[h]!
+            let action = { (m: ModelChoice) in
+                UIAction(title: m.label, state: m.harness == self.draft.harness && m.id == self.draft.model ? .on : .off) { [weak self] _ in
                     self?.draft.harness = m.harness
                     self?.draft.model = m.id
                     self?.draft.effort = nil
                     self?.refreshChips()
                 }
-            })
+            }
+            let children: [UIMenuElement]
+            if let groups = vendorGroups(models, id: \.id) {
+                children = groups.map { g in
+                    UIMenu(title: g.vendor.title, subtitle: g.models.count == 1 ? "1 model" : "\(g.models.count) models",
+                           image: BrandMarks.image(for: g.vendor, harness: h, side: 16), children: g.models.map(action))
+                }
+            } else {
+                children = models.map(action)
+            }
+            return UIMenu(title: models.first!.harnessLabel, image: BrandMarks.image(for: h, side: 16), options: .displayInline, children: children)
         })
     }
 

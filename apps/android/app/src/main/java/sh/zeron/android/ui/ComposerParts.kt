@@ -30,6 +30,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenuGroup
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.DropdownMenuPopup
@@ -71,9 +72,12 @@ import androidx.compose.ui.input.key.type
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import sh.zeron.android.design.GeistMono
+import sh.zeron.android.design.ModelVendor
+import sh.zeron.android.design.VendorMark
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import uniffi.zeron_core.FileMatch
+import uniffi.zeron_core.ModelInfo
 
 /**
  * The composer, shared by sessions and the new-session page. One tonal
@@ -297,13 +301,64 @@ fun MentionSuggestions(model: ComposerModel, search: suspend (String) -> List<Fi
     }
 }
 
+/** One harness's models in a [ModelMenu]. */
+class ModelSection(
+    val title: String?,
+    val harness: String?,
+    val models: List<ModelInfo>,
+    val selected: (ModelInfo) -> Boolean,
+    val leading: (@Composable () -> Unit)? = null,
+    val describe: Boolean = true,
+    val onPick: (ModelInfo) -> Unit,
+)
+
+/** Models grouped by vendor in picker order; null when they're all one vendor's, so short lists stay flat. */
+private fun vendorGroups(models: List<ModelInfo>): List<Pair<ModelVendor, List<ModelInfo>>>? {
+    val groups = models.groupBy { ModelVendor.of(it.id) }
+    if (groups.size < 2) return null
+    return ModelVendor.entries.mapNotNull { v -> groups[v]?.let { v to it } }
+}
+
+/** A model picker; a harness serving several vendors' models lists the vendors first, then that vendor's models. */
+@Composable
+fun ModelMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<ModelSection>) {
+    var open by remember { mutableStateOf<Pair<ModelSection, ModelVendor>?>(null) }
+    LaunchedEffect(expanded) { if (!expanded) open = null }
+    val shown = open?.let { (section, vendor) ->
+        val models = section.models.filter { ModelVendor.of(it.id) == vendor }
+        // One vendor through two providers (Claude direct and via a gateway): name the provider.
+        val providers = models.mapTo(HashSet()) { it.id.substringBefore('/', "") }.size
+        listOf(
+            MenuSection(null, listOf(MenuChoice(section.title ?: "Back", leading = { ZIcon(ZIcons.Back, null, Modifier.size(18.dp)) }, keepsOpen = true) { open = null })),
+            MenuSection(vendor.title, models.map { m ->
+                MenuChoice(m.label, section.selected(m), m.description?.takeIf { providers > 1 }, { VendorMark(vendor, section.harness, 18.dp) }) { section.onPick(m) }
+            }),
+        )
+    } ?: sections.map { section ->
+        val groups = vendorGroups(section.models)
+        MenuSection(
+            section.title,
+            groups?.map { (vendor, list) ->
+                val count = if (list.size == 1) "1 model" else "${list.size} models"
+                MenuChoice(vendor.title, list.any(section.selected), count, { VendorMark(vendor, section.harness, 18.dp) }, keepsOpen = true, drills = true) {
+                    open = section to vendor
+                }
+            } ?: section.models.map { m ->
+                MenuChoice(m.label, section.selected(m), m.description?.takeIf { section.describe }, section.leading) { section.onPick(m) }
+            },
+        )
+    }
+    ChoiceMenu(expanded, onDismiss, shown)
+}
+
 /** An expressive choice menu: one group, inline section labels, a trailing check on the choice. */
 @Composable
 fun ChoiceMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<MenuSection>) {
     DropdownMenuPopup(expanded = expanded, onDismissRequest = onDismiss) {
         val groups = sections.filter { it.choices.isNotEmpty() }
         val all = groups.sumOf { it.choices.size }
-        DropdownMenuGroup(shapes = MenuDefaults.groupShape(0, 1)) {
+        // Long lists (several harnesses, a gateway's vendors) outgrow the screen.
+        DropdownMenuGroup(shapes = MenuDefaults.groupShape(0, 1), modifier = Modifier.verticalScroll(rememberScrollState())) {
             var index = 0
             groups.forEach { section ->
                 section.title?.let { title -> MenuDefaults.Label { Text(title, style = MaterialTheme.typography.labelMedium) } }
@@ -312,17 +367,17 @@ fun ChoiceMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<MenuSect
                         selected = choice.selected,
                         onClick = {
                             choice.onClick()
-                            onDismiss()
+                            if (!choice.keepsOpen) onDismiss()
                         },
                         text = { Text(choice.label) },
                         supportingText = choice.supporting?.let { { Text(it) } },
                         shapes = MenuDefaults.itemShape(index++, all),
                         leadingIcon = choice.leading,
                         selectedLeadingIcon = choice.leading,
-                        trailingIcon = if (choice.selected) {
-                            { ZIcon(ZIcons.Check, null, Modifier.size(20.dp)) }
-                        } else {
-                            null
+                        trailingIcon = when {
+                            choice.drills -> { { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) } }
+                            choice.selected -> { { ZIcon(ZIcons.Check, null, Modifier.size(20.dp)) } }
+                            else -> null
                         },
                         colors = MenuDefaults.selectableItemColors(
                             selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,

@@ -151,6 +151,10 @@ class MenuChoice(
     val selected: Boolean = false,
     val supporting: String? = null,
     val leading: (@Composable () -> Unit)? = null,
+    /** Moves within the menu instead of choosing: the menu stays open. */
+    val keepsOpen: Boolean = false,
+    /** Opens a nested level (a trailing chevron). */
+    val drills: Boolean = false,
     val onClick: () -> Unit,
 )
 

@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.design.HarnessMark
+import sh.zeron.android.design.ModelMark
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import uniffi.zeron_core.ModelInfo
@@ -451,13 +452,16 @@ private fun ModelChip(
     // Never the harness name in place of a model.
     val title = choice?.model?.label ?: draft.model?.let { modelLabel(draft.harness, it) }
         ?: fallbackModels(draft.harness).firstOrNull()?.label ?: harnessLabel(draft.harness)
-    ContextChip(title, leading = { HarnessMark(draft.harness, 14.dp) }, onClick = { open = true }) {
-        ChoiceMenu(open, { open = false }, models.groupBy { it.harness }.map { (harness, list) ->
-            MenuSection(list.first().harnessLabel, list.map { m ->
-                MenuChoice(m.model.label, m.harness == draft.harness && m.model.id == choice?.model?.id, leading = { HarnessMark(harness, 18.dp) }) {
-                    onPick(draft.copy(harness = m.harness, model = m.model.id, effort = null))
-                }
-            })
+    ContextChip(title, leading = { ModelMark(choice?.model?.id ?: draft.model, draft.harness, 14.dp) }, onClick = { open = true }) {
+        ModelMenu(open, { open = false }, models.groupBy { it.harness }.map { (harness, list) ->
+            ModelSection(
+                list.first().harnessLabel,
+                harness,
+                list.map { it.model },
+                { m -> harness == draft.harness && m.id == choice?.model?.id },
+                leading = { HarnessMark(harness, 18.dp) },
+                describe = false,
+            ) { m -> onPick(draft.copy(harness = harness, model = m.id, effort = null)) }
         })
     }
 }
