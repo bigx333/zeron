@@ -91,6 +91,7 @@ import sh.zeron.android.transcript.TranscriptActions
 import sh.zeron.android.transcript.TranscriptState
 import uniffi.zeron_core.ComposerState
 import uniffi.zeron_core.ConnectivityState
+import uniffi.zeron_core.CoreException
 import uniffi.zeron_core.SendState
 import uniffi.zeron_core.SessionHandle
 
@@ -139,17 +140,22 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
     var viewing by remember { mutableStateOf<ImageBitmap?>(null) }
     val actions = remember(chatId, composer.host.deviceId) {
         val device = composer.host.deviceId
-        suspend fun load(ref: String): ImageBitmap? {
+        suspend fun fetch(ref: String): Result<ImageBitmap> {
             val key = ImageCache.key(device, ref)
-            ImageCache[key]?.let { return it }
+            ImageCache[key]?.let { return Result.success(it) }
             return runCatching {
                 val bytes = core.readAttachment(device, ref)
                 withContext(Dispatchers.Default) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }
-            }.onFailure { if (it is CancellationException) throw it }.getOrNull()?.also { ImageCache.put(key, it) }
+                    ?: error("It isn't an image this phone can show.")
+            }.onFailure { if (it is CancellationException) throw it }.onSuccess { ImageCache.put(key, it) }
         }
-        fun cantOpen(what: String) = Toast.makeText(context, "Couldn't open $what", Toast.LENGTH_SHORT).show()
+        suspend fun load(ref: String): ImageBitmap? = fetch(ref).getOrNull()
+        fun cantOpen(what: String, why: String? = null) =
+            Toast.makeText(context, listOfNotNull("Couldn't open $what.", why).joinToString(" "), Toast.LENGTH_LONG).show()
         val open: (String) -> Unit = { ref ->
-            scope.launch { load(ref)?.let { viewing = it } ?: cantOpen(ref.substringAfterLast('/')) }
+            scope.launch {
+                fetch(ref).onSuccess { viewing = it }.onFailure { cantOpen(ref.substringAfterLast('/'), it.hostReason) }
+            }
         }
         TranscriptActions(
             openUrl = { url ->
@@ -287,6 +293,23 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
         }
     }
 }
+
+/** Why a core call failed, in the host's words rather than the binding's `reason=…`. */
+private val Throwable.hostReason: String?
+    get() = when (this) {
+        is CoreException.NotFound -> reason
+        is CoreException.InvalidArgument -> reason
+        is CoreException.HostUnavailable -> reason
+        is CoreException.Unsupported -> reason
+        is CoreException.HostException -> reason
+        is CoreException.Network -> reason
+        is CoreException.Auth -> reason
+        is CoreException.Storage -> reason
+        is CoreException.NotImplemented -> reason
+        is CoreException.Internal -> reason
+        is CoreException.Closed -> null
+        else -> message
+    }
 
 /** The status pill above the composer (iOS SessionChrome banner). */
 @Composable

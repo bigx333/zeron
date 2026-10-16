@@ -77,8 +77,9 @@ protocol SessionSource: AnyObject {
     /// Menu for a composer chip (model, effort, branch…), or nil.
     func chipMenu(_ id: String) -> UIMenu?
     func loadImage(_ reference: String, into view: RemoteImageView)
-    /// An attachment's picture, for opening it full size (an image chip).
-    func image(_ reference: String) async -> UIImage?
+    /// An attachment's picture, for opening it full size (an image chip or a
+    /// host-path link). Throws why it can't be shown.
+    func image(_ reference: String) async throws -> UIImage
     /// Workspace files for `@` mentions.
     func searchFiles(_ query: String) async -> [FileMatch]
 }
@@ -230,6 +231,29 @@ final class FixtureSessionSource: SessionSource {
         }
     }
     func loadImage(_ reference: String, into view: RemoteImageView) {}
-    func image(_ reference: String) async -> UIImage? { nil }
+    func image(_ reference: String) async throws -> UIImage {
+        throw CoreError.NotFound(message: "Images aren't available here.")
+    }
     func searchFiles(_ query: String) async -> [FileMatch] { [] }
+}
+
+/// A host image that arrived but isn't one this phone can draw.
+struct UndecodableImage: LocalizedError {
+    var errorDescription: String? { "It isn't an image this phone can show." }
+}
+
+extension Error {
+    /// Why a core call failed, in the host's words rather than the binding's
+    /// `CoreError.HostError(message: …)`.
+    var hostReason: String? {
+        guard let error = self as? CoreError else { return localizedDescription }
+        switch error {
+        case let .NotFound(message), let .InvalidArgument(message), let .HostUnavailable(message),
+             let .Unsupported(message), let .HostError(message), let .Network(message), let .Auth(message),
+             let .Storage(message), let .NotImplemented(message), let .Internal(message):
+            return message
+        case .Closed:
+            return nil
+        }
+    }
 }

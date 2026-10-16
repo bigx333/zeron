@@ -655,35 +655,13 @@ fn host_images(runs: &[InlineRun]) -> Option<Vec<String>> {
     let mut paths = Vec::new();
     for run in runs {
         match &run.style.image {
-            Some(img) if img.link.is_none() => paths.push(host_path(&img.source)?),
+            Some(img) if img.link.is_none() => paths.push(zeron_markdown::host_path(&img.source)?),
             Some(_) => return None,
             None if run.text.trim().is_empty() => {}
             None => return None,
         }
     }
     (!paths.is_empty()).then_some(paths)
-}
-
-/// An absolute path or `file://` URL as a host path (the form
-/// `ReadAttachmentChunk` reads); remote and relative sources are `None`.
-fn host_path(source: &str) -> Option<String> {
-    let path = if source.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("file://")) {
-        let rest = &source[7..];
-        let slash = rest.find('/')?;
-        let authority = &rest[..slash];
-        if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
-            return None;
-        }
-        // Query and fragment are URL components; escaped delimiters belong to
-        // the path and must only be decoded after splitting them off.
-        percent_decode(rest[slash..].split(['?', '#']).next()?)?
-    } else {
-        if source.starts_with("//") {
-            return None; // A network-path URL, not a path on the chat's host.
-        }
-        source.to_owned()
-    };
-    (path.starts_with('/') && !path.contains('\0')).then_some(path)
 }
 
 fn path_link(path: &str) -> String {
@@ -696,26 +674,6 @@ fn path_link(path: &str) -> String {
         }
     }
     url
-}
-
-fn percent_decode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = s.get(i + 1..i + 3)?;
-            if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return None;
-            }
-            out.push(u8::from_str_radix(hex, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
 }
 
 fn syntax_color(kind: zeron_syntax::HighlightKind) -> ColorRole {

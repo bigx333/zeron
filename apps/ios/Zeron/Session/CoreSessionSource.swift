@@ -278,12 +278,11 @@ final class CoreSessionSource: SessionSource {
         images.setObject(image, forKey: imageKey(device, reference), cost: cost)
     }
 
-    func image(_ reference: String) async -> UIImage? {
+    func image(_ reference: String) async throws -> UIImage {
         let device = hostDevice
         if let hit = Self.images.object(forKey: Self.imageKey(device, reference)) { return hit }
-        guard let data = try? await client.readAttachment(deviceId: device, path: reference),
-              let image = await UIImage(data: data)?.byPreparingForDisplay()
-        else { return nil }
+        let data = try await client.readAttachment(deviceId: device, path: reference)
+        guard let image = await UIImage(data: data)?.byPreparingForDisplay() else { throw UndecodableImage() }
         Self.cache(image, device: device, reference: reference)
         return image
     }

@@ -3905,8 +3905,9 @@ impl RpcService for EngineRpc {
             }
             methods::READ_ATTACHMENT_CHUNK => {
                 let p: ReadAttachmentChunkParams = parse_params(params)?;
-                // Path jail: the uploads dir plus every workspace-known chat cwd.
-                let roots: Vec<std::path::PathBuf> = self
+                // Path jail: the uploads dir plus every workspace-known chat cwd
+                // and the system temp dirs (images only outside uploads).
+                let mut roots: Vec<std::path::PathBuf> = self
                     .workspace
                     .read_chats()
                     .unwrap_or_default()
@@ -3916,6 +3917,7 @@ impl RpcService for EngineRpc {
                     .collect();
                 let uploads = self.uploads.clone();
                 let chunk = tokio::task::spawn_blocking(move || {
+                    roots.extend(uploads.temp_roots());
                     uploads.read_chunk(&p.path, p.offset, &roots)
                 })
                 .await

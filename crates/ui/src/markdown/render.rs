@@ -110,11 +110,15 @@ pub struct TaskUi {
     pub toggle: Option<Rc<dyn Fn(&super::parser::TaskMarker, &mut Window, &mut gpui::App)>>,
 }
 
+pub type ImageRenderer =
+    Rc<dyn Fn(&super::parser::InlineImage, SharedString, &Theme) -> Option<AnyElement>>;
+
 #[derive(Clone)]
 pub struct MediaUi {
     pub diagram: Option<Rc<dyn Fn(&str, SharedString, &Theme) -> DiagramView>>,
-    /// `None` keeps inline images in their ordinary text rendering.
-    pub image: Option<Rc<dyn Fn(&super::parser::InlineImage, SharedString, &Theme) -> AnyElement>>,
+    /// `None` keeps inline images in their ordinary text rendering; so does
+    /// the renderer returning `None` for an image it doesn't draw.
+    pub image: Option<ImageRenderer>,
 }
 
 /// How a Mermaid fence presents itself on the owning surface.
@@ -2135,31 +2139,36 @@ fn text_element(
     window: &Window,
 ) -> AnyElement {
     if let Some(image_ui) = opts.media.as_ref().and_then(|media| media.image.as_ref()) {
-        if runs.iter().any(|run| run.style.image.is_some()) {
+        // Images the renderer declines stay in the text between drawn ones,
+        // which recurses here once more and then renders as ordinary text.
+        let drawn: Vec<(usize, AnyElement)> = runs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, run)| {
+                let image = run.style.image.as_ref()?;
+                let id = format!("{}-image-{ix}-{index}", opts.row_key).into();
+                Some((index, image_ui(image, id, theme)?))
+            })
+            .collect();
+        if !drawn.is_empty() {
             let mut elements = Vec::new();
             let mut start = 0;
-            for (index, run) in runs.iter().enumerate() {
-                if let Some(image) = &run.style.image {
-                    if start < index {
-                        elements.push(text_element(
-                            &runs[start..index],
-                            size,
-                            line_height,
-                            bold_default,
-                            top_ix,
-                            ix.wrapping_mul(4099).wrapping_add(start + 1000),
-                            opts,
-                            theme,
-                            window,
-                        ));
-                    }
-                    elements.push(image_ui(
-                        image,
-                        format!("{}-image-{ix}-{index}", opts.row_key).into(),
+            for (index, element) in drawn {
+                if start < index {
+                    elements.push(text_element(
+                        &runs[start..index],
+                        size,
+                        line_height,
+                        bold_default,
+                        top_ix,
+                        ix.wrapping_mul(4099).wrapping_add(start + 1000),
+                        opts,
                         theme,
+                        window,
                     ));
-                    start = index + 1;
                 }
+                elements.push(element);
+                start = index + 1;
             }
             if start < runs.len() {
                 elements.push(text_element(
@@ -3035,6 +3044,54 @@ mod tests {
         let (_, layout, _) = selection_test_snapshot(key);
         layout.position_for_index(ix).expect("text position")
             + point(px(0.1), layout.line_height() / 2.0)
+    }
+
+    /// Draws only host images (`/abs` sources); every other image declines.
+    struct HostImageHarness;
+
+    impl Render for HostImageHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let mut opts = RenderOptions::settled("host-image-test".into());
+            opts.media = Some(MediaUi {
+                diagram: None,
+                image: Some(Rc::new(|image, id, _| {
+                    image.source.starts_with('/').then(|| {
+                        div()
+                            .id(id)
+                            .debug_selector(|| "host-image".into())
+                            .size(px(40.0))
+                            .into_any_element()
+                    })
+                })),
+            });
+            div().size_full().child(render_tree(
+                &parse_full("![shot](/tmp/a.png) and ![logo](https://x.dev/logo.png)"),
+                &opts,
+                &theme,
+                window,
+                &|_| None,
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn declined_images_keep_their_text_beside_drawn_ones(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (_, cx) = cx.add_window_view(|_, _| HostImageHarness);
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        assert!(cx.debug_bounds("host-image").is_some());
+        // The remote image the renderer declined still reads as its link text.
+        assert!(REGISTRY.with(|registry| {
+            registry
+                .borrow()
+                .iter()
+                .any(|entry| entry.text.as_ref() == " and logo")
+        }));
     }
 
     #[gpui::test]

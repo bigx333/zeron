@@ -2233,6 +2233,126 @@ struct ImageMenu {
     active: Option<usize>,
 }
 
+/// The frame a host image in a reply draws in. Fixed through loading and
+/// failure (the picture fits inside it), so its row never re-measures.
+const MARKDOWN_IMAGE_WIDTH: f32 = 480.0;
+const MARKDOWN_IMAGE_HEIGHT: f32 = 300.0;
+
+/// Host images settled replies asked for: the devices that may own them and
+/// the paths still to load.
+#[derive(Default)]
+struct MarkdownImages {
+    devices: Vec<String>,
+    requests: Vec<String>,
+}
+
+/// Replies' host images (`![…](/abs/a.png)`, `file://…`) drawn in a frame
+/// that loads from the chat's device, as the mobile apps draw them. Clicking
+/// opens the picture full size; right-clicking copies it. Linked, remote and
+/// non-image sources keep their ordinary text rendering.
+fn markdown_image_renderer(
+    images: Rc<RefCell<MarkdownImages>>,
+    owner: gpui::WeakEntity<Transcript>,
+) -> render::ImageRenderer {
+    use crate::attachments::{AttachmentKey, AttachmentSnapshot, attachment_snapshot_for};
+    Rc::new(move |image, id, theme| {
+        if image.link.is_some() {
+            return None;
+        }
+        let path = zeron_markdown::host_path(&image.source)?;
+        if !zeron_proto::attachment_mentions::is_image_path(&path) {
+            return None;
+        }
+        let devices = images.borrow().devices.clone();
+        if devices.is_empty() {
+            return None;
+        }
+        let label: SharedString = if image.alt.trim().is_empty() {
+            path.rsplit('/').next().unwrap_or(&path).to_owned().into()
+        } else {
+            image.alt.clone().into()
+        };
+        let snapshots: Vec<_> = devices
+            .iter()
+            .map(|device| attachment_snapshot_for(&AttachmentKey::new(device, &path, None)))
+            .collect();
+        let frame = div()
+            .id(id)
+            .w(px(MARKDOWN_IMAGE_WIDTH))
+            .max_w_full()
+            .h(px(MARKDOWN_IMAGE_HEIGHT))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(12.0))
+            .overflow_hidden()
+            .bg(crate::theme::ink(0.045));
+        // Any device that has it wins; otherwise it's loading while any device
+        // still is, and unavailable only once every device failed.
+        let loading = snapshots
+            .iter()
+            .any(|snapshot| matches!(snapshot, AttachmentSnapshot::Loading));
+        let loaded = snapshots.into_iter().find_map(|snapshot| match snapshot {
+            AttachmentSnapshot::Loaded(loaded) => Some(loaded),
+            _ => None,
+        });
+        let Some(loaded) = loaded else {
+            let mut images = images.borrow_mut();
+            if !images.requests.contains(&path) {
+                images.requests.push(path);
+            }
+            let status = if loading {
+                "Loading image…".to_owned()
+            } else {
+                format!("{label} unavailable")
+            };
+            return Some(
+                frame
+                    .px(px(16.0))
+                    .text_color(theme.text_muted)
+                    .child(status)
+                    .into_any_element(),
+            );
+        };
+        let accent = theme.accent;
+        let open = owner.clone();
+        let menu = owner.clone();
+        let open_path = SharedString::from(path.clone());
+        Some(
+            frame
+                .role(gpui::Role::Button)
+                .aria_label(label)
+                .tab_index(0)
+                .cursor_pointer()
+                .focus_visible(move |style| style.border_2().border_color(accent))
+                .on_click(move |_, window, cx| {
+                    let _ =
+                        open.update(cx, |this, cx| this.open_chip_image(&open_path, window, cx));
+                })
+                .on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                    cx.stop_propagation();
+                    let _ = menu.update(cx, |this, cx| {
+                        this.open_image_menu(
+                            path.clone(),
+                            devices.clone(),
+                            event.position,
+                            window,
+                            cx,
+                        )
+                    });
+                })
+                .child(
+                    img(loaded.image)
+                        .size_full()
+                        // The frame's overflow clip is rectangular; round the image itself.
+                        .rounded(px(12.0))
+                        .object_fit(ObjectFit::Contain),
+                )
+                .into_any_element(),
+        )
+    })
+}
+
 /// Spawn chips never expand, so they never preview images either.
 fn chip_has_images(tool: &ToolItem) -> bool {
     !tool.images.is_empty() && !is_spawn_link(tool)
@@ -3374,6 +3494,9 @@ pub struct Transcript {
     diagrams: Rc<RefCell<MermaidCache>>,
     /// The media handler over `diagrams`, built once and shared by every row.
     diagram_media: Option<render::MediaUi>,
+    /// Host images in settled replies (`![…](/abs/a.png)`): the devices that
+    /// may own them, and the paths rows asked for while painting.
+    markdown_images: Rc<RefCell<MarkdownImages>>,
     /// The single serialized diagram render loop, while requests remain.
     diagram_worker: Option<Task<()>>,
     /// Prepared diagram shown in the lightbox: its natural size frames the
@@ -3679,6 +3802,7 @@ impl Transcript {
             attachment_preview_return_focus: None,
             diagrams: Rc::default(),
             diagram_media: None,
+            markdown_images: Rc::default(),
             diagram_worker: None,
             diagram_zoom: None,
             tool_images: Default::default(),
@@ -5803,6 +5927,18 @@ impl Transcript {
         self.attachment_retries.insert(key, task);
     }
 
+    /// Claim loads for the host images rows just painted unloaded; each frame
+    /// repaints as its image lands, retrying on the attachment ladder.
+    fn load_markdown_images(&mut self, cx: &mut Context<Self>) {
+        let (devices, requests) = {
+            let mut images = self.markdown_images.borrow_mut();
+            (images.devices.clone(), std::mem::take(&mut images.requests))
+        };
+        for path in requests {
+            self.attachment_state(&devices, &path, None, cx);
+        }
+    }
+
     /// Open a sent image chip's upload full size, as its thumbnail did. An
     /// image still loading opens on a later click.
     fn open_chip_image(
@@ -6474,13 +6610,16 @@ impl Transcript {
     }
 
     /// Media wiring for settled Markdown: Mermaid fences become diagrams
-    /// once rendered and keep their source until then (or on failure).
-    /// Inline images keep their ordinary chat rendering.
+    /// once rendered and keep their source until then (or on failure). Host
+    /// images draw from the chat's device; other images keep their ordinary
+    /// chat rendering.
     fn diagram_media(&mut self, cx: &Context<Self>) -> render::MediaUi {
+        self.markdown_images.borrow_mut().devices = self.attachment_device_ids(cx);
         let cache = self.diagrams.clone();
         let owner = cx.weak_entity();
+        let images = self.markdown_images.clone();
         let media = self.diagram_media.get_or_insert_with(|| render::MediaUi {
-            image: None,
+            image: Some(markdown_image_renderer(images, owner.clone())),
             diagram: Some(Rc::new(move |code, id, _theme| {
                 let lookup = cache.borrow_mut().request(code, &id);
                 match lookup {
@@ -7559,6 +7698,7 @@ impl Transcript {
         };
         // Diagram fences this row just requested start rendering after layout.
         self.ensure_diagram_worker(cx);
+        self.load_markdown_images(cx);
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
         // entry's last row. Timestamp, copy action, and copied feedback only

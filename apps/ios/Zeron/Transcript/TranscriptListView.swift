@@ -121,8 +121,9 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     var onFollowChange: ((Bool) -> Void)?
     var onDistanceFromBottom: ((CGFloat) -> Void)?
     var imageLoader: ((String, RemoteImageView) -> Void)?
-    /// An attachment's picture, for an image chip opened full size.
-    var imageFetcher: ((String) async -> UIImage?)?
+    /// An attachment's picture, for an image chip or host-path link opened
+    /// full size. Throws why it can't be shown.
+    var imageFetcher: ((String) async throws -> UIImage)?
 
     // MARK: Runway (desktop transcript.rs `OwnTurnAnchor`)
     //
@@ -708,20 +709,23 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
 
     private func openImage(_ reference: String, source: UIView, from vc: UIViewController) {
         Task { @MainActor [weak self, weak source, weak vc] in
-            let image = await self?.imageFetcher?(reference)
+            guard let fetch = self?.imageFetcher else { return }
+            let result: Result<UIImage, Error>
+            do { result = .success(try await fetch(reference)) } catch { result = .failure(error) }
             guard !Task.isCancelled, let source, let vc,
                   vc.viewIfLoaded?.window != nil, vc.presentedViewController == nil
             else { return }
-            guard let image else {
-                Self.cantOpen((reference as NSString).lastPathComponent, from: vc)
-                return
+            switch result {
+            case let .success(image):
+                vc.present(ImageViewer(image: image, source: source), animated: true)
+            case let .failure(error):
+                Self.cantOpen((reference as NSString).lastPathComponent, reason: error.hostReason, from: vc)
             }
-            vc.present(ImageViewer(image: image, source: source), animated: true)
         }
     }
 
-    private static func cantOpen(_ what: String, from vc: UIViewController) {
-        let alert = UIAlertController(title: "Couldn't open \(what)", message: nil, preferredStyle: .alert)
+    private static func cantOpen(_ what: String, reason: String? = nil, from vc: UIViewController) {
+        let alert = UIAlertController(title: "Couldn't open \(what)", message: reason, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         vc.present(alert, animated: true)
     }

@@ -378,7 +378,10 @@ pub(super) fn media(
                         cx.stop_propagation();
                         // A failed inline image offers the browser instead.
                         if matches!(
-                            window.get_asset::<PrImageLoader>(&SharedString::from(source.clone()), cx),
+                            window.get_asset::<PrImageLoader>(
+                                &SharedString::from(source.clone()),
+                                cx
+                            ),
                             Some(Err(_))
                         ) {
                             cx.open_url(&source);
@@ -412,8 +415,10 @@ pub(super) fn media(
 /// Types the image closure for [`MediaUi::image`].
 fn image_renderer(
     render: impl Fn(&InlineImage, SharedString, &Theme) -> AnyElement + 'static,
-) -> Option<Rc<dyn Fn(&InlineImage, SharedString, &Theme) -> AnyElement>> {
-    Some(Rc::new(render))
+) -> Option<crate::markdown::render::ImageRenderer> {
+    Some(Rc::new(move |image, id, theme| {
+        Some(render(image, id, theme))
+    }))
 }
 
 /// Screenshot tables become wrapping media cards instead of tall table cells.
@@ -491,7 +496,7 @@ pub(super) fn render_description(
                             "{}-gallery-{block_index}-{cell_index}-{index}",
                             options.row_key
                         );
-                        card = card.child(image_ui(image, id.into(), theme));
+                        card = card.children(image_ui(image, id.into(), theme));
                     }
                 }
                 grid = grid.child(card);

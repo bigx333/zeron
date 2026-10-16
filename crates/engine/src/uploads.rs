@@ -241,6 +241,37 @@ impl Uploads {
             .then(|| target.to_string_lossy().to_string())
     }
 
+    /// The system temp dirs (`$TMPDIR`, and `/tmp` on Unix), as extra read
+    /// roots: agents save screenshots there and link them in replies, and
+    /// other devices can only view them through `ReadAttachmentChunk`. Like
+    /// every root but the uploads dir, they serve images only. A temp dir that
+    /// holds this engine's uploads dir is skipped, so a data dir under temp
+    /// (dev and test profiles) can't expose another profile's uploads.
+    pub fn temp_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![std::env::temp_dir()];
+        if cfg!(unix) {
+            roots.push(PathBuf::from("/tmp"));
+        }
+        self.readable_temp_roots(roots)
+    }
+
+    fn readable_temp_roots(&self, mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
+        let uploads =
+            std::fs::canonicalize(&self.inner.dir).unwrap_or_else(|_| self.inner.dir.clone());
+        let mut seen = Vec::new();
+        roots.retain(|root| {
+            let Ok(canonical) = std::fs::canonicalize(root) else {
+                return false;
+            };
+            if uploads.starts_with(&canonical) || seen.contains(&canonical) {
+                return false;
+            }
+            seen.push(canonical);
+            true
+        });
+        roots
+    }
+
     /// Read one 45KB chunk of an attachment. `extra_roots` are the workspace's
     /// known chat cwds — together with the uploads dir they form the path jail.
     pub fn read_chunk(
@@ -671,6 +702,49 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn temp_roots_serve_images_but_never_an_uploads_dir_inside_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(dir.path());
+        let roots = uploads.readable_temp_roots(vec![temp.path().into(), temp.path().into()]);
+        assert_eq!(roots, [temp.path().to_path_buf()], "deduplicated");
+
+        let shot = temp.path().join("adbt").join("a.png");
+        std::fs::create_dir_all(shot.parent().unwrap()).unwrap();
+        std::fs::write(&shot, b"png").unwrap();
+        let chunk = uploads
+            .read_chunk(shot.to_str().unwrap(), 0, &roots)
+            .unwrap();
+        assert_eq!(chunk.mime_type, "image/png");
+        // Only images: logs and secrets left in temp stay unreadable.
+        let log = temp.path().join("agent.log");
+        std::fs::write(&log, "token").unwrap();
+        assert!(
+            uploads
+                .read_chunk(log.to_str().unwrap(), 0, &roots)
+                .is_err()
+        );
+        // A symlink in temp can't reach a file outside it.
+        #[cfg(unix)]
+        {
+            std::fs::write(home.path().join("private.png"), b"png").unwrap();
+            let link = temp.path().join("private.png");
+            std::os::unix::fs::symlink(home.path().join("private.png"), &link).unwrap();
+            assert!(
+                uploads
+                    .read_chunk(link.to_str().unwrap(), 0, &roots)
+                    .is_err()
+            );
+        }
+
+        // A temp dir holding the uploads dir (a data dir under temp) is not
+        // a root, or it would expose other profiles' uploads beside it.
+        let parent = dir.path().parent().unwrap().to_path_buf();
+        assert!(uploads.readable_temp_roots(vec![parent]).is_empty());
     }
 
     #[test]

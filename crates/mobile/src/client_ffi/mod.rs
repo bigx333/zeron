@@ -56,6 +56,27 @@ where
 
 /// One signed-in account (or Demo mode). Create one per sign-in; call
 /// `shutdown()` on sign-out.
+/// A failed attachment read, worded for someone who tapped an image or file
+/// link in a reply: the host's path-jail refusals read as what can be opened.
+fn attachment_error(err: CoreError) -> CoreError {
+    let message = match &err {
+        CoreError::HostError { message } if message.contains("outside the upload cache") => {
+            "The host only shares images from the chat's folder and its temp folders."
+        }
+        CoreError::HostError { message } if message.contains("not a supported image") => {
+            "Only images can be opened from the host."
+        }
+        CoreError::HostError { message } if message.contains("too large") => {
+            "The file is too large to open."
+        }
+        CoreError::HostUnavailable { .. } => "The host is offline.",
+        _ => return err,
+    };
+    CoreError::HostError {
+        message: message.to_owned(),
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct CoreClient {
     pub(crate) client: zc::Client,
@@ -566,8 +587,9 @@ impl CoreClient {
     /// Attachment bytes (LRU-cached): host paths and own `pending://` refs.
     pub async fn read_attachment(&self, device_id: String, path: String) -> CoreResult<Vec<u8>> {
         let client = self.client.clone();
-        let bytes =
-            on_runtime(async move { client.read_attachment(&device_id, &path).await }).await?;
+        let bytes = on_runtime(async move { client.read_attachment(&device_id, &path).await })
+            .await
+            .map_err(attachment_error)?;
         Ok(bytes.as_ref().clone())
     }
 
@@ -716,4 +738,43 @@ pub fn parse_user_message(content: String) -> ParsedUserMessage {
 #[uniffi::export]
 pub fn max_attachment_bytes() -> u64 {
     zc::attachments::MAX_ATTACHMENT_BYTES as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_refusals_read_as_what_can_be_opened() {
+        let host = |message: &str| CoreError::HostError {
+            message: message.into(),
+        };
+        let reason = |err| match attachment_error(err) {
+            CoreError::HostError { message } => message,
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            reason(host(
+                "ReadAttachmentChunk: Attachment is outside the upload cache"
+            ))
+            .contains("chat's folder")
+        );
+        assert!(
+            reason(host(
+                "ReadAttachmentChunk: Attachment is not a supported image"
+            ))
+            .contains("Only images")
+        );
+        assert_eq!(
+            reason(CoreError::HostUnavailable {
+                message: "mac: connection closed".into()
+            }),
+            "The host is offline."
+        );
+        // Anything else keeps the host's own words.
+        assert_eq!(
+            reason(host("ReadAttachmentChunk: disk I/O")),
+            "ReadAttachmentChunk: disk I/O"
+        );
+    }
 }
