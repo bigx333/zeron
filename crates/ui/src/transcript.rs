@@ -2294,6 +2294,13 @@ impl MarkdownImages {
         retired
     }
 
+    /// Every image held, for release when the transcript goes away.
+    fn drain(&mut self) -> Vec<Arc<gpui::Image>> {
+        let mut images = std::mem::take(&mut self.retired);
+        images.extend(self.recent.drain(..).map(|kept| kept.image.image));
+        images
+    }
+
     /// Point at another chat's host: its images can't be the same files.
     fn set_device(&mut self, device: Option<String>) {
         if self.device != device {
@@ -3785,6 +3792,13 @@ impl Transcript {
             this.close_diagram_zoom(cx);
             crate::image_media::release_media(this.diagrams.borrow_mut().drain(), cx);
             this.tool_images.clear(cx);
+            let images = this.markdown_images.borrow_mut().drain();
+            // After the active window returns to App, release its atlas tiles as well.
+            cx.defer(move |cx| {
+                for image in images {
+                    gpui::ImageSource::Image(image).evict(None, cx);
+                }
+            });
         })
         .detach();
         let text_changes = cx.subscribe(
@@ -12396,6 +12410,12 @@ mod tests {
         images.set_device(Some("linux".into()));
         assert!(images.recent.is_empty());
         assert_eq!(images.begin_frame().len(), 1 + MARKDOWN_IMAGES_KEPT);
+        // Going away releases both the kept and the not-yet-released ones.
+        images.keep("linux", "/tmp/b.png", image("b"));
+        images.set_device(Some("mac".into()));
+        images.keep("mac", "/tmp/c.png", image("c"));
+        assert_eq!(images.drain().len(), 2);
+        assert!(images.recent.is_empty() && images.retired.is_empty());
     }
 
     #[test]
