@@ -310,24 +310,26 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
         runCatching { client.setSessionConfig(c.chatId, change(current)) }
     }
 
-    val modelLabel = row?.modelLabel ?: row?.harnessLabel
-    if (modelLabel != null) {
-        ContextChip(modelLabel, leading = { ModelMark(row?.model, harness, 14.dp) }, onClick = { open("model") }) {
-            ModelMenu(menu == "model", { menu = null }, listOf(ModelSection(row?.harnessLabel, harness, models.orEmpty(), { it.id == row?.model }) { m ->
-                setConfig { it.copy(model = m.id) }
-            }))
-        }
-    }
-    // Shown whenever the model has an effort ladder, not only once a level was
-    // set: a session on the model's default still needs a way to change it.
+    // One chip for model and effort. The effort shows whenever the model has a
+    // ladder, not only once a level was set: a session on the model's default
+    // still needs a way to change it.
     val model = models?.let { list -> list.firstOrNull { it.id == row?.model } ?: list.firstOrNull() }
     val levels = model?.reasoningLevels.orEmpty()
     val level = row?.reasoning?.takeIf { it.isNotEmpty() } ?: model?.defaultReasoning ?: levels.firstOrNull()
-    if (level != null) {
-        ContextChip(reasoningLabel(level), leading = { ZIcon(ZIcons.Effort, null, Modifier.size(16.dp)) }, onClick = { open("effort") }) {
-            ChoiceMenu(menu == "effort", { menu = null }, listOf(MenuSection("Reasoning effort", levels.map { l ->
-                MenuChoice(reasoningLabel(l), l == level) { setConfig { it.copy(reasoning = l) } }
-            })))
+    val modelLabel = row?.modelLabel ?: row?.harnessLabel
+    if (modelLabel != null) {
+        ModelChip(row?.model, harness, modelLabel, level, onClick = { open("model") })
+        if (menu == "model") {
+            ModelSheet(
+                listOf(ModelSection(row?.harnessLabel, harness, models.orEmpty(), { it.id == row?.model }) { m ->
+                    // A level the new model lacks falls back to its default.
+                    setConfig { it.copy(model = m.id, reasoning = it.reasoning?.takeIf { r -> r in m.reasoningLevels }) }
+                }),
+                effort = level,
+                efforts = levels,
+                onEffort = { l -> setConfig { it.copy(reasoning = l) } },
+                onDismiss = { menu = null },
+            )
         }
     }
     val pr = row?.pullRequest

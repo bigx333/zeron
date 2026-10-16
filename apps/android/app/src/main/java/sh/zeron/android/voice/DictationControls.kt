@@ -27,7 +27,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
@@ -89,52 +91,85 @@ fun DictationHost(controller: DictationController) {
 }
 
 /**
- * The composer's microphone, beside send (Codex dictation). Idle: tap to
- * record. Recording: cancel, then a stop pill with the clock that
- * transcribes. Transcribing: cancel beside a loading indicator. The text
- * lands at [model]'s cursor and is never sent. Renders nothing unless
- * dictation is on and the host can lend its ChatGPT credential.
+ * A composer's view of Codex dictation, for its trailing slot: whether the
+ * microphone can start ([available]: switched on, the host can lend, no call)
+ * and, while this composer dictates, its [active] phase. Null when the app has
+ * no dictation. The text lands at the composer's cursor and is never sent.
  */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+class DictationSlot internal constructor(
+    val available: Boolean,
+    val active: DictationPhase?,
+    internal val idle: Boolean,
+    val toggle: () -> Unit,
+    val cancel: () -> Unit,
+)
+
 @Composable
-fun DictationButton(model: ComposerModel) {
-    val controller = LocalDictation.current ?: return
+fun rememberDictationSlot(model: ComposerModel): DictationSlot? {
+    val controller = LocalDictation.current ?: return null
     val ready by controller.ready.collectAsState()
     val phase by controller.phase.collectAsState()
     val call by controller.voice.snapshot.collectAsState()
-    val mine = controller.owns(model)
-    // A dictation keeps its controls even if the host stops lending mid-way.
-    if (!ready && !mine) return
     DisposableEffect(controller, model) {
         controller.attach(model)
         onDispose { controller.detach(model) }
     }
     val haptics = LocalHapticFeedback.current
-    val toggle = {
-        haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-        controller.toggle(model) { text -> model.insertDictation(text) }
+    return DictationSlot(
+        available = ready && !call.live,
+        active = phase.takeIf { it != DictationPhase.Idle && controller.owns(model) },
+        idle = phase == DictationPhase.Idle,
+        toggle = {
+            haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+            controller.toggle(model) { text -> model.insertDictation(text) }
+        },
+        cancel = {
+            haptics.performHapticFeedback(HapticFeedbackType.Reject)
+            controller.cancel()
+        },
+    )
+}
+
+/**
+ * The idle microphone. [prominent] fills the composer's trailing slot (a
+ * tonal circle the size of send, which it stands in for while the draft is
+ * empty); otherwise a plain icon beside another control.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun DictationMic(slot: DictationSlot, prominent: Boolean) {
+    if (prominent) {
+        FilledTonalIconButton(
+            onClick = slot.toggle,
+            enabled = slot.idle,
+            shapes = IconButtonDefaults.shapes(),
+            modifier = Modifier.size(40.dp),
+        ) { ZIcon(ZIcons.Mic, "Dictate", Modifier.size(22.dp)) }
+    } else {
+        IconButton(onClick = slot.toggle, enabled = slot.idle) {
+            ZIcon(ZIcons.Mic, "Dictate", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
-    val cancel = {
-        haptics.performHapticFeedback(HapticFeedbackType.Reject)
-        controller.cancel()
-    }
-    AnimatedContent(
-        if (mine) phase else DictationPhase.Idle,
-        transitionSpec = { (scaleIn() + fadeIn()) togetherWith (scaleOut() + fadeOut()) },
-        contentKey = { it::class },
-        label = "dictation",
-    ) { shown ->
-        when (shown) {
-            DictationPhase.Idle -> IconButton(onClick = toggle, enabled = !call.live && phase == DictationPhase.Idle) {
-                ZIcon(ZIcons.Mic, "Dictate", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            is DictationPhase.Recording -> Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = cancel) { ZIcon(ZIcons.Close, "Cancel dictation", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
-                RecordingPill(shown.startedAt, onStop = toggle)
-                Spacer(Modifier.width(4.dp))
-            }
-            DictationPhase.Transcribing -> Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = cancel) { ZIcon(ZIcons.Close, "Cancel dictation", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+}
+
+/** Dictating: cancel, then the stop pill with the clock (recording) or a loading indicator (transcribing). */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun DictationActive(slot: DictationSlot, phase: DictationPhase) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = slot.cancel) {
+            ZIcon(ZIcons.Close, "Cancel dictation", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        AnimatedContent(
+            phase,
+            transitionSpec = { (scaleIn() + fadeIn()) togetherWith (scaleOut() + fadeOut()) },
+            contentKey = { it::class },
+            contentAlignment = Alignment.CenterEnd,
+            label = "dictation",
+        ) { shown ->
+            if (shown is DictationPhase.Recording) {
+                RecordingPill(shown.startedAt, onStop = slot.toggle)
+            } else {
                 Box(Modifier.size(40.dp).semantics { contentDescription = "Transcribing" }, contentAlignment = Alignment.Center) {
                     LoadingIndicator(Modifier.size(32.dp))
                 }

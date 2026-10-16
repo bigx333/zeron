@@ -4,7 +4,12 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -139,8 +144,7 @@ fun ComposerSurface(
                 }
                 if (!card) {
                     Spacer(Modifier.width(8.dp))
-                    sh.zeron.android.voice.DictationButton(model)
-                    ActionButton(action, model.hasContent, onAction)
+                    TrailingControls(model, action, onAction)
                     Spacer(Modifier.width(8.dp))
                 } else {
                     Spacer(Modifier.width(16.dp))
@@ -172,10 +176,57 @@ fun ComposerSurface(
                         content = chips,
                     )
                     Spacer(Modifier.width(8.dp))
-                    sh.zeron.android.voice.DictationButton(model)
-                    ActionButton(action, model.hasContent, onAction)
+                    TrailingControls(model, action, onAction)
                 }
             }
+        }
+    }
+}
+
+/** What the composer's trailing slot shows. */
+private enum class Trailing { Mic, Send, Stop, Dictating }
+
+/**
+ * The composer's trailing slot: one control that changes with the draft.
+ * Empty, it's the microphone (when dictation is on); once there's text or a
+ * photo, send (or queue). While the agent runs and the draft is empty, stop,
+ * with the microphone beside it. Dictating, it widens into cancel and the
+ * recording pill. Each change scales and fades in place.
+ */
+@Composable
+private fun TrailingControls(model: ComposerModel, action: ComposerAction, onAction: () -> Unit) {
+    val dictation = sh.zeron.android.voice.rememberDictationSlot(model)
+    val empty = !model.hasContent
+    val active = dictation?.active
+    // The pill keeps its last phase while it animates out.
+    var lastActive by remember { mutableStateOf<sh.zeron.android.voice.DictationPhase?>(null) }
+    if (active != null) lastActive = active
+    val slot = when {
+        active != null -> Trailing.Dictating
+        action == ComposerAction.Stop && empty -> Trailing.Stop
+        empty && dictation?.available == true -> Trailing.Mic
+        else -> Trailing.Send
+    }
+    AnimatedContent(
+        slot,
+        transitionSpec = {
+            (scaleIn(initialScale = 0.7f) + fadeIn()) togetherWith (scaleOut(targetScale = 0.7f) + fadeOut()) using
+                SizeTransform(clip = false)
+        },
+        contentAlignment = Alignment.CenterEnd,
+        label = "trailing",
+    ) { shown ->
+        when (shown) {
+            Trailing.Dictating -> {
+                val phase = active ?: lastActive
+                if (dictation != null && phase != null) sh.zeron.android.voice.DictationActive(dictation, phase)
+            }
+            Trailing.Stop -> Row(verticalAlignment = Alignment.CenterVertically) {
+                if (dictation?.available == true) sh.zeron.android.voice.DictationMic(dictation, prominent = false)
+                ActionButton(action, model.hasContent, onAction)
+            }
+            Trailing.Mic -> if (dictation != null) sh.zeron.android.voice.DictationMic(dictation, prominent = true)
+            Trailing.Send -> ActionButton(action, model.hasContent, onAction)
         }
     }
 }
@@ -299,71 +350,6 @@ fun MentionSuggestions(model: ComposerModel, search: suspend (String) -> List<Fi
             }
         }
     }
-}
-
-/** One harness's models in a [ModelMenu]. */
-class ModelSection(
-    val title: String?,
-    val harness: String?,
-    val models: List<ModelInfo>,
-    val selected: (ModelInfo) -> Boolean,
-    val leading: (@Composable () -> Unit)? = null,
-    val describe: Boolean = true,
-    val onPick: (ModelInfo) -> Unit,
-)
-
-/** Models grouped by vendor in picker order. */
-private fun vendorGroups(models: List<ModelInfo>, harness: String?): List<Pair<ModelVendor, List<ModelInfo>>> {
-    val groups = models.groupBy { ModelVendor.of(it.id, harness) }
-    return ModelVendor.entries.mapNotNull { v -> groups[v]?.let { v to it } }
-}
-
-/**
- * A model picker that keeps the list short: with more than one vendor in it
- * (several harnesses, or a gateway serving many vendors) it lists the
- * vendors first, then that vendor's models. One vendor's models stay flat.
- */
-@Composable
-fun ModelMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<ModelSection>) {
-    // Keyed by harness, not the section itself: a refreshed list or draft
-    // brings new models and callbacks, and the open vendor page must use them.
-    var open by remember { mutableStateOf<Pair<String?, ModelVendor>?>(null) }
-    LaunchedEffect(expanded) { if (!expanded) open = null }
-    val drilled = open?.let { (harness, vendor) ->
-        sections.firstOrNull { it.harness == harness }?.let { section ->
-            (section to vendor).takeIf { section.models.any { ModelVendor.of(it.id, harness) == vendor } }
-        }
-    }
-    val shown = drilled?.let { (section, vendor) ->
-        val models = section.models.filter { ModelVendor.of(it.id, section.harness) == vendor }
-        // One vendor through two providers (Claude direct and via a gateway): name the provider.
-        val providers = models.mapTo(HashSet()) { it.id.substringBefore('/', "") }.size
-        listOf(
-            MenuSection(null, listOf(MenuChoice(section.title ?: "Back", leading = { ZIcon(ZIcons.Back, null, Modifier.size(18.dp)) }, keepsOpen = true) { open = null })),
-            MenuSection(vendor.title, models.map { m ->
-                MenuChoice(m.label, section.selected(m), m.description?.takeIf { providers > 1 }, { VendorMark(vendor, section.harness, 18.dp) }) { section.onPick(m) }
-            }),
-        )
-    } ?: run {
-        val grouped = sections.map { it to vendorGroups(it.models, it.harness) }
-        val categories = grouped.sumOf { (_, groups) -> groups.size } > 1
-        grouped.map { (section, groups) -> section to groups.takeIf { categories } }
-    }.map { (section, groups) ->
-        MenuSection(
-            section.title,
-            groups?.map { (vendor, list) ->
-                val count = if (list.size == 1) "1 model" else "${list.size} models"
-                // The chosen model shows on its vendor's row, since the check is behind it.
-                val detail = list.firstOrNull(section.selected)?.let { "${it.label} · $count" } ?: count
-                MenuChoice(vendor.title, list.any(section.selected), detail, { VendorMark(vendor, section.harness, 18.dp) }, keepsOpen = true, drills = true) {
-                    open = section.harness to vendor
-                }
-            } ?: section.models.map { m ->
-                MenuChoice(m.label, section.selected(m), m.description?.takeIf { section.describe }, section.leading) { section.onPick(m) }
-            },
-        )
-    }
-    ChoiceMenu(expanded, onDismiss, shown)
 }
 
 /** An expressive choice menu: one group, inline section labels, a trailing check on the choice. */

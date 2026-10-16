@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -185,6 +186,25 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
                     )
                 }
             }
+            // Where it runs: project, host and branch, one tappable line above the composer.
+            androidx.compose.foundation.layout.FlowRow(
+                horizontalArrangement = Arrangement.Center,
+                itemVerticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 768.dp)
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 6.dp)
+                    .animateContentSize(MaterialTheme.motionScheme.defaultSpatialSpec()),
+            ) {
+                ProjectChip(draft, projects, onPick = { draft = it }, onNewProject = { newProject = true })
+                ContextDot()
+                HostChip(draft, project, projects, hosts) { draft = it }
+                if (project != null && project.gitDetected) {
+                    ContextDot()
+                    BranchChip(model, draft, project.deviceId, project.path) { draft = it }
+                }
+            }
             MentionSuggestions(
                 composer,
                 search = { q ->
@@ -206,15 +226,7 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
                     .widthIn(max = 768.dp)
                     .onGloballyPositioned { composerBounds = it.boundsInRoot() },
             ) {
-                ProjectChip(draft, projects, onPick = { draft = it }, onNewProject = { newProject = true })
-                HostChip(draft, project, projects, hosts) { draft = it }
-                if (project != null && project.gitDetected) BranchChip(model, draft, project.deviceId, project.path) { draft = it }
-                ModelChip(draft, choice, models) { draft = it }
-                val efforts = choice?.model?.reasoningLevels.orEmpty()
-                if (efforts.isNotEmpty()) {
-                    val effort = draft.effort?.takeIf { it in efforts } ?: choice?.model?.defaultReasoning ?: efforts[efforts.size / 2]
-                    EffortChip(effort, efforts) { draft = draft.copy(effort = it) }
-                }
+                DraftModelChip(draft, choice, models) { draft = it }
             }
         }
     }
@@ -235,7 +247,7 @@ private fun ProjectChip(
 ) {
     var open by remember { mutableStateOf(false) }
     val project = projects.firstOrNull { it.id == draft.projectId }
-    ContextChip(
+    ContextLink(
         project?.groupName ?: "No project",
         leading = {
             if (project != null) ProjectTile(project.groupName, project.colorIndex.toInt(), 18.dp)
@@ -392,7 +404,7 @@ private fun HostChip(
         else projects.filter { it.groupKey == project.groupKey }.sortedWith(compareBy({ (it.deviceName ?: "").lowercase() }, { it.path }))
     }
     val title = if (project != null) project.deviceName ?: "Host" else hosts.firstOrNull { it.id == draft.hostId }?.name ?: "Choose host"
-    ContextChip(title, leading = { ZIcon(ZIcons.Laptop, null, Modifier.size(16.dp)) }, onClick = { open = true }) {
+    ContextLink(title, leading = { ZIcon(ZIcons.Laptop, null, Modifier.size(16.dp)) }, onClick = { open = true }) {
         val choices = if (checkouts.isNotEmpty()) {
             checkouts.map { p ->
                 val shared = checkouts.count { it.deviceId == p.deviceId } > 1
@@ -424,7 +436,7 @@ private fun BranchChip(
                 .sortedByDescending { it.current }.map { it.name }
         }
     }
-    ContextChip(
+    ContextLink(
         if (draft.worktree) "New worktree" else draft.branch ?: "Current branch",
         leading = { ZIcon(ZIcons.Branch, null, Modifier.size(16.dp)) },
         onClick = { open = true },
@@ -441,8 +453,9 @@ private fun BranchChip(
     }
 }
 
+/** The draft's model and effort: one chip, one sheet. */
 @Composable
-private fun ModelChip(
+private fun DraftModelChip(
     draft: sh.zeron.android.core.NewSessionDraft,
     choice: ModelChoice?,
     models: List<ModelChoice>,
@@ -452,26 +465,27 @@ private fun ModelChip(
     // Never the harness name in place of a model.
     val title = choice?.model?.label ?: draft.model?.let { modelLabel(draft.harness, it) }
         ?: fallbackModels(draft.harness).firstOrNull()?.label ?: harnessLabel(draft.harness)
-    ContextChip(title, leading = { ModelMark(choice?.model?.id ?: draft.model, draft.harness, 14.dp) }, onClick = { open = true }) {
-        ModelMenu(open, { open = false }, models.groupBy { it.harness }.map { (harness, list) ->
-            ModelSection(
-                list.first().harnessLabel,
-                harness,
-                list.map { it.model },
-                { m -> harness == draft.harness && m.id == choice?.model?.id },
-                leading = { HarnessMark(harness, 18.dp) },
-                describe = false,
-            ) { m -> onPick(draft.copy(harness = harness, model = m.id, effort = null)) }
-        })
+    val efforts = choice?.model?.reasoningLevels.orEmpty()
+    val effort = if (efforts.isEmpty()) {
+        null
+    } else {
+        draft.effort?.takeIf { it in efforts } ?: choice?.model?.defaultReasoning ?: efforts[efforts.size / 2]
     }
-}
-
-@Composable
-private fun EffortChip(effort: String, efforts: List<String>, onPick: (String) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    ContextChip(reasoningLabel(effort), leading = { ZIcon(ZIcons.Effort, null, Modifier.size(16.dp)) }, onClick = { open = true }) {
-        ChoiceMenu(open, { open = false }, listOf(MenuSection("Reasoning effort", efforts.map { e ->
-            MenuChoice(reasoningLabel(e), e == effort) { onPick(e) }
-        })))
+    ModelChip(choice?.model?.id ?: draft.model, draft.harness, title, effort, onClick = { open = true })
+    if (open) {
+        ModelSheet(
+            models.groupBy { it.harness }.map { (harness, list) ->
+                ModelSection(
+                    list.first().harnessLabel,
+                    harness,
+                    list.map { it.model },
+                    { m -> harness == draft.harness && m.id == choice?.model?.id },
+                ) { m -> onPick(draft.copy(harness = harness, model = m.id, effort = null)) }
+            },
+            effort = effort,
+            efforts = efforts,
+            onEffort = { onPick(draft.copy(effort = it)) },
+            onDismiss = { open = false },
+        )
     }
 }

@@ -1,6 +1,10 @@
 package sh.zeron.android.ui
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.foundation.clickable
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.expandVertically
@@ -134,7 +138,8 @@ fun ContextChip(
             contentColor = tint,
         ) {
             Row(
-                Modifier.heightIn(min = 34.dp).padding(start = 10.dp, end = 12.dp),
+                // A new label (another model, an effort) resizes the chip smoothly.
+                Modifier.animateContentSize(MaterialTheme.motionScheme.fastSpatialSpec()).heightIn(min = 34.dp).padding(start = 10.dp, end = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
@@ -144,6 +149,55 @@ fun ContextChip(
         }
         menu()
     }
+}
+
+/**
+ * A context setting as a quiet, tappable label ([ContextChip] without the
+ * pill): the new-session line of project · host · branch above the composer.
+ * `menu` is its (lazily built) choice menu, anchored here.
+ */
+@Composable
+fun ContextLink(
+    label: String,
+    leading: @Composable () -> Unit,
+    onClick: () -> Unit,
+    menu: @Composable () -> Unit = {},
+) {
+    Box {
+        Row(
+            Modifier
+                .clip(RoundedCornerShape(50))
+                .clickable(onClick = onClick)
+                .heightIn(min = 36.dp)
+                .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
+                Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) { leading() }
+                AnimatedContent(
+                    label,
+                    transitionSpec = { fadeIn() togetherWith fadeOut() using SizeTransform(clip = false) },
+                    label = "context",
+                ) {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+        menu()
+    }
+}
+
+/** The separator between [ContextLink]s. */
+@Composable
+fun ContextDot() {
+    Text("·", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.outline)
 }
 
 class MenuChoice(
