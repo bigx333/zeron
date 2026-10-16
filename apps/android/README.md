@@ -59,7 +59,7 @@ adb shell am start -n sh.zeron.android/.MainActivity \
 | `--ez fast true` / `--ez longreply true` | Demo stream speed / reply length |
 | `--ez big true` / `--ez huge true` | Demo transcripts with 120 / 600 turns |
 | `--es route chat:<id>` / `new` / `search` / `settings` (`more`) / `archived` | Open a screen at launch (with nobody signed in, on the demo) |
-| `--ez t3 true` | Open in T3 Mode (attention-first inbox) with Working / Snoozed / Settled shelves folded; kept in memory, the saved layout is untouched |
+| `--ez t3 true` | Open in T3 Mode (attention-first inbox) with Working / Snoozed shelves folded; kept in memory, the saved layout is untouched |
 | `--ez signedout true` | Clear stored credentials |
 | `--es wallpaper <path>` / `none` | Set (or clear) the wallpaper from a file the app can read, e.g. `adb push art.jpg /data/local/tmp/ && adb shell run-as sh.zeron.android cp /data/local/tmp/art.jpg files/` then `--es wallpaper /data/user/0/sh.zeron.android/files/art.jpg` |
 | `--es wallpaper-effect <none\|dither\|ascii\|halftone\|scanlines>` | Wallpaper effect |

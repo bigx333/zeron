@@ -38,7 +38,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     var movesAcrossSections = false
     private(set) var collapsed = Set(UserDefaults.standard.stringArray(forKey: "collapsedSections") ?? [])
     /// T3 shelves start folded: their state is the set the user opened.
-    static let shelves: Set<String> = ["t3-working", "t3-snoozed", "t3-settled"]
+    static let shelves: Set<String> = ["t3-working", "t3-snoozed"]
     /// The demo (and its UI tests) always start folded.
     private static let persistsShelves = !ProcessInfo.processInfo.arguments.contains("-demo")
     private var expandedShelves = Set(persistsShelves ? UserDefaults.standard.stringArray(forKey: "expandedShelves") ?? [] : [])
@@ -266,10 +266,8 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         return nil
     }
 
-    /// Settled rows: the Archived list, or the front page's Settled shelf.
-    func isArchivedRow(_ id: String) -> Bool {
-        archivedRows || dataSource.snapshot().sectionIdentifier(containingItem: .session(id)) == "t3-settled"
-    }
+    /// Settled rows: only the Archived list holds them.
+    func isArchivedRow(_ id: String) -> Bool { archivedRows }
 
     private func leadingSwipe(_ path: IndexPath) -> UISwipeActionsConfiguration? {
         guard let id = sessionId(path), !isArchivedRow(id), let vm = sessions[id] else { return nil }
@@ -644,18 +642,9 @@ class SessionsViewController: SessionListController {
         if !app.frontPage.snoozed.isEmpty {
             out.append(("t3-snoozed", "Snoozed", [], app.frontPage.snoozed))
         }
-        if !app.archived.isEmpty {
-            // The shelf holds the latest few; the full list is a tap away.
-            let shown = Array(app.archived.prefix(Self.settledShelfRows))
-            let all = app.archived.count > shown.count
-                ? [FolderRowVM(id: "archived", name: "All Settled", count: app.archived.count, symbol: "checkmark.circle")]
-                : []
-            out.append(("t3-settled", "Settled", all, shown))
-        }
+        // Settled stays off the page, like Archived: it has its own list.
         return out
     }
-
-    private static let settledShelfRows = 10
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -726,7 +715,7 @@ class SessionsViewController: SessionListController {
                     UIAction(title: "Group by Project", image: UIImage(systemName: "square.stack.3d.up"), state: app.groupByProject ? .on : .off) { _ in
                         app.groupByProject.toggle()
                     },
-                    UIAction(title: "T3 Mode", subtitle: "Inbox with Working, Snoozed and Settled shelves", image: UIImage(systemName: "tray.full"), state: app.t3Mode ? .on : .off) { _ in
+                    UIAction(title: "T3 Mode", subtitle: "Inbox with Working and Snoozed shelves", image: UIImage(systemName: "tray.full"), state: app.t3Mode ? .on : .off) { _ in
                         app.t3Mode.toggle()
                     },
                     UIAction(title: app.t3Mode ? "Settled" : "Archived", image: UIImage(systemName: app.t3Mode ? "checkmark.circle" : "archivebox")) { [weak self] _ in

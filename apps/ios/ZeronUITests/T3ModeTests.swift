@@ -89,17 +89,22 @@ final class T3ModeTests: XCTestCase {
         XCTAssertTrue(restored.waitForExistence(timeout: 3))
         XCTAssertFalse(restored.label.contains("Snoozed"))
 
-        // A full Settle lands on the folded Settled shelf, undoable from there.
+        // A full Settle leaves the page (no Settled shelf, like Archived);
+        // it waits in the Settled list, undoable from there.
         app.cells[id].swipeLeft()
         app.buttons["Settle"].tap()
-        let settled = app.cells["section-t3-settled"]
-        XCTAssertTrue(settled.waitForExistence(timeout: 5))
-        XCTAssertEqual(settled.value as? String, "Collapsed")
-        settled.tap()
+        XCTAssertTrue(app.cells[id].waitForNonExistence(timeout: 5))
+        XCTAssertFalse(app.cells["section-t3-settled"].exists)
+        app.buttons["sessions-options"].tap()
+        let list = app.buttons["Settled"]
+        XCTAssertTrue(list.waitForExistence(timeout: 3))
+        list.tap()
         let done = app.cells[id]
-        XCTAssertTrue(done.waitForExistence(timeout: 3))
+        XCTAssertTrue(done.waitForExistence(timeout: 5))
         done.swipeLeft()
         app.buttons["Unsettle"].tap()
+        XCTAssertTrue(done.waitForNonExistence(timeout: 5))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.cells[id].waitForExistence(timeout: 5))
         snapshot(app, "t3-unsettled")
     }
@@ -203,16 +208,11 @@ final class T3ModeTests: XCTestCase {
                 }
                 dismissMenus(app)
             }
-            // Settle another so the Settled shelf is populated too.
-            if openRowActions(app), app.buttons["Settle"].waitForExistence(timeout: 3) {
-                app.buttons["Settle"].tap()
-            }
-            dismissMenus(app)
             settle(app)
             capture(app, "t3-\(look)-shelves-folded")
 
             // Open every shelf, then follow the list down.
-            for shelf in ["section-t3-working", "section-t3-snoozed", "section-t3-settled"] {
+            for shelf in ["section-t3-working", "section-t3-snoozed"] {
                 let header = app.cells[shelf]
                 if !header.exists { app.swipeUp() }
                 if header.waitForExistence(timeout: 2), header.value as? String == "Collapsed" {

@@ -438,7 +438,6 @@ fun ShelfHeader(shelf: Shelf, rows: List<SessionRow>, total: Int, open: Boolean,
     val (icon, caption) = when (shelf) {
         Shelf.Working -> ZIcons.Refresh to if (total == 0) "No agents running" else "$total running"
         Shelf.Snoozed -> ZIcons.Snooze to (rows.firstOrNull()?.let { "Next wakes ${snoozeCaption(it.snoozeLabel, it.snoozedUntilMs)}" } ?: "Nothing snoozed")
-        Shelf.Settled -> ZIcons.Settle to if (total == 0) "Nothing settled" else "$total settled"
     }
     Surface(
         onClick = onToggle,
