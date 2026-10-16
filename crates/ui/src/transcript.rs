@@ -2238,18 +2238,66 @@ struct ImageMenu {
 const MARKDOWN_IMAGE_WIDTH: f32 = 480.0;
 const MARKDOWN_IMAGE_HEIGHT: f32 = 300.0;
 
-/// Host images settled replies asked for: the devices that may own them and
-/// the paths still to load.
+/// Markdown images the transcript keeps drawn even after the shared
+/// attachment cache evicts them, so a few large screenshots on screen can't
+/// evict and reload each other forever.
+const MARKDOWN_IMAGES_KEPT: usize = 6;
+
+/// Host images in settled replies: the chat's host device, the images rows
+/// asked for while painting, and the latest ones loaded.
 #[derive(Default)]
 struct MarkdownImages {
-    devices: Vec<String>,
-    requests: Vec<String>,
+    /// The chat's host only: a host path names a file on that machine, never
+    /// one that happens to sit at the same path on this desktop.
+    device: Option<String>,
+    /// `(path, mime)` still to load.
+    requests: Vec<(String, &'static str)>,
+    recent: VecDeque<(String, String, crate::attachments::CachedAttachmentImage)>,
+}
+
+impl MarkdownImages {
+    fn recent(
+        &mut self,
+        device: &str,
+        path: &str,
+    ) -> Option<crate::attachments::CachedAttachmentImage> {
+        let ix = self
+            .recent
+            .iter()
+            .position(|(d, p, _)| d == device && p == path)?;
+        let entry = self.recent.remove(ix)?;
+        let image = entry.2.clone();
+        self.recent.push_front(entry);
+        Some(image)
+    }
+
+    fn keep(&mut self, device: &str, path: &str, image: crate::attachments::CachedAttachmentImage) {
+        self.recent.retain(|(d, p, _)| d != device || p != path);
+        self.recent
+            .push_front((device.to_owned(), path.to_owned(), image));
+        self.recent.truncate(MARKDOWN_IMAGES_KEPT);
+    }
+}
+
+/// The raster type a host image's extension names. Only these draw inline:
+/// they decode through the validated, size-bounded raster path, so an SVG an
+/// agent wrote never reaches the renderer (its external references would
+/// resolve on this desktop).
+fn markdown_raster_mime(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => return None,
+    })
 }
 
 /// Replies' host images (`![…](/abs/a.png)`, `file://…`) drawn in a frame
-/// that loads from the chat's device, as the mobile apps draw them. Clicking
+/// that loads from the chat's host, as the mobile apps draw them. Clicking
 /// opens the picture full size; right-clicking copies it. Linked, remote and
-/// non-image sources keep their ordinary text rendering.
+/// non-raster sources keep their ordinary text rendering.
 fn markdown_image_renderer(
     images: Rc<RefCell<MarkdownImages>>,
     owner: gpui::WeakEntity<Transcript>,
@@ -2260,22 +2308,13 @@ fn markdown_image_renderer(
             return None;
         }
         let path = zeron_markdown::host_path(&image.source)?;
-        if !zeron_proto::attachment_mentions::is_image_path(&path) {
-            return None;
-        }
-        let devices = images.borrow().devices.clone();
-        if devices.is_empty() {
-            return None;
-        }
+        let mime = markdown_raster_mime(&path)?;
+        let device = images.borrow().device.clone()?;
         let label: SharedString = if image.alt.trim().is_empty() {
             path.rsplit('/').next().unwrap_or(&path).to_owned().into()
         } else {
             image.alt.clone().into()
         };
-        let snapshots: Vec<_> = devices
-            .iter()
-            .map(|device| attachment_snapshot_for(&AttachmentKey::new(device, &path, None)))
-            .collect();
         let frame = div()
             .id(id)
             .w(px(MARKDOWN_IMAGE_WIDTH))
@@ -2287,24 +2326,22 @@ fn markdown_image_renderer(
             .rounded(px(12.0))
             .overflow_hidden()
             .bg(crate::theme::ink(0.045));
-        // Any device that has it wins; otherwise it's loading while any device
-        // still is, and unavailable only once every device failed.
-        let loading = snapshots
-            .iter()
-            .any(|snapshot| matches!(snapshot, AttachmentSnapshot::Loading));
-        let loaded = snapshots.into_iter().find_map(|snapshot| match snapshot {
-            AttachmentSnapshot::Loaded(loaded) => Some(loaded),
-            _ => None,
-        });
+        let snapshot = attachment_snapshot_for(&AttachmentKey::new(&device, &path, Some(mime)));
+        let loaded = match &snapshot {
+            AttachmentSnapshot::Loaded(loaded) => {
+                images.borrow_mut().keep(&device, &path, loaded.clone());
+                Some(loaded.clone())
+            }
+            _ => images.borrow_mut().recent(&device, &path),
+        };
         let Some(loaded) = loaded else {
             let mut images = images.borrow_mut();
-            if !images.requests.contains(&path) {
-                images.requests.push(path);
+            if !images.requests.iter().any(|(p, _)| *p == path) {
+                images.requests.push((path, mime));
             }
-            let status = if loading {
-                "Loading image…".to_owned()
-            } else {
-                format!("{label} unavailable")
+            let status = match snapshot {
+                AttachmentSnapshot::Error { .. } => format!("{label} unavailable"),
+                _ => "Loading image…".to_owned(),
             };
             return Some(
                 frame
@@ -2317,7 +2354,7 @@ fn markdown_image_renderer(
         let accent = theme.accent;
         let open = owner.clone();
         let menu = owner.clone();
-        let open_path = SharedString::from(path.clone());
+        let preview = loaded.clone();
         Some(
             frame
                 .role(gpui::Role::Button)
@@ -2326,15 +2363,16 @@ fn markdown_image_renderer(
                 .cursor_pointer()
                 .focus_visible(move |style| style.border_2().border_color(accent))
                 .on_click(move |_, window, cx| {
-                    let _ =
-                        open.update(cx, |this, cx| this.open_chip_image(&open_path, window, cx));
+                    let _ = open.update(cx, |this, cx| {
+                        this.open_loaded_image(preview.clone(), window, cx)
+                    });
                 })
                 .on_mouse_down(MouseButton::Right, move |event, window, cx| {
                     cx.stop_propagation();
                     let _ = menu.update(cx, |this, cx| {
                         this.open_image_menu(
                             path.clone(),
-                            devices.clone(),
+                            vec![device.clone()],
                             event.position,
                             window,
                             cx,
@@ -3494,8 +3532,8 @@ pub struct Transcript {
     diagrams: Rc<RefCell<MermaidCache>>,
     /// The media handler over `diagrams`, built once and shared by every row.
     diagram_media: Option<render::MediaUi>,
-    /// Host images in settled replies (`![…](/abs/a.png)`): the devices that
-    /// may own them, and the paths rows asked for while painting.
+    /// Host images in settled replies (`![…](/abs/a.png)`): the chat's host,
+    /// the images rows asked for while painting, and the latest ones loaded.
     markdown_images: Rc<RefCell<MarkdownImages>>,
     /// The single serialized diagram render loop, while requests remain.
     diagram_worker: Option<Task<()>>,
@@ -5930,13 +5968,30 @@ impl Transcript {
     /// Claim loads for the host images rows just painted unloaded; each frame
     /// repaints as its image lands, retrying on the attachment ladder.
     fn load_markdown_images(&mut self, cx: &mut Context<Self>) {
-        let (devices, requests) = {
+        let (device, requests) = {
             let mut images = self.markdown_images.borrow_mut();
-            (images.devices.clone(), std::mem::take(&mut images.requests))
+            (images.device.clone(), std::mem::take(&mut images.requests))
         };
-        for path in requests {
-            self.attachment_state(&devices, &path, None, cx);
+        let Some(device) = device else { return };
+        let devices = [device];
+        for (path, mime) in requests {
+            self.attachment_state(&devices, &path, Some(mime), cx);
         }
+    }
+
+    /// Open an image already on screen full size, from exactly those pixels.
+    fn open_loaded_image(
+        &mut self,
+        image: crate::attachments::CachedAttachmentImage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let preview = crate::attachments::PreviewImage::new(image.name, image.image);
+        self.attachment_preview_return_focus = window.focused(cx);
+        preview.viewer.reset();
+        self.attachment_preview = Some(preview);
+        window.focus(&self.attachment_preview_focus, cx);
+        cx.notify();
     }
 
     /// Open a sent image chip's upload full size, as its thumbnail did. An
@@ -6614,7 +6669,15 @@ impl Transcript {
     /// images draw from the chat's device; other images keep their ordinary
     /// chat rendering.
     fn diagram_media(&mut self, cx: &Context<Self>) -> render::MediaUi {
-        self.markdown_images.borrow_mut().devices = self.attachment_device_ids(cx);
+        let host = (self.doc_override.is_none())
+            .then(|| {
+                self.state
+                    .read(cx)
+                    .selected_chat_row()
+                    .map(|chat| chat.device_id.clone())
+            })
+            .flatten();
+        self.markdown_images.borrow_mut().device = host;
         let cache = self.diagrams.clone();
         let owner = cx.weak_entity();
         let images = self.markdown_images.clone();
@@ -12224,6 +12287,32 @@ mod tests {
                 this.refresh_protected_attachments(cx);
             });
         });
+    }
+
+    #[test]
+    fn markdown_images_draw_only_rasters_and_keep_a_bounded_recent_set() {
+        assert_eq!(markdown_raster_mime("/tmp/a.PNG"), Some("image/png"));
+        assert_eq!(markdown_raster_mime("/tmp/a.jpeg"), Some("image/jpeg"));
+        // An SVG keeps its link: its references would resolve on this desktop.
+        assert_eq!(markdown_raster_mime("/tmp/a.svg"), None);
+        assert_eq!(markdown_raster_mime("/tmp/png"), None);
+
+        let image = |name: &str| crate::attachments::CachedAttachmentImage {
+            name: name.to_owned().into(),
+            image: Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, Vec::new())),
+        };
+        let mut images = MarkdownImages::default();
+        for _ in 0..3 {
+            images.keep("mac", "/tmp/a.png", image("a"));
+        }
+        assert_eq!(images.recent.len(), 1, "repaints don't duplicate");
+        for i in 0..MARKDOWN_IMAGES_KEPT + 2 {
+            images.keep("mac", &format!("/tmp/{i}.png"), image("n"));
+        }
+        assert_eq!(images.recent.len(), MARKDOWN_IMAGES_KEPT);
+        assert!(images.recent("mac", "/tmp/a.png").is_none(), "oldest evicted");
+        assert!(images.recent("phone", "/tmp/7.png").is_none(), "keyed by device");
+        assert!(images.recent("mac", "/tmp/7.png").is_some());
     }
 
     #[test]

@@ -256,14 +256,18 @@ impl Uploads {
     }
 
     fn readable_temp_roots(&self, mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
-        let uploads =
-            std::fs::canonicalize(&self.inner.dir).unwrap_or_else(|_| self.inner.dir.clone());
+        // The uploads dir may not exist yet (a fresh profile): resolve what
+        // does, so `/tmp/…/uploads` still matches `/private/tmp`.
+        let uploads = canonicalize_existing(&self.inner.dir);
         let mut seen = Vec::new();
         roots.retain(|root| {
             let Ok(canonical) = std::fs::canonicalize(root) else {
                 return false;
             };
-            if uploads.starts_with(&canonical) || seen.contains(&canonical) {
+            if uploads.starts_with(&canonical)
+                || self.inner.dir.starts_with(root)
+                || seen.contains(&canonical)
+            {
                 return false;
             }
             seen.push(canonical);
@@ -288,6 +292,11 @@ impl Uploads {
         // Read ONLY this chunk's byte range — never the whole file per chunk.
         let mut buf = vec![0u8; (next_offset - start) as usize];
         let mut handle = std::fs::File::open(&file.resolved)?;
+        if !still_resolves_to(&handle, &file.resolved) {
+            return Err(EngineError::Other(
+                "Attachment is outside the upload cache".into(),
+            ));
+        }
         handle.seek(std::io::SeekFrom::Start(start))?;
         let mut read = 0usize;
         while read < buf.len() {
@@ -742,9 +751,12 @@ mod tests {
         }
 
         // A temp dir holding the uploads dir (a data dir under temp) is not
-        // a root, or it would expose other profiles' uploads beside it.
+        // a root, or it would expose other profiles' uploads beside it —
+        // even before the profile's uploads dir exists.
         let parent = dir.path().parent().unwrap().to_path_buf();
-        assert!(uploads.readable_temp_roots(vec![parent]).is_empty());
+        assert!(uploads.readable_temp_roots(vec![parent.clone()]).is_empty());
+        let fresh = Uploads::from_root(&dir.path().join("profiles").join("p1").join("uploads"));
+        assert!(fresh.readable_temp_roots(vec![parent]).is_empty());
     }
 
     #[test]
@@ -856,6 +868,49 @@ fn raster_signature(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
     } else {
         None
     }
+}
+
+/// `path` canonicalized through its deepest existing ancestor, with the
+/// missing components appended as written.
+fn canonicalize_existing(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(existing) {
+            return missing
+                .iter()
+                .rev()
+                .fold(canonical, |at, part| at.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_owned());
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// The jail checked `resolved`, then the read opened it again. In a shared
+/// temp dir another local user could swap a component for a symlink in
+/// between; the open file must still be the one at that canonical path.
+#[cfg(unix)]
+fn still_resolves_to(handle: &std::fs::File, resolved: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(open), Ok(canonical)) = (handle.metadata(), std::fs::canonicalize(resolved)) else {
+        return false;
+    };
+    let Ok(now) = std::fs::metadata(&canonical) else {
+        return false;
+    };
+    canonical == resolved && open.dev() == now.dev() && open.ino() == now.ino()
+}
+
+/// Windows temp dirs are per-user, so no other account can race the path.
+#[cfg(not(unix))]
+fn still_resolves_to(_: &std::fs::File, _: &Path) -> bool {
+    true
 }
 
 fn same_generated_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
