@@ -83,13 +83,6 @@ const MAX_LADDER: &[ReasoningLevel] = &[
     ReasoningLevel::Max,
 ];
 
-const XHIGH_LADDER: &[ReasoningLevel] = &[
-    ReasoningLevel::Low,
-    ReasoningLevel::Medium,
-    ReasoningLevel::High,
-    ReasoningLevel::XHigh,
-];
-
 /// The service-tier select the app server reports per model (`serviceTiers` /
 /// `additionalSpeedTiers` in `model/list`); "default" means Standard and is
 /// omitted from the wire params entirely.
@@ -111,6 +104,25 @@ fn service_tier() -> ModelOption {
     }
 }
 
+/// Older generations: the picker keeps them behind "More models". A model
+/// the live list reports an `upgrade` for is older too.
+const LEGACY: &[&str] = &[
+    "gpt-6-sol",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    // Retired, for hosts whose Codex still lists them.
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
+];
+
+/// Whether `id` is a curated older generation. A model not listed is current.
+pub(crate) fn is_legacy(id: &str) -> bool {
+    LEGACY.contains(&id)
+}
+
 fn model(
     id: &str,
     label: &str,
@@ -119,6 +131,7 @@ fn model(
     options: Vec<ModelOption>,
 ) -> Model {
     Model {
+        legacy: is_legacy(id),
         id: id.into(),
         label: label.into(),
         description: (!description.is_empty()).then(|| description.into()),
@@ -134,67 +147,60 @@ fn model(
 pub(crate) fn static_models() -> Vec<Model> {
     vec![
         model(
+            "gpt-6.1-sol",
+            "GPT-6.1-Sol",
+            "Latest workhorse model for coding and everyday work.",
+            ULTRA_LADDER,
+            vec![service_tier()],
+        ),
+        model(
             "gpt-6-astra",
             "GPT-6-Astra",
-            "Our most capable model for complex, demanding work.",
+            "Frontier intelligence for the most demanding work.",
             ULTRA_LADDER,
+            vec![service_tier()],
+        ),
+        model(
+            "gpt-6-sol",
+            "GPT-6-Sol",
+            "Previous generation workhorse model.",
+            ULTRA_LADDER,
+            vec![service_tier()],
+        ),
+        model(
+            "gpt-6-luna",
+            "GPT-6-Luna",
+            "Fast and affordable model for easier tasks.",
+            MAX_LADDER,
             vec![service_tier()],
         ),
         model(
             "gpt-5.6-sol",
             "GPT-5.6-Sol",
-            "Frontier reasoning flagship",
+            "Older generation workhorse model.",
             ULTRA_LADDER,
             vec![service_tier()],
         ),
         model(
             "gpt-5.6-terra",
             "GPT-5.6-Terra",
-            "Deep multi-step agentic work",
+            "Older balanced model for straightforward work.",
             ULTRA_LADDER,
             vec![service_tier()],
         ),
         model(
             "gpt-5.6-luna",
             "GPT-5.6-Luna",
-            "Fast frontier model",
+            "Older fast and efficient model.",
             MAX_LADDER,
             vec![service_tier()],
         ),
         model(
             "gpt-daybreak-blue-latest",
             "Daybreak Blue",
-            "Frontier model for defensive cybersecurity work",
+            "Latest frontier agentic coding model for broad defensive cybersecurity work.",
             ULTRA_LADDER,
             Vec::new(),
-        ),
-        model(
-            "gpt-5.5",
-            "GPT-5.5",
-            "Previous generation flagship",
-            XHIGH_LADDER,
-            vec![service_tier()],
-        ),
-        model(
-            "gpt-5.4",
-            "GPT-5.4",
-            "Reliable general coding",
-            XHIGH_LADDER,
-            vec![service_tier()],
-        ),
-        model(
-            "gpt-5.4-mini",
-            "GPT-5.4-Mini",
-            "Small, fast and capable",
-            XHIGH_LADDER,
-            vec![service_tier()],
-        ),
-        model(
-            "gpt-5.3-codex-spark",
-            "GPT-5.3-Codex-Spark",
-            "Ultra-fast lightweight coding",
-            XHIGH_LADDER,
-            vec![service_tier()],
         ),
     ]
 }
@@ -202,6 +208,19 @@ pub(crate) fn static_models() -> Vec<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn older_generations_are_marked() {
+        let legacy: Vec<_> = static_models()
+            .into_iter()
+            .filter(|m| m.legacy)
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(
+            legacy,
+            ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+        );
+    }
 
     #[test]
     fn effort_clamps_like_codex_ts() {
@@ -216,10 +235,12 @@ mod tests {
     #[test]
     fn catalog_is_newest_first_with_service_tiers() {
         let models = static_models();
-        assert_eq!(models.len(), 9);
-        assert_eq!(models[0].id, "gpt-6-astra");
+        assert_eq!(models.len(), 8);
+        assert_eq!(models[0].id, "gpt-6.1-sol");
         assert!(models[0].reasoning_levels.contains(&ReasoningLevel::Ultra));
-        assert!(!models[5].reasoning_levels.contains(&ReasoningLevel::Max));
+        // The Luna models top out at max.
+        assert!(!models[3].reasoning_levels.contains(&ReasoningLevel::Ultra));
+        assert!(models[3].reasoning_levels.contains(&ReasoningLevel::Max));
         for m in &models {
             let tier = m.options.iter().find(|o| o.id == "serviceTier");
             // Daybreak Blue reports no service tiers on the wire.

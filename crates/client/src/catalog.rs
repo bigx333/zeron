@@ -85,6 +85,32 @@ pub struct ModelInfo {
     pub reasoning_levels: Vec<String>,
     #[serde(default)]
     pub options: Vec<ModelOption>,
+    /// An older generation the picker keeps behind "More models" (the host's
+    /// curated catalog, or [`is_legacy`] for a host that predates the flag).
+    #[serde(default)]
+    pub legacy: bool,
+}
+
+/// The curated older generations, mirroring the hosts' catalogs, for hosts
+/// whose builds don't report the flag yet. A model not listed is current.
+const LEGACY: &[&str] = &[
+    "claude-fable-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "gpt-6-sol",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    // Retired, for hosts whose Codex still lists them.
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
+];
+
+pub fn is_legacy(id: &str) -> bool {
+    LEGACY.contains(&stripped_1m(id).unwrap_or(id))
 }
 
 fn model(
@@ -95,6 +121,7 @@ fn model(
     options: Vec<ModelOption>,
 ) -> ModelInfo {
     ModelInfo {
+        legacy: is_legacy(id),
         id: id.into(),
         label: label.into(),
         description: Some(description.into()),
@@ -143,7 +170,6 @@ const FULL_LADDER: &[&str] = &[
 const CLAUDE_XHIGH: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultrathink"];
 const CODEX_ULTRA: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 const CODEX_MAX: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-const CODEX_XHIGH: &[&str] = &["low", "medium", "high", "xhigh"];
 
 /// Static fallback = the engine's `default_enabled()` pair. ACP agents
 /// appear only through a device's live catalog (opt-in per device).
@@ -277,67 +303,60 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
         ],
         "codex" => vec![
             model(
+                "gpt-6.1-sol",
+                "GPT-6.1-Sol",
+                "Latest workhorse model for coding and everyday work.",
+                CODEX_ULTRA,
+                service_tier(),
+            ),
+            model(
                 "gpt-6-astra",
                 "GPT-6-Astra",
-                "Our most capable model for complex, demanding work.",
+                "Frontier intelligence for the most demanding work.",
                 CODEX_ULTRA,
+                service_tier(),
+            ),
+            model(
+                "gpt-6-sol",
+                "GPT-6-Sol",
+                "Previous generation workhorse model.",
+                CODEX_ULTRA,
+                service_tier(),
+            ),
+            model(
+                "gpt-6-luna",
+                "GPT-6-Luna",
+                "Fast and affordable model for easier tasks.",
+                CODEX_MAX,
                 service_tier(),
             ),
             model(
                 "gpt-5.6-sol",
                 "GPT-5.6-Sol",
-                "Frontier reasoning flagship",
+                "Older generation workhorse model.",
                 CODEX_ULTRA,
                 service_tier(),
             ),
             model(
                 "gpt-5.6-terra",
                 "GPT-5.6-Terra",
-                "Deep multi-step agentic work",
+                "Older balanced model for straightforward work.",
                 CODEX_ULTRA,
                 service_tier(),
             ),
             model(
                 "gpt-5.6-luna",
                 "GPT-5.6-Luna",
-                "Fast frontier model",
+                "Older fast and efficient model.",
                 CODEX_MAX,
                 service_tier(),
             ),
             model(
                 "gpt-daybreak-blue-latest",
                 "Daybreak Blue",
-                "Frontier model for defensive cybersecurity work",
+                "Latest frontier agentic coding model for broad defensive cybersecurity work.",
                 CODEX_ULTRA,
                 vec![],
-            ),
-            model(
-                "gpt-5.5",
-                "GPT-5.5",
-                "Previous generation flagship",
-                CODEX_XHIGH,
-                service_tier(),
-            ),
-            model(
-                "gpt-5.4",
-                "GPT-5.4",
-                "Reliable general coding",
-                CODEX_XHIGH,
-                service_tier(),
-            ),
-            model(
-                "gpt-5.4-mini",
-                "GPT-5.4-Mini",
-                "Small, fast and capable",
-                CODEX_XHIGH,
-                service_tier(),
-            ),
-            model(
-                "gpt-5.3-codex-spark",
-                "GPT-5.3-Codex-Spark",
-                "Ultra-fast lightweight coding",
-                CODEX_XHIGH,
-                service_tier(),
             ),
         ],
         // claude-code (mock shares it)
@@ -357,16 +376,23 @@ pub fn fallback_models(harness: &str) -> Vec<ModelInfo> {
                 vec![context_window("200k")],
             ),
             model(
+                "claude-opus-5-5",
+                "Opus 5.5",
+                "Best for everyday, complex tasks",
+                FULL_LADDER,
+                vec![context_window("200k"), toggle("fastMode", "Fast Mode")],
+            ),
+            model(
                 "claude-opus-5",
                 "Opus 5",
-                "Powerful model for complex work",
+                "Previous generation Opus",
                 FULL_LADDER,
                 vec![context_window("200k"), toggle("fastMode", "Fast Mode")],
             ),
             model(
                 "claude-opus-4-8",
                 "Opus 4.8",
-                "Previous generation Opus",
+                "Older generation Opus",
                 FULL_LADDER,
                 vec![toggle("fastMode", "Fast Mode")],
             ),
@@ -494,6 +520,7 @@ pub fn normalize_models(harness: &str, models: Vec<ModelInfo>) -> Vec<ModelInfo>
             if let Some(label) = curated_label(&row.id, &catalog) {
                 row.label = label;
             }
+            row.legacy |= is_legacy(&row.id);
             Some(row)
         })
         .collect()
@@ -645,6 +672,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn older_generations_fold_even_from_hosts_without_the_flag() {
+        let live = vec![
+            model("claude-fable-5-1", "Fable 5.1", "x", &[], vec![]),
+            model("claude-opus-4-8[1m]", "Opus 4.8 (1M)", "x", &[], vec![]),
+        ]
+        .into_iter()
+        .map(|m| ModelInfo { legacy: false, ..m })
+        .collect();
+        let out = normalize_models("claude-code", live);
+        assert!(!out[0].legacy);
+        assert_eq!(out[1].id, "claude-opus-4-8");
+        assert!(out[1].legacy);
+        assert!(
+            fallback_models("codex")
+                .iter()
+                .any(|m| m.id == "gpt-6-sol" && m.legacy)
+        );
+    }
+
+    #[test]
     fn labels_resolve_curated_and_unknown_models() {
         assert_eq!(model_label("claude-code", "claude-opus-5"), "Opus 5");
         assert_eq!(model_label("claude-code", "claude-opus-5[1m]"), "Opus 5");
@@ -698,7 +745,7 @@ mod tests {
         assert_eq!(cache.harnesses("dev/mac").unwrap().len(), 2);
         assert_eq!(
             cache.models("dev/mac", "codex").unwrap()[0].id,
-            "gpt-6-astra"
+            "gpt-6.1-sol"
         );
         assert!(cache.models("dev/mac", "grok").is_none());
     }

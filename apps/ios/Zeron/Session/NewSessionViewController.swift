@@ -42,6 +42,7 @@ struct ModelChoice: Equatable {
     let label: String
     let description: String?
     let efforts: [String]
+    let legacy: Bool
 }
 
 /// "Ask anything" → a composer-first canvas. Context is set with native menus
@@ -213,7 +214,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
 
     private static func catalogModels() -> [ModelChoice] {
         fallbackHarnesses().filter(\.offered).flatMap { h in
-            fallbackModels(harness: h.id).map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, description: $0.description, efforts: $0.reasoningLevels) }
+            fallbackModels(harness: h.id).map { ModelChoice(harness: h.id, harnessLabel: h.label, id: $0.id, label: $0.label, description: $0.description, efforts: $0.reasoningLevels, legacy: $0.legacy) }
         }
     }
 
@@ -393,24 +394,28 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         let byHarness = Dictionary(grouping: models, by: \.harness)
         return UIMenu(title: "Model", children: byHarness.keys.sorted().map { h -> UIMenu in
             let models = byHarness[h]!
+            let selected = { (m: ModelChoice) in m.harness == self.draft.harness && m.id == self.draft.model }
             // Only a vendor group served by two providers names the provider.
             let action = { (m: ModelChoice, describe: Bool) in
-                UIAction(title: m.label, subtitle: describe ? m.description : nil, state: m.harness == self.draft.harness && m.id == self.draft.model ? .on : .off) { [weak self] _ in
+                UIAction(title: m.label, subtitle: describe ? m.description : nil, state: selected(m) ? .on : .off) { [weak self] _ in
                     self?.draft.harness = m.harness
                     self?.draft.model = m.id
                     self?.draft.effort = nil
                     self?.refreshChips()
                 }
             }
+            let rows = { (models: [ModelChoice], describe: Bool) in
+                modelMenuRows(models, legacy: \.legacy, selected: selected) { action($0, describe) }
+            }
             let children: [UIMenuElement]
             if let groups = vendorGroups(models, harness: h, id: \.id) {
                 children = groups.map { g in
                     let describe = spansProviders(g.models, id: \.id)
                     return UIMenu(title: g.vendor.title, subtitle: g.models.count == 1 ? "1 model" : "\(g.models.count) models",
-                                  image: BrandMarks.image(for: g.vendor, harness: h, side: 16), children: g.models.map { action($0, describe) })
+                                  image: BrandMarks.image(for: g.vendor, harness: h, side: 16), children: rows(g.models, describe))
                 }
             } else {
-                children = models.map { action($0, false) }
+                children = rows(models, false)
             }
             return UIMenu(title: models.first!.harnessLabel, image: BrandMarks.image(for: h, side: 16), options: .displayInline, children: children)
         })

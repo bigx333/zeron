@@ -125,6 +125,21 @@ const XHIGH_LADDER: &[ReasoningLevel] = &[
     ReasoningLevel::Ultrathink,
 ];
 
+/// Older generations: the picker keeps them behind "More models".
+const LEGACY: &[&str] = &[
+    "claude-fable-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+];
+
+/// Whether `id` is an older generation, with or without the `[1m]`
+/// long-context suffix or a dated snapshot. A model not listed is current.
+pub(crate) fn is_legacy(id: &str) -> bool {
+    let id = id.strip_suffix("[1m]").unwrap_or(id);
+    LEGACY.contains(&snapshot_base(id).unwrap_or(id))
+}
+
 fn model(
     id: &str,
     label: &str,
@@ -133,6 +148,7 @@ fn model(
     options: Vec<ModelOption>,
 ) -> Model {
     Model {
+        legacy: is_legacy(id),
         id: id.into(),
         label: label.into(),
         description: (!description.is_empty()).then(|| description.into()),
@@ -183,6 +199,7 @@ fn models_with_settings(path: &std::path::Path) -> Vec<Model> {
     {
         if !models.iter().any(|m| m.id == id) {
             models.push(Model {
+                legacy: is_legacy(id),
                 id: id.into(),
                 label: id.into(),
                 description: None,
@@ -289,6 +306,7 @@ pub(super) fn with_discovered_models(
             ladder.extend([ReasoningLevel::Ultracode, ReasoningLevel::Ultrathink]);
         }
         models.push(Model {
+            legacy: is_legacy(id),
             id: id.into(),
             label: text("displayName").unwrap_or(id).into(),
             description: text("description").map(str::to_owned),
@@ -349,9 +367,16 @@ pub fn static_models() -> Vec<Model> {
             vec![context_window(), toggle("fastMode", "Fast Mode")],
         ),
         model(
+            "claude-opus-5",
+            "Opus 5",
+            "Previous generation Opus",
+            FULL_LADDER,
+            vec![context_window(), toggle("fastMode", "Fast Mode")],
+        ),
+        model(
             "claude-opus-4-8",
             "Opus 4.8",
-            "Previous generation Opus",
+            "Older generation Opus",
             FULL_LADDER,
             vec![toggle("fastMode", "Fast Mode")],
         ),
@@ -382,6 +407,28 @@ pub fn static_models() -> Vec<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn older_generations_are_marked_in_every_form() {
+        let legacy: Vec<_> = static_models()
+            .into_iter()
+            .filter(|m| m.legacy)
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(
+            legacy,
+            [
+                "claude-fable-5",
+                "claude-opus-5",
+                "claude-opus-4-8",
+                "claude-opus-4-7"
+            ]
+        );
+        assert!(is_legacy("claude-opus-4-8[1m]"));
+        assert!(is_legacy("claude-opus-4-7-20260101"));
+        assert!(!is_legacy("claude-fable-5-1"));
+        assert!(!is_legacy("claude-opus-9"));
+    }
 
     #[test]
     fn effort_maps_special_modes() {

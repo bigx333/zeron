@@ -461,6 +461,7 @@ fn parse_catalog(bytes: &[u8]) -> Result<(Vec<Model>, Vec<Group>), HarnessError>
                 Vec::new()
             };
             models.push(Model {
+                legacy: false,
                 id: members
                     .iter()
                     .find(|m| !m.fast)
@@ -491,6 +492,7 @@ fn parse_catalog(bytes: &[u8]) -> Result<(Vec<Model>, Vec<Group>), HarnessError>
             options.push(speed_option("Fast Mode"));
         }
         let fusion = Model {
+            legacy: false,
             id: FUSION.into(),
             label: fusion_label.unwrap_or_else(|| "Fusion".into()),
             description: fusion_description,

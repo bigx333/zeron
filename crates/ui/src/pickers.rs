@@ -625,6 +625,7 @@ struct ModelRowsKey {
     locked: bool,
     catalog_rev: u64,
     selected: Option<String>,
+    legacy_folds: HashMap<HarnessId, bool>,
 }
 
 /// One row of the model list: the model plus the harness it belongs to —
@@ -639,6 +640,18 @@ struct ModelRowData {
     /// Another listed row of the same harness shares this label, so the
     /// row shows its description to tell them apart.
     ambiguous: bool,
+    /// Set on the "More models" row closing a harness's list instead of a
+    /// model (`model` is then a placeholder); activating it folds or
+    /// unfolds that harness's legacy models.
+    fold: Option<LegacyFold>,
+}
+
+/// The "More models" row: how many legacy models it holds, and whether
+/// they're listed beneath it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LegacyFold {
+    count: usize,
+    open: bool,
 }
 
 /// Flag rows whose label another listed row of the same harness shares.
@@ -842,6 +855,10 @@ pub struct Pickers {
     model_rows_cache: std::cell::RefCell<Option<(ModelRowsKey, std::sync::Arc<Vec<ModelRowData>>)>>,
     /// Bumped on every catalog/favorites mutation; invalidates the cache.
     catalog_rev: u64,
+    /// Each harness list's "More models" fold as last toggled in this open
+    /// menu (`true`: legacy models showing). A list without an entry starts
+    /// open only when its selected model is legacy. Cleared on every open.
+    legacy_folds: HashMap<HarnessId, bool>,
     /// Hover/drag state of the floating menu scrollbar. One instance serves
     /// every picker list like `menu_scroll` does — the popups are mutually
     /// exclusive, so only one list mounts at a time.
@@ -1090,6 +1107,7 @@ impl Pickers {
             model_scroll: gpui::UniformListScrollHandle::new(),
             model_rows_cache: std::cell::RefCell::new(None),
             catalog_rev: 0,
+            legacy_folds: HashMap::new(),
             menu_bar: popover::MenuScrollbarState::default(),
             menu_scroll: gpui::ScrollHandle::new(),
             project_icons: Default::default(),
@@ -1504,6 +1522,7 @@ impl Pickers {
             self.effort_dragging = false;
             self.compact_keyboard = false;
             self.compact_motion = compact::CompactMotion::default();
+            self.legacy_folds.clear();
         }
         self.open.open(kind);
         self.focus_on_mount = true;
@@ -2299,6 +2318,7 @@ impl Pickers {
             locked: self.harness_locked(cx),
             catalog_rev: self.catalog_rev,
             selected: self.effective_model_id(cx).map(str::to_owned),
+            legacy_folds: self.legacy_folds.clone(),
         };
         if let Some((cached_key, rows)) = self.model_rows_cache.borrow().as_ref()
             && *cached_key == key
@@ -2322,6 +2342,25 @@ impl Pickers {
             .map(|f| (f.harness, f.model.as_str()))
             .collect();
         let query = self.search.read(cx).text().trim().to_string();
+        // A list whose selected model is legacy starts unfolded, so the
+        // selection is never hidden behind "More models".
+        let selected = self
+            .effective_model_id(cx)
+            .or_else(|| self.selected_model(cx).map(|m| m.id.as_str()));
+        let legacy_open = |harness: HarnessId| {
+            self.legacy_folds.get(&harness).copied().unwrap_or_else(|| {
+                Some(harness) == effective
+                    && self
+                        .models
+                        .get(&harness)
+                        .and_then(Loadable::ready)
+                        .is_some_and(|models| {
+                            models
+                                .iter()
+                                .any(|m| m.legacy && Some(m.id.as_str()) == selected)
+                        })
+            })
+        };
         let mut rows = scoped_model_rows(
             &query,
             self.model_rail,
@@ -2334,6 +2373,7 @@ impl Pickers {
                     .map(|models| models.as_slice())
             },
             |harness, model| favorites.contains(&(harness, model)),
+            legacy_open,
         );
         // This row belongs only to the current selection. It is never merged
         // into the fresh catalog or made available as a new choice elsewhere.
@@ -2362,7 +2402,9 @@ impl Pickers {
                         harness_name: descriptor.name.clone().into(),
                         selected_only: true,
                         ambiguous: false,
+                        fold: None,
                         model: Model {
+                            legacy: false,
                             id: id.into(),
                             label,
                             description: Some(
@@ -2422,6 +2464,13 @@ impl Pickers {
         let Some(row) = self.model_rows(cx).get(ix).cloned() else {
             return;
         };
+        // "More models" folds its legacy rows in place: they sit below it,
+        // so the highlight stays on it either way.
+        if let Some(fold) = row.fold {
+            self.legacy_folds.insert(row.harness, !fold.open);
+            cx.notify();
+            return;
+        }
         if row.selected_only {
             return;
         }
@@ -3118,7 +3167,9 @@ impl Pickers {
                 && event.keystroke.modifiers.shift
                 && event.keystroke.key.eq_ignore_ascii_case("f")
             {
-                if let Some(row) = self.model_rows(cx).get(self.active).cloned() {
+                if let Some(row) = self.model_rows(cx).get(self.active).cloned()
+                    && row.fold.is_none()
+                {
                     self.toggle_model_favorite(row.harness, &row.model.id, cx);
                 }
                 cx.stop_propagation();
@@ -4675,6 +4726,9 @@ impl Pickers {
         row: &ModelRowData,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(fold) = row.fold {
+            return self.render_more_models_row(ix, fold, cx);
+        }
         if self.compact_model_picker(cx) {
             return self.render_compact_model_row(ix, row, cx);
         }
@@ -4975,6 +5029,112 @@ impl Pickers {
                 }),
             )
             .child(el)
+            .into_any_element()
+    }
+
+    /// The "More models" row closing a harness's list: a muted count and a
+    /// disclosure chevron, the same height as the model rows around it
+    /// (uniform_list measures one). Click, Enter or its ⌘N fold it.
+    fn render_more_models_row(
+        &mut self,
+        ix: usize,
+        fold: LegacyFold,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).for_popup();
+        let compact = self.compact_model_picker(cx);
+        let active = self.active == ix;
+        let label: SharedString = format!("More models · {}", fold.count).into();
+        let chevron = crate::icons::icon(if fold.open {
+            crate::icons::ALT_ARROW_UP
+        } else {
+            crate::icons::ALT_ARROW_DOWN
+        })
+        .size(px(12.0))
+        .text_color(theme.text_muted);
+        let item = div()
+            .id(("model-row", ix))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!(
+                "More models, {}, {}",
+                fold.count,
+                if fold.open { "expanded" } else { "collapsed" }
+            )))
+            .aria_expanded(fold.open)
+            .rounded(px(popover::MENU_ITEM_RADIUS))
+            .flex()
+            .flex_row()
+            .items_center()
+            .cursor_pointer()
+            .when(active, |el| el.bg(crate::theme::ink(0.05)))
+            .when(compact && self.compact_keyboard && active, |el| {
+                el.aria_active_descendant()
+            })
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered && (this.active != ix || this.compact_keyboard) {
+                    this.compact_keyboard = false;
+                    this.active = ix;
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, _, _, cx| this.activate_model_index(ix, cx)));
+        // Each presentation's model-row geometry, with the chevron in the
+        // star's slot and the label where the model names start.
+        let item = if compact {
+            item.h(px(compact::COMPACT_ROW_HEIGHT))
+                .pl(px(8.0))
+                .pr(px(4.0))
+                .gap(px(8.0))
+                .child(div().flex_none().size(px(14.0)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(chevron),
+                )
+        } else {
+            item.px(px(8.0))
+                .py(px(if self.model_rail == ModelRail::Harness {
+                    5.0
+                } else {
+                    6.0
+                }))
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(12.5))
+                        .text_color(theme.text_muted)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(22.0))
+                        .h(px(22.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(chevron),
+                )
+        };
+        div()
+            .pb(px(if compact { popover::MENU_GAP } else { 2.0 }))
+            .child(item)
             .into_any_element()
     }
 
@@ -5821,6 +5981,11 @@ fn tab_indicator(tint: gpui::Hsla) -> gpui::Div {
 /// hid the rail): on a harness tab it ranks that harness's models only, on
 /// the favorites tab it ranks the starred set. Without a query, a harness
 /// tab lists its catalog stars-first and the favorites tab lists every star.
+///
+/// Unsearched, each harness's list keeps its legacy models behind one "More
+/// models" row after its current ones, listed beneath it while
+/// `legacy_open` says so. A search matches them regardless; the favorites
+/// tab, starred legacy models, and a list of one generation never fold.
 fn scoped_model_rows<'a>(
     query: &str,
     rail: ModelRail,
@@ -5828,6 +5993,7 @@ fn scoped_model_rows<'a>(
     descriptors: &[HarnessDescriptor],
     models_for: impl Fn(HarnessId) -> Option<&'a [Model]>,
     is_favorite: impl Fn(HarnessId, &str) -> bool,
+    legacy_open: impl Fn(HarnessId) -> bool,
 ) -> Vec<ModelRowData> {
     let row = |descriptor: &HarnessDescriptor, model: &Model| ModelRowData {
         harness: descriptor.id,
@@ -5835,6 +6001,47 @@ fn scoped_model_rows<'a>(
         model: model.clone(),
         selected_only: false,
         ambiguous: false,
+        fold: None,
+    };
+    // One harness's list in display order: its current (and starred) models,
+    // then the "More models" row and, while open, the legacy ones.
+    let folded = |descriptor: &HarnessDescriptor, models: Vec<&Model>| -> Vec<ModelRowData> {
+        let (legacy, current): (Vec<&Model>, Vec<&Model>) = models
+            .into_iter()
+            .partition(|m| m.legacy && !is_favorite(descriptor.id, &m.id));
+        if legacy.is_empty() || current.iter().all(|m| m.legacy) {
+            return current
+                .into_iter()
+                .chain(legacy)
+                .map(|model| row(descriptor, model))
+                .collect();
+        }
+        let open = legacy_open(descriptor.id);
+        let mut rows: Vec<ModelRowData> = current
+            .into_iter()
+            .map(|model| row(descriptor, model))
+            .collect();
+        rows.push(ModelRowData {
+            fold: Some(LegacyFold {
+                count: legacy.len(),
+                open,
+            }),
+            ..row(
+                descriptor,
+                &Model {
+                    id: String::new(),
+                    label: "More models".into(),
+                    description: None,
+                    reasoning_levels: vec![],
+                    options: vec![],
+                    legacy: false,
+                },
+            )
+        });
+        if open {
+            rows.extend(legacy.into_iter().map(|model| row(descriptor, model)));
+        }
+        rows
     };
     let in_scope = |descriptor: &HarnessDescriptor, model: &Model| match rail {
         ModelRail::All => true,
@@ -5890,14 +6097,22 @@ fn scoped_model_rows<'a>(
                 let Some(models) = models_for(descriptor.id) else {
                     continue;
                 };
+                if rail == ModelRail::All {
+                    rows.extend(folded(descriptor, models.iter().collect()));
+                    continue;
+                }
                 for model in models {
-                    if rail == ModelRail::All || is_favorite(descriptor.id, &model.id) {
+                    if is_favorite(descriptor.id, &model.id) {
                         rows.push(row(descriptor, model));
                     }
                 }
             }
             if rail == ModelRail::All {
-                rows.sort_by_key(|row| !is_favorite(row.harness, &row.model.id));
+                // Stars float above every harness's run; each run keeps its
+                // "More models" row last.
+                rows.sort_by_key(|row| {
+                    row.fold.is_some() || !is_favorite(row.harness, &row.model.id)
+                });
             }
             rows
         }
@@ -5911,11 +6126,7 @@ fn scoped_model_rows<'a>(
             let (starred, rest): (Vec<&Model>, Vec<&Model>) = models
                 .iter()
                 .partition(|m| is_favorite(descriptor.id, &m.id));
-            starred
-                .into_iter()
-                .chain(rest)
-                .map(|model| row(descriptor, model))
-                .collect()
+            folded(descriptor, starred.into_iter().chain(rest).collect())
         }
     }
 }
@@ -7690,6 +7901,7 @@ mod tests {
 
     fn bare_model(id: &str, label: &str) -> Model {
         Model {
+            legacy: false,
             id: id.into(),
             label: label.into(),
             description: None,
@@ -9233,6 +9445,7 @@ mod tests {
                     _ => None,
                 },
                 |_, id| id.starts_with("star"),
+                |_| false,
             );
             assert_eq!(
                 rows.iter()
@@ -9267,6 +9480,7 @@ mod tests {
             &descriptors,
             models_for,
             |_, _| false,
+            |_| false,
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].harness, HarnessId::ClaudeCode);
@@ -9297,6 +9511,7 @@ mod tests {
             &descriptors,
             models_for,
             starred,
+            |_| false,
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].harness, HarnessId::Codex);
@@ -9309,6 +9524,7 @@ mod tests {
             &descriptors,
             models_for,
             starred,
+            |_| false,
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model.id, "gpt-fable");
@@ -9336,6 +9552,7 @@ mod tests {
             &descriptors,
             models_for,
             starred,
+            |_| false,
         );
         assert_eq!(rows[0].model.id, "glm-5.2-b");
         assert_eq!(rows[1].model.id, "glm-5.2-a");
@@ -9347,6 +9564,7 @@ mod tests {
             &descriptors,
             models_for,
             starred,
+            |_| false,
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model.id, "glm-5.2-b");
@@ -9376,6 +9594,7 @@ mod tests {
                 _ => None,
             },
             |_, _| true,
+            |_| false,
         );
         mark_ambiguous(&mut rows);
         let flags: Vec<_> = rows
@@ -9389,6 +9608,207 @@ mod tests {
             flags.contains(&("glm", false)),
             "other harness: not a clash"
         );
+    }
+
+    fn legacy_model(id: &str, label: &str) -> Model {
+        Model {
+            legacy: true,
+            ..bare_model(id, label)
+        }
+    }
+
+    /// Row ids in order, the "More models" row as `more·N` (`+` when open).
+    fn row_ids(rows: &[ModelRowData]) -> Vec<String> {
+        rows.iter()
+            .map(|row| match row.fold {
+                Some(fold) => format!("more·{}{}", fold.count, if fold.open { "+" } else { "" }),
+                None => row.model.id.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn legacy_models_fold_behind_more_models_until_opened() {
+        let descriptors = vec![descriptor(HarnessId::ClaudeCode, "Claude Code")];
+        let claude = vec![
+            bare_model("opus-5", "Opus 5"),
+            legacy_model("opus-4-8", "Opus 4.8"),
+            bare_model("sonnet-5", "Sonnet 5"),
+            legacy_model("opus-4-7", "Opus 4.7"),
+        ];
+        let models_for = |harness: HarnessId| -> Option<&[Model]> {
+            (harness == HarnessId::ClaudeCode).then_some(claude.as_slice())
+        };
+        let rows = |query: &str, starred: Option<&str>, open: bool| {
+            row_ids(&scoped_model_rows(
+                query,
+                ModelRail::Harness,
+                Some(HarnessId::ClaudeCode),
+                &descriptors,
+                models_for,
+                |_, id| Some(id) == starred,
+                |_| open,
+            ))
+        };
+        // Folded by default: current models, then one row with the count.
+        assert_eq!(rows("", None, false), ["opus-5", "sonnet-5", "more·2"]);
+        // Opened, the legacy models list beneath it in catalog order.
+        assert_eq!(
+            rows("", None, true),
+            ["opus-5", "sonnet-5", "more·2+", "opus-4-8", "opus-4-7"]
+        );
+        // A search matches legacy models through the fold.
+        assert_eq!(
+            rows("opus", None, false),
+            ["opus-5", "opus-4-8", "opus-4-7"]
+        );
+        // A starred legacy model is the user's own pick: it stays on top.
+        assert_eq!(
+            rows("", Some("opus-4-7"), false),
+            ["opus-4-7", "opus-5", "sonnet-5", "more·1"]
+        );
+    }
+
+    #[test]
+    fn every_or_no_legacy_model_lists_without_more_models() {
+        let descriptors = vec![
+            descriptor(HarnessId::ClaudeCode, "Claude Code"),
+            descriptor(HarnessId::Codex, "Codex"),
+        ];
+        let claude = vec![bare_model("opus-5", "Opus 5"), bare_model("haiku", "Haiku")];
+        let codex = vec![
+            legacy_model("gpt-5.5", "GPT-5.5"),
+            legacy_model("gpt-5.4", "GPT-5.4"),
+        ];
+        let models_for = |harness: HarnessId| -> Option<&[Model]> {
+            match harness {
+                HarnessId::ClaudeCode => Some(claude.as_slice()),
+                HarnessId::Codex => Some(codex.as_slice()),
+                _ => None,
+            }
+        };
+        for (harness, expected) in [
+            (HarnessId::ClaudeCode, ["opus-5", "haiku"]),
+            (HarnessId::Codex, ["gpt-5.5", "gpt-5.4"]),
+        ] {
+            let rows = scoped_model_rows(
+                "",
+                ModelRail::Harness,
+                Some(harness),
+                &descriptors,
+                models_for,
+                |_, _| false,
+                |_| false,
+            );
+            assert_eq!(row_ids(&rows), expected);
+        }
+    }
+
+    #[test]
+    fn all_models_folds_each_harness_run_on_its_own() {
+        let descriptors = vec![
+            descriptor(HarnessId::ClaudeCode, "Claude Code"),
+            descriptor(HarnessId::Codex, "Codex"),
+        ];
+        let claude = vec![
+            bare_model("opus-5", "Opus 5"),
+            legacy_model("opus-4-8", "Opus 4.8"),
+        ];
+        let codex = vec![
+            bare_model("gpt-6", "GPT-6"),
+            legacy_model("gpt-5.5", "GPT-5.5"),
+            bare_model("star", "Starred"),
+        ];
+        let rows = scoped_model_rows(
+            "",
+            ModelRail::All,
+            None,
+            &descriptors,
+            |harness| match harness {
+                HarnessId::ClaudeCode => Some(claude.as_slice()),
+                HarnessId::Codex => Some(codex.as_slice()),
+                _ => None,
+            },
+            |_, id| id == "star",
+            |harness| harness == HarnessId::Codex,
+        );
+        // Stars float above every run; each run ends in its own fold.
+        assert_eq!(
+            row_ids(&rows),
+            ["star", "opus-5", "more·1", "gpt-6", "more·1+", "gpt-5.5"]
+        );
+        assert_eq!(rows[2].harness, HarnessId::ClaudeCode);
+        assert_eq!(rows[4].harness, HarnessId::Codex);
+    }
+
+    #[gpui::test]
+    fn more_models_unfolds_from_the_keyboard_and_for_a_legacy_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut picker = Pickers::new(state, cx);
+            picker.defaults = ComposerDefaults::default();
+            picker.config.harness = Some(HarnessId::Codex);
+            picker.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
+            picker.models.insert(
+                HarnessId::Codex,
+                Loadable::Ready(vec![
+                    bare_model("gpt-6", "GPT-6"),
+                    legacy_model("gpt-5.5", "GPT-5.5"),
+                    legacy_model("gpt-5.4", "GPT-5.4"),
+                ]),
+            );
+            picker
+        });
+        let reopen = |cx: &mut gpui::TestAppContext| {
+            handle
+                .update(cx, |picker, window, cx| {
+                    if picker.is_open() {
+                        picker.close(cx);
+                    }
+                    picker.open_model_menu(window, cx);
+                })
+                .unwrap();
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+        };
+        let ids = |cx: &mut gpui::TestAppContext| {
+            handle
+                .read_with(cx, |picker, cx| row_ids(&picker.model_rows(cx)))
+                .unwrap()
+        };
+        reopen(cx);
+        assert_eq!(ids(cx), ["gpt-6", "more·2"]);
+        // Arrows reach "More models"; Enter unfolds it in place, keeping the
+        // highlight on it, and Down walks on into the legacy rows.
+        cx.simulate_keystrokes(handle.into(), "down enter");
+        assert_eq!(ids(cx), ["gpt-6", "more·2+", "gpt-5.5", "gpt-5.4"]);
+        handle
+            .read_with(cx, |picker, _| {
+                assert!(picker.is_open());
+                assert_eq!(picker.active, 1);
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "down enter");
+        handle
+            .read_with(cx, |picker, cx| {
+                assert_eq!(picker.selected_model(cx).unwrap().id, "gpt-5.5")
+            })
+            .unwrap();
+        // A fresh open forgets the toggle, but the legacy selection keeps its
+        // list unfolded and highlighted.
+        reopen(cx);
+        assert_eq!(ids(cx), ["gpt-6", "more·2+", "gpt-5.5", "gpt-5.4"]);
+        handle
+            .read_with(cx, |picker, _| assert_eq!(picker.active, 2))
+            .unwrap();
+        // Folding it again is the user's call.
+        handle
+            .update(cx, |picker, _, cx| picker.activate_model_index(1, cx))
+            .unwrap();
+        assert_eq!(ids(cx), ["gpt-6", "more·2"]);
     }
 
     #[test]
@@ -9758,6 +10178,7 @@ mod tests {
     fn default_model_is_first_catalog_row() {
         let models = vec![
             Model {
+                legacy: false,
                 id: "flagship".into(),
                 label: "Flagship".into(),
                 description: None,
@@ -9765,6 +10186,7 @@ mod tests {
                 options: vec![],
             },
             Model {
+                legacy: false,
                 id: "fast".into(),
                 label: "Fast".into(),
                 description: None,

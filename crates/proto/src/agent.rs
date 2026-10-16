@@ -190,6 +190,10 @@ pub struct Model {
     pub reasoning_levels: Vec<ReasoningLevel>,
     #[serde(default)]
     pub options: Vec<ModelOption>,
+    /// An older generation the picker keeps behind "More models". Only the
+    /// curated catalogs set it; a model they don't know is current.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

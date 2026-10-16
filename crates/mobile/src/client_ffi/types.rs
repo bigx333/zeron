@@ -949,12 +949,15 @@ pub struct ModelInfo {
     pub options: Vec<ModelOption>,
     /// The picker's default effort for this model.
     pub default_reasoning: Option<String>,
+    /// An older generation the picker keeps behind "More models".
+    pub legacy: bool,
 }
 
 impl From<zc::catalog::ModelInfo> for ModelInfo {
     fn from(m: zc::catalog::ModelInfo) -> Self {
         Self {
             default_reasoning: zc::catalog::default_reasoning(&m),
+            legacy: m.legacy,
             id: m.id,
             label: m.label,
             description: m.description,

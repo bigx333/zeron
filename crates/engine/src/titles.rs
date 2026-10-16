@@ -333,6 +333,7 @@ mod tests {
 
     fn model(id: &str, label: &str) -> Model {
         Model {
+            legacy: false,
             id: id.into(),
             label: label.into(),
             description: None,

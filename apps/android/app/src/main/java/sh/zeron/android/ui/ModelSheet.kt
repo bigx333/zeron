@@ -5,6 +5,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeOut
@@ -45,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextOverflow
@@ -202,24 +204,58 @@ fun ModelSheet(
     }
 }
 
+/**
+ * A list of models, current ones first. Older generations ([ModelInfo.legacy])
+ * fold behind a "More models" row that expands in place; it starts open when
+ * the chosen model is one of them, so the selection is never hidden. A list
+ * that is all current or all older has no fold.
+ */
 @Composable
 private fun ModelRows(section: ModelSection, models: List<ModelInfo>, describe: Boolean, onPick: (ModelInfo) -> Unit) {
-    models.forEachIndexed { i, m ->
-        val vendor = ModelVendor.of(m.id, section.harness)
-        SheetRow(
-            selected = section.selected(m),
-            index = i,
-            count = models.size,
-            leading = { VendorMark(vendor, section.harness, 24.dp) },
-            title = m.label,
-            supporting = m.description?.takeIf { describe },
-            trailing = if (section.selected(m)) {
-                { SelectedBadge() }
-            } else {
-                null
-            },
-        ) { onPick(m) }
+    val current = models.filterNot { it.legacy }
+    val older = models.filter { it.legacy }
+    val fold = current.isNotEmpty() && older.isNotEmpty()
+    var more by remember(section.harness, older.map { it.id }) { mutableStateOf(older.any(section.selected)) }
+    val shown = if (fold) current else models
+    shown.forEachIndexed { i, m -> ModelRow(section, m, describe, i, shown.size + if (fold) 1 else 0, onPick) }
+    if (!fold) return
+    val turn by animateFloatAsState(if (more) 180f else 0f, MaterialTheme.motionScheme.fastSpatialSpec(), label = "more")
+    SheetRow(
+        selected = false,
+        index = shown.size,
+        count = shown.size + 1,
+        leading = { ZIcon(ZIcons.More, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+        title = "More models",
+        supporting = older.joinToString(", ") { it.label },
+        trailing = { ZIcon(ZIcons.ChevronDown, if (more) "Show fewer" else "Show more", Modifier.size(20.dp).rotate(turn)) },
+    ) { more = !more }
+    AnimatedVisibility(
+        more,
+        enter = fadeIn() + expandVertically(MaterialTheme.motionScheme.defaultSpatialSpec()),
+        exit = fadeOut() + shrinkVertically(MaterialTheme.motionScheme.fastSpatialSpec()),
+    ) {
+        Column(Modifier.padding(top = 8.dp)) {
+            older.forEachIndexed { i, m -> ModelRow(section, m, describe, i, older.size, onPick) }
+        }
     }
+}
+
+@Composable
+private fun ModelRow(section: ModelSection, m: ModelInfo, describe: Boolean, index: Int, count: Int, onPick: (ModelInfo) -> Unit) {
+    val picked = section.selected(m)
+    SheetRow(
+        selected = picked,
+        index = index,
+        count = count,
+        leading = { VendorMark(ModelVendor.of(m.id, section.harness), section.harness, 24.dp) },
+        title = m.label,
+        supporting = m.description?.takeIf { describe },
+        trailing = if (picked) {
+            { SelectedBadge() }
+        } else {
+            null
+        },
+    ) { onPick(m) }
 }
 
 @Composable

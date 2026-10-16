@@ -623,11 +623,12 @@ fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>)
             .map(str::trim)
             .filter(|description| !description.is_empty())
             .map(str::to_owned);
-        let description = match item
+        // A newer model to move to: Codex's own sign that this one is older.
+        let upgrade = item
             .get("upgrade")
             .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-        {
+            .filter(|id| !id.is_empty());
+        let description = match upgrade {
             Some(upgrade) => Some(format!(
                 "{}(upgrade: {upgrade})",
                 description.map(|d| format!("{d} ")).unwrap_or_default()
@@ -650,6 +651,7 @@ fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>)
         let options = model_service_tier(item).into_iter().collect();
         models.push((
             Model {
+                legacy: upgrade.is_some() || catalog::is_legacy(id),
                 id: id.to_owned(),
                 label,
                 description,
@@ -2457,6 +2459,8 @@ mod tests {
             models[0].0.description.as_deref(),
             Some("Current model (upgrade: next)")
         );
+        // An upgrade to move to marks the model as an older generation.
+        assert!(models[0].0.legacy);
         assert!(models[0].1);
         assert_eq!(next.as_deref(), Some("next-page"));
         assert!(!legacy_model_page(&page));

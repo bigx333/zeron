@@ -226,14 +226,17 @@ final class CoreSessionSource: SessionSource {
                             self?.setConfig { $0.model = m.id }
                         }
                     }
+                    let rows = { (models: [ModelInfo], describe: Bool) in
+                        modelMenuRows(models, legacy: \.legacy, selected: { $0.id == row.model }) { action($0, describe) }
+                    }
                     if let grouped {
                         done(grouped.map { g in
                             let describe = spansProviders(g.models, id: \.id)
                             return UIMenu(title: g.vendor.title, subtitle: g.models.count == 1 ? "1 model" : "\(g.models.count) models",
-                                          image: BrandMarks.image(for: g.vendor, harness: harness, side: 16), children: g.models.map { action($0, describe) })
+                                          image: BrandMarks.image(for: g.vendor, harness: harness, side: 16), children: rows(g.models, describe))
                         })
                     } else {
-                        done(models.map { action($0, true) })
+                        done(rows(models, true))
                     }
                 }
             }])

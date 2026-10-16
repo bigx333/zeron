@@ -507,6 +507,22 @@ func vendorGroups<T>(_ models: [T], harness: String?, id: (T) -> String) -> [(ve
     return ModelVendor.allCases.compactMap { v in groups[v].map { (v, $0) } }
 }
 
+/// A model list split into the rows shown inline and the older generations
+/// kept behind "More models". The selected model always stays inline, and a
+/// list that's all legacy (or has none) doesn't fold.
+func foldLegacy<T>(_ models: [T], legacy: (T) -> Bool, selected: (T) -> Bool) -> (shown: [T], more: [T]) {
+    guard models.contains(where: legacy), !models.allSatisfy(legacy) else { return (models, []) }
+    return (models.filter { !legacy($0) || selected($0) }, models.filter { legacy($0) && !selected($0) })
+}
+
+/// A model list's menu rows, legacy ones folded into a trailing "More models"
+/// submenu.
+func modelMenuRows<T>(_ models: [T], legacy: (T) -> Bool, selected: (T) -> Bool, row: (T) -> UIMenuElement) -> [UIMenuElement] {
+    let (shown, more) = foldLegacy(models, legacy: legacy, selected: selected)
+    guard !more.isEmpty else { return shown.map(row) }
+    return shown.map(row) + [UIMenu(title: "More models", subtitle: more.count == 1 ? "1 model" : "\(more.count) models", children: more.map(row))]
+}
+
 /// Brand marks rendered once per (harness, size) into cached images, in their
 /// brand color; black-or-white marks are templates tinted by the caller.
 enum BrandMarks {
