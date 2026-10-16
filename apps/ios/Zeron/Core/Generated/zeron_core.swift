@@ -1284,6 +1284,22 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func workspaceRevision()  -> UInt64
     
     /**
+     * Whether `host_device_id` can lend a ChatGPT credential (a Codex
+     * account signed in with ChatGPT, live or saved/pooled). No upload.
+     */
+    func codexDictationStatus(hostDeviceId: String) async  -> CodexDictationStatus
+    
+    /**
+     * Call when recording starts: fetches the credential while the user talks.
+     */
+    func prepareCodexDictation(hostDeviceId: String) async 
+    
+    /**
+     * Uploads a finished recording to ChatGPT; `""` when no speech was heard.
+     */
+    func transcribeCodexDictation(hostDeviceId: String, audio: Data, format: DictationAudioFormat) async throws  -> String
+    
+    /**
      * Returns immediately. Callbacks are dispatched on the core runtime; the
      * platform must hop to its media/UI executor and call complete_media.
      */
@@ -2202,6 +2218,66 @@ open func workspaceRevision() -> UInt64  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Whether `host_device_id` can lend a ChatGPT credential (a Codex
+     * account signed in with ChatGPT, live or saved/pooled). No upload.
+     */
+open func codexDictationStatus(hostDeviceId: String)async  -> CodexDictationStatus  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_codex_dictation_status(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(hostDeviceId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeCodexDictationStatus_lift,
+            errorHandler: nil
+            
+        )
+}
+    
+    /**
+     * Call when recording starts: fetches the credential while the user talks.
+     */
+open func prepareCodexDictation(hostDeviceId: String)async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_prepare_codex_dictation(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(hostDeviceId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
+        )
+}
+    
+    /**
+     * Uploads a finished recording to ChatGPT; `""` when no speech was heard.
+     */
+open func transcribeCodexDictation(hostDeviceId: String, audio: Data, format: DictationAudioFormat)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_transcribe_codex_dictation(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(hostDeviceId),FfiConverterData.lower(audio),FfiConverterTypeDictationAudioFormat_lower(format)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCodexDictationError_lift
+        )
 }
     
     /**
@@ -6025,6 +6101,70 @@ public func FfiConverterTypeChatConfig_lift(_ buf: RustBuffer) throws -> ChatCon
 #endif
 public func FfiConverterTypeChatConfig_lower(_ value: ChatConfig) -> RustBuffer {
     return FfiConverterTypeChatConfig.lower(value)
+}
+
+
+public struct CodexDictationStatus: Equatable, Hashable {
+    public var available: Bool
+    public var reason: CodexDictationUnavailable?
+    /**
+     * Ready to show when unavailable.
+     */
+    public var message: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(available: Bool, reason: CodexDictationUnavailable?, 
+        /**
+         * Ready to show when unavailable.
+         */message: String?) {
+        self.available = available
+        self.reason = reason
+        self.message = message
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CodexDictationStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCodexDictationStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CodexDictationStatus {
+        return
+            try CodexDictationStatus(
+                available: FfiConverterBool.read(from: &buf), 
+                reason: FfiConverterOptionTypeCodexDictationUnavailable.read(from: &buf), 
+                message: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CodexDictationStatus, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.available, into: &buf)
+        FfiConverterOptionTypeCodexDictationUnavailable.write(value.reason, into: &buf)
+        FfiConverterOptionString.write(value.message, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCodexDictationStatus_lift(_ buf: RustBuffer) throws -> CodexDictationStatus {
+    return try FfiConverterTypeCodexDictationStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCodexDictationStatus_lower(_ value: CodexDictationStatus) -> RustBuffer {
+    return FfiConverterTypeCodexDictationStatus.lower(value)
 }
 
 
@@ -11641,6 +11781,174 @@ public func FfiConverterTypeClientEvent_lower(_ value: ClientEvent) -> RustBuffe
 
 
 
+public 
+enum CodexDictationError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    /**
+     * `reason` is user-facing; the draft is never touched. (Not `message`:
+     * Kotlin exceptions already have one, and the bindings would not compile.)
+     */
+    case Failed(reason: String
+    )
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
+#if compiler(>=6)
+extension CodexDictationError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCodexDictationError: FfiConverterRustBuffer {
+    typealias SwiftType = CodexDictationError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CodexDictationError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .Failed(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CodexDictationError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case let .Failed(reason):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(reason, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCodexDictationError_lift(_ buf: RustBuffer) throws -> CodexDictationError {
+    return try FfiConverterTypeCodexDictationError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCodexDictationError_lower(_ value: CodexDictationError) -> RustBuffer {
+    return FfiConverterTypeCodexDictationError.lower(value)
+}
+
+
+
+public enum CodexDictationUnavailable: Equatable, Hashable {
+    
+    /**
+     * No Codex account signed in with ChatGPT on the host.
+     */
+    case noChatgptAccount
+    /**
+     * The account must sign in again on the host.
+     */
+    case signInRequired
+    /**
+     * The host runs a build without Codex dictation.
+     */
+    case hostUpdateRequired
+    case hostUnreachable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CodexDictationUnavailable: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCodexDictationUnavailable: FfiConverterRustBuffer {
+    typealias SwiftType = CodexDictationUnavailable
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CodexDictationUnavailable {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .noChatgptAccount
+        
+        case 2: return .signInRequired
+        
+        case 3: return .hostUpdateRequired
+        
+        case 4: return .hostUnreachable
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CodexDictationUnavailable, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .noChatgptAccount:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .signInRequired:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .hostUpdateRequired:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .hostUnreachable:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCodexDictationUnavailable_lift(_ buf: RustBuffer) throws -> CodexDictationUnavailable {
+    return try FfiConverterTypeCodexDictationUnavailable.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCodexDictationUnavailable_lower(_ value: CodexDictationUnavailable) -> RustBuffer {
+    return FfiConverterTypeCodexDictationUnavailable.lower(value)
+}
+
+
+
 /**
  * Paint roles. The painter maps these to its palette (light/dark).
  */
@@ -12684,6 +12992,78 @@ public func FfiConverterTypeDemoFixture_lift(_ buf: RustBuffer) throws -> DemoFi
 #endif
 public func FfiConverterTypeDemoFixture_lower(_ value: DemoFixture) -> RustBuffer {
     return FfiConverterTypeDemoFixture.lower(value)
+}
+
+
+
+/**
+ * What the platform recorder produced.
+ */
+
+public enum DictationAudioFormat: Equatable, Hashable {
+    
+    /**
+     * AAC in an MPEG-4 container: AVAudioRecorder / MediaRecorder.
+     */
+    case m4a
+    case wav
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DictationAudioFormat: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDictationAudioFormat: FfiConverterRustBuffer {
+    typealias SwiftType = DictationAudioFormat
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DictationAudioFormat {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .m4a
+        
+        case 2: return .wav
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DictationAudioFormat, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .m4a:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .wav:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDictationAudioFormat_lift(_ buf: RustBuffer) throws -> DictationAudioFormat {
+    return try FfiConverterTypeDictationAudioFormat.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDictationAudioFormat_lower(_ value: DictationAudioFormat) -> RustBuffer {
+    return FfiConverterTypeDictationAudioFormat.lower(value)
 }
 
 
@@ -16133,6 +16513,30 @@ fileprivate struct FfiConverterOptionTypeAuthCallback: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeCodexDictationUnavailable: FfiConverterRustBuffer {
+    typealias SwiftType = CodexDictationUnavailable?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCodexDictationUnavailable.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCodexDictationUnavailable.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeQueueGate: FfiConverterRustBuffer {
     typealias SwiftType = QueueGate?
 
@@ -17513,6 +17917,16 @@ public func workosAuthorizeUrl(state: String) -> String  {
 })
 }
 /**
+ * Hosts advertising this capability lend credentials for Codex dictation.
+ */
+public func codexDictationHostCapability() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_codex_dictation_host_capability(uniffiCallStatus
+    )
+})
+}
+/**
  * The canonical mention link the host understands (`[name](zeron-file:path)`).
  */
 public func fileMentionLink(path: String, isDir: Bool) -> String  {
@@ -17694,6 +18108,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 35994) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_codex_dictation_host_capability() != 28653) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_file_mention_link() != 14340) {
@@ -17922,6 +18339,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_workspace_revision() != 48105) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_codex_dictation_status() != 9131) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_prepare_codex_dictation() != 21163) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_transcribe_codex_dictation() != 12181) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice() != 62086) {

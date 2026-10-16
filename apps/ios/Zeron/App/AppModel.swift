@@ -71,6 +71,7 @@ final class AppModel {
     }
 
     @MainActor lazy var voice = RemoteVoiceController(app: self)
+    @MainActor lazy var dictation = CodexDictationController(app: self)
     private(set) var client: CoreClient?
     private(set) var frontPage = FrontPage()
     private(set) var archived: [SessionRowVM] = []

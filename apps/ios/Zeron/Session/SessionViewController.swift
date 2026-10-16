@@ -103,6 +103,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.text = Drafts.load(chatId)
         composer.mentionSearch = { [weak self] q in await self?.source.searchFiles(q) ?? [] }
         composer.onHeightChange = { [weak self] in self?.view.setNeedsLayout() }
+        composer.dictation = app.dictation
         questions.onSubmit = { [weak self] answers in
             guard let self, let id = self.shown.questions?.requestId else { return }
             self.source.answer(requestId: id, answers: answers)

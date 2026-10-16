@@ -94,6 +94,7 @@ use zeron_proto::{
 use crate::repos::home_dir;
 use crate::{EngineError, new_id, now_ms};
 
+mod dictation;
 mod oauth;
 mod pool;
 #[cfg(test)]

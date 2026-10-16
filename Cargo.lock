@@ -14161,11 +14161,13 @@ version = "0.2.114"
 dependencies = [
  "async-trait",
  "futures",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
  "zeron-orb",
  "zeron-proto",
  "zeron-rpc",

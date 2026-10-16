@@ -1,4 +1,5 @@
 //! Shared call lifecycle. Platforms own media; the execution host owns Codex.
+pub mod dictation;
 mod view;
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};

@@ -97,6 +97,11 @@ class AppModel(private val app: Application) {
         sh.zeron.android.voice.VoiceController(app, client, workspace)
     }
 
+    /** Codex dictation in the composer: recorded here, transcribed by ChatGPT through the voice host. */
+    val dictation: sh.zeron.android.voice.DictationController by lazy {
+        sh.zeron.android.voice.DictationController(app, client, voice, ::toast)
+    }
+
     private val _client = MutableStateFlow<CoreClient?>(null)
     val client: StateFlow<CoreClient?> = _client.asStateFlow()
 

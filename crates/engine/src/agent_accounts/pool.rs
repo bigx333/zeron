@@ -20,7 +20,7 @@ const PIN_TTL: i64 = 30 * 60 * 1000;
 const MAX_PINS: usize = 4096;
 
 #[derive(Debug)]
-enum SecretError {
+pub(super) enum SecretError {
     Authentication(&'static str),
     Temporary(&'static str),
 }
@@ -30,7 +30,7 @@ impl From<&'static str> for SecretError {
     }
 }
 impl SecretError {
-    fn message(&self) -> &'static str {
+    pub(super) fn message(&self) -> &'static str {
         match self {
             Self::Authentication(message) | Self::Temporary(message) => message,
         }
@@ -149,7 +149,10 @@ impl PoolState {
     }
 }
 
-fn provider(config: &AccountPoolConfig, harness: HarnessId) -> Option<&AccountPoolProviderConfig> {
+pub(super) fn provider(
+    config: &AccountPoolConfig,
+    harness: HarnessId,
+) -> Option<&AccountPoolProviderConfig> {
     match harness {
         HarnessId::ClaudeCode => Some(&config.claude),
         HarnessId::Codex => Some(&config.codex),
@@ -702,6 +705,18 @@ impl AgentAccounts {
         self.save_pool_state(&lock(&self.inner.pool.state));
     }
 
+    #[cfg(test)]
+    pub(super) fn edit_pool_config(&self, edit: impl FnOnce(&mut AccountPoolConfig)) {
+        edit(&mut lock(&self.inner.pool.config));
+    }
+
+    /// The provider's pool settings while its pool is on.
+    pub(super) fn enabled_pool(&self, harness: HarnessId) -> Option<AccountPoolProviderConfig> {
+        provider(&lock(&self.inner.pool.config), harness)
+            .filter(|p| p.enabled)
+            .cloned()
+    }
+
     /// Called only on the owning device. Never sends the capability over RPC.
     pub async fn pool_route(
         &self,
@@ -1088,7 +1103,11 @@ impl AgentAccounts {
         );
     }
 
-    async fn pool_secret(&self, slot: &Slot, rejected: bool) -> Result<Slot, SecretError> {
+    pub(super) async fn pool_secret(
+        &self,
+        slot: &Slot,
+        rejected: bool,
+    ) -> Result<Slot, SecretError> {
         // Healthy requests never wait behind Settings' live-login detection or
         // probes. A rejected access token takes the serialized repair path.
         let current = self

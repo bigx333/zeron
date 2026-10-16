@@ -5833,6 +5833,8 @@ impl Shell {
                 }
                 let live = self.voice.read(cx).is_live();
                 card.update(cx, |card, cx| card.set_hosts(hosts, live, cx));
+                // The Transcription choice shows whether Codex can lend a credential.
+                self.check_codex_dictation(false, cx);
                 if let Some(snapshot) = &self.voice.read(cx).snapshot {
                     let voices = snapshot.voices.clone();
                     card.update(cx, |card, cx| card.set_voices(&voices, cx));

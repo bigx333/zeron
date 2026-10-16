@@ -142,6 +142,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             return AttachmentPicker.menu(host: self, limit: 8 - self.composer.images.count) { [weak self] in self?.composer.addImages($0) }
         }
         composer.onChipTap = { _, _ in }
+        composer.dictation = app.dictation
         composer.mentionSearch = { [weak self] q in
             guard let self, let p = self.project else { return [] }
             return await self.app.searchFiles(deviceId: p.device, spaceId: p.id, query: q)

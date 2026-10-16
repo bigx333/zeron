@@ -103,15 +103,36 @@ impl Recognizer {
         if samples.len() > rate as usize * MAX_SECONDS {
             bail!("Recording exceeds one minute")
         }
-        if samples.len() < rate as usize / 5 || samples.iter().all(|s| s.abs() < 0.0001) {
+        let Some(samples) = speech_16k(samples, rate)? else {
             return Ok(String::new());
-        }
-        let samples = resample::for_model(samples, rate)?;
+        };
         self.0
             .transcribe_samples(samples, resample::MODEL_RATE, 1, None)
             .map(|r| r.text)
             .map_err(|_| anyhow::anyhow!("Could not transcribe this recording"))
     }
+}
+
+/// 16 kHz mono for a speech model or upload; `None` when there is too little
+/// audio, or only silence, to be worth transcribing.
+pub fn speech_16k(samples: Vec<f32>, rate: u32) -> Result<Option<Vec<f32>>> {
+    if !(8_000..=192_000).contains(&rate) {
+        bail!("Unsupported microphone sample rate")
+    }
+    if samples.len() < rate as usize / 5 || samples.iter().all(|s| s.abs() < 0.0001) {
+        return Ok(None);
+    }
+    resample::for_model(samples, rate).map(Some)
+}
+pub const SPEECH_RATE: u32 = resample::MODEL_RATE;
+
+/// What turns a finished recording into text, on the dictation worker.
+pub enum Backend {
+    /// The local Parakeet model in this directory.
+    Parakeet(std::path::PathBuf),
+    /// Any other transcriber, e.g. an upload. Runs off the UI thread after
+    /// the microphone has closed; cancellation discards its result.
+    Custom(Box<dyn FnOnce(Vec<f32>, u32) -> Result<String> + Send>),
 }
 
 struct Audio {
@@ -284,7 +305,6 @@ pub enum Event {
     Failed(String),
 }
 struct Job {
-    dir: std::path::PathBuf,
     stop: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
@@ -404,7 +424,8 @@ impl Drop for BusyGuard {
     }
 }
 enum Command {
-    Transcribe(Job, BusyGuard),
+    // The backend stays out of `Job`: capture borrows the job across threads.
+    Transcribe(Job, Backend, BusyGuard),
     Unload,
 }
 static WORKER: std::sync::OnceLock<std::sync::mpsc::SyncSender<Command>> =
@@ -419,14 +440,18 @@ impl Session {
     /// `device` is an [`InputDevice::id`]; `None` or a disconnected device
     /// records from the system default.
     pub fn start(dir: std::path::PathBuf, device: Option<String>) -> Result<Self> {
+        Self::start_with(Backend::Parakeet(dir), device)
+    }
+    /// Same capture, admission and cancellation, any transcriber.
+    pub fn start_with(backend: Backend, device: Option<String>) -> Result<Self> {
         let admission = BusyGuard::acquire()?;
         let sender = WORKER.get_or_init(|| {
             let (tx, rx) = std::sync::mpsc::sync_channel::<Command>(1);
             std::thread::spawn(move || {
                 let mut cached: Option<(std::path::PathBuf, Recognizer)> = None;
                 loop {
-                    let (job, _admission) = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                        Ok(Command::Transcribe(j, admission)) => (j, admission),
+                    let (job, backend, _admission) = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                        Ok(Command::Transcribe(j, backend, admission)) => (j, backend, admission),
                         Ok(Command::Unload) => {
                             cached = None;
                             continue;
@@ -439,20 +464,27 @@ impl Session {
                     };
                     // A native panic must not take down the worker, and with
                         // it every later session, until the app restarts.
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(
-                        &job,
-                        || Capture::start(job.device.as_deref(), job.level.clone()),
-                        || {
-                            if cached.as_ref().is_none_or(|(path, _)| *path != job.dir) {
-                                let model = Recognizer::load(&job.dir).context(
-                                    "Could not load the model. Remove it in Settings and download again.",
-                                )?;
-                                cached = Some((job.dir.clone(), model));
-                            }
-                            let model = &mut cached.as_mut().unwrap().1;
-                            Ok(move |samples, rate| model.transcribe(samples, rate))
-                        },
-                    )))
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match backend {
+                        Backend::Custom(transcribe) => run_job(
+                            &job,
+                            || Capture::start(job.device.as_deref(), job.level.clone()),
+                            || Ok(transcribe),
+                        ),
+                        Backend::Parakeet(dir) => run_job(
+                            &job,
+                            || Capture::start(job.device.as_deref(), job.level.clone()),
+                            || {
+                                if cached.as_ref().is_none_or(|(path, _)| *path != dir) {
+                                    let model = Recognizer::load(&dir).context(
+                                        "Could not load the model. Remove it in Settings and download again.",
+                                    )?;
+                                    cached = Some((dir.clone(), model));
+                                }
+                                let model = &mut cached.as_mut().unwrap().1;
+                                Ok(move |samples, rate| model.transcribe(samples, rate))
+                            },
+                        ),
+                    }))
                     .unwrap_or_else(|_| {
                         cached = None;
                         Err(anyhow::anyhow!("Dictation stopped unexpectedly. Your draft is safe."))
@@ -479,13 +511,13 @@ impl Session {
         if sender
             .try_send(Command::Transcribe(
                 Job {
-                    dir,
                     stop: stop.clone(),
                     cancel: cancel.clone(),
                     level: level.clone(),
                     device,
                     events: tx,
                 },
+                backend,
                 admission,
             ))
             .is_err()

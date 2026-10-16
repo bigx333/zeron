@@ -74,10 +74,17 @@ fun ZeronRoot(model: AppModel) {
             val client by model.client.collectAsState()
             Box(Modifier.fillMaxSize()) {
                 AnimatedContent(client != null, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "root") { signedIn ->
-                    if (signedIn) MainNav(model) else SignInScreen(model)
+                    if (signedIn) {
+                        // Composers find dictation here (the session and new-session pages).
+                        androidx.compose.runtime.CompositionLocalProvider(sh.zeron.android.voice.LocalDictation provides model.dictation) { MainNav(model) }
+                    } else {
+                        SignInScreen(model)
+                    }
                 }
                 // Mic prompt, keep-awake and the off-stage "call ended" snackbar.
                 sh.zeron.android.voice.VoiceHost(model.voice)
+                // Dictation's mic prompt.
+                sh.zeron.android.voice.DictationHost(model.dictation)
             }
         }
     }
@@ -193,7 +200,7 @@ private fun MainNav(model: AppModel) {
             )
         }
         composable(Routes.VOICE_SETTINGS) {
-            sh.zeron.android.voice.VoiceSettingsScreen(model.voice, onBack = { nav.popBackStack() })
+            sh.zeron.android.voice.VoiceSettingsScreen(model.voice, model.dictation, onBack = { nav.popBackStack() })
         }
         composable(Routes.NEW) {
             NewSessionScreen(model, onClose = { nav.popBackStack() }, onCreated = { id ->

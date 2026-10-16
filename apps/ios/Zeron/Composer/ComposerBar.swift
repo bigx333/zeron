@@ -65,6 +65,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     var onFocusChange: ((Bool) -> Void)?
     /// `@` file search (nil disables mentions).
     var mentionSearch: ((String) async -> [FileMatch])?
+    /// Codex dictation: a microphone before Send (nil: none).
+    var dictation: CodexDictationController? { didSet { dictationControl.attach(dictation, to: self) } }
 
     // State
     var running = false { didSet { if running != oldValue { refreshAction(animated: true) } } }
@@ -92,6 +94,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     private let placeholderLabel = UILabel()
     private let attachButton = UIButton(type: .system)
     private let actionButton = UIButton(type: .system)
+    private let dictationControl = ComposerDictationControl()
     private let thumbs = UIStackView()
     private let thumbsScroll = FadingScrollView()
     private let toolbar = UIView()
@@ -199,6 +202,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         actionButton.addAction(UIAction { [weak self] _ in self?.primaryAction() }, for: .touchUpInside)
         actionButton.setContentHuggingPriority(.required, for: .horizontal)
         content.addSubview(actionButton)
+        // Collapsed (zero width) unless dictation is on and available.
+        content.addSubview(dictationControl)
 
         let c = Self.control
         textHeight = textView.heightAnchor.constraint(equalToConstant: Self.compactHeight)
@@ -236,9 +241,12 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             attachButton.heightAnchor.constraint(equalToConstant: c),
             actionButton.heightAnchor.constraint(equalToConstant: c),
             actionButton.widthAnchor.constraint(greaterThanOrEqualToConstant: c),
+            dictationControl.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor),
+            dictationControl.centerYAnchor.constraint(equalTo: actionButton.centerYAnchor),
+            dictationControl.heightAnchor.constraint(equalToConstant: c),
 
             chipScroll.leadingAnchor.constraint(equalTo: attachButton.trailingAnchor, constant: 8),
-            chipScroll.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor, constant: -8),
+            chipScroll.trailingAnchor.constraint(equalTo: dictationControl.leadingAnchor, constant: -8),
             chipScroll.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
             chipScroll.heightAnchor.constraint(equalToConstant: c),
             chipStrip.topAnchor.constraint(equalTo: chipScroll.contentLayoutGuide.topAnchor),
@@ -254,7 +262,7 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
             actionButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
             actionButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8),
             textView.leadingAnchor.constraint(equalTo: attachButton.trailingAnchor, constant: 10),
-            textView.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor, constant: -8),
+            textView.trailingAnchor.constraint(equalTo: dictationControl.leadingAnchor, constant: -8),
         ]
         // Card: full-width text, controls in the toolbar row.
         cardConstraints = [

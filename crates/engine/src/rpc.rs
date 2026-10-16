@@ -50,6 +50,7 @@
 //! handlers stay transport-agnostic. This includes the workspace file surface,
 //! whose checkout always lives on the routed target device.
 
+mod codex_dictation;
 mod voice_chat;
 mod voice_remote;
 use async_trait::async_trait;
@@ -1510,6 +1511,10 @@ fn forward_deadline(method: &str) -> std::time::Duration {
     if method == methods::NEGOTIATE_VOICE_V2 {
         return Duration::from_secs(95);
     }
+    // The app-server auth probe plus a possible saved-account refresh.
+    if method == methods::CODEX_DICTATION_CREDENTIAL_V1 {
+        return Duration::from_secs(45);
+    }
     use std::time::Duration;
     match method {
         methods::CLONE_REPO
@@ -1538,7 +1543,7 @@ const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
 fn forwardable(method: &str) -> bool {
-    if voice_remote::handles(method) {
+    if voice_remote::handles(method) || codex_dictation::handles(method) {
         return true;
     }
     matches!(
@@ -1942,6 +1947,9 @@ impl RpcService for EngineRpc {
         }
         if voice_remote::handles(method) {
             return self.voice_remote(method, params).await;
+        }
+        if codex_dictation::handles(method) {
+            return self.codex_dictation(method, params).await;
         }
         if AuthRpc::handles(method) {
             return AuthRpc::new(self.auth()?.clone())
@@ -4599,6 +4607,14 @@ mod tests {
         assert!(!is_stream_method(methods::POST_CHANGE_REQUEST_COMMENT));
         assert!(!is_stream_method(methods::GET_CHANGE_REQUEST));
         assert!(!is_stream_method(methods::GET_CHANGE_REQUEST_DIFF));
+        // Signaling-sized only: audio never crosses the relay.
+        assert!(forwardable(methods::CODEX_DICTATION_STATUS_V1));
+        assert!(forwardable(methods::CODEX_DICTATION_CREDENTIAL_V1));
+        assert!(!is_stream_method(methods::CODEX_DICTATION_CREDENTIAL_V1));
+        assert_eq!(
+            forward_deadline(methods::CODEX_DICTATION_CREDENTIAL_V1),
+            Duration::from_secs(45)
+        );
     }
 
     /// Every forwardable unary method gets a bounded reply deadline —

@@ -165,7 +165,8 @@ Data flow:
 
 The microphone purpose strings (`dist/macos/Info*.plist`,
 `apps/ios/Zeron/Info.plist`) state that voice sessions stream audio to OpenAI;
-dictation stays on device.
+local dictation stays on device and Codex dictation uploads to ChatGPT (see
+`docs/reference/desktop-dictation.md`).
 
 Notices: `THIRD_PARTY_NOTICES.md` covers the Apache-2.0 Codex protocol
 adaptation (with its upstream NOTICE and an OpenAI trademark/non-affiliation
