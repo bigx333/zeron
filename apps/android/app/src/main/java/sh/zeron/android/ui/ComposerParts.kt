@@ -313,8 +313,8 @@ class ModelSection(
 )
 
 /** Models grouped by vendor in picker order; null when they're all one vendor's, so short lists stay flat. */
-private fun vendorGroups(models: List<ModelInfo>): List<Pair<ModelVendor, List<ModelInfo>>>? {
-    val groups = models.groupBy { ModelVendor.of(it.id) }
+private fun vendorGroups(models: List<ModelInfo>, harness: String?): List<Pair<ModelVendor, List<ModelInfo>>>? {
+    val groups = models.groupBy { ModelVendor.of(it.id, harness) }
     if (groups.size < 2) return null
     return ModelVendor.entries.mapNotNull { v -> groups[v]?.let { v to it } }
 }
@@ -322,10 +322,17 @@ private fun vendorGroups(models: List<ModelInfo>): List<Pair<ModelVendor, List<M
 /** A model picker; a harness serving several vendors' models lists the vendors first, then that vendor's models. */
 @Composable
 fun ModelMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<ModelSection>) {
-    var open by remember { mutableStateOf<Pair<ModelSection, ModelVendor>?>(null) }
+    // Keyed by harness, not the section itself: a refreshed list or draft
+    // brings new models and callbacks, and the open vendor page must use them.
+    var open by remember { mutableStateOf<Pair<String?, ModelVendor>?>(null) }
     LaunchedEffect(expanded) { if (!expanded) open = null }
-    val shown = open?.let { (section, vendor) ->
-        val models = section.models.filter { ModelVendor.of(it.id) == vendor }
+    val drilled = open?.let { (harness, vendor) ->
+        sections.firstOrNull { it.harness == harness }?.let { section ->
+            (section to vendor).takeIf { section.models.any { ModelVendor.of(it.id, harness) == vendor } }
+        }
+    }
+    val shown = drilled?.let { (section, vendor) ->
+        val models = section.models.filter { ModelVendor.of(it.id, section.harness) == vendor }
         // One vendor through two providers (Claude direct and via a gateway): name the provider.
         val providers = models.mapTo(HashSet()) { it.id.substringBefore('/', "") }.size
         listOf(
@@ -335,13 +342,13 @@ fun ModelMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<ModelSect
             }),
         )
     } ?: sections.map { section ->
-        val groups = vendorGroups(section.models)
+        val groups = vendorGroups(section.models, section.harness)
         MenuSection(
             section.title,
             groups?.map { (vendor, list) ->
                 val count = if (list.size == 1) "1 model" else "${list.size} models"
                 MenuChoice(vendor.title, list.any(section.selected), count, { VendorMark(vendor, section.harness, 18.dp) }, keepsOpen = true, drills = true) {
-                    open = section to vendor
+                    open = section.harness to vendor
                 }
             } ?: section.models.map { m ->
                 MenuChoice(m.label, section.selected(m), m.description?.takeIf { section.describe }, section.leading) { section.onPick(m) }

@@ -59,9 +59,10 @@ enum class BrandMark(val width: Float, val height: Float, val evenOdd: Boolean, 
             QWEN -> Color(0xFF6F69F7)
             MINIMAX -> Color(0xFFF0365E)
             MISTRAL -> Color(0xFFFA500F)
-            NVIDIA -> Color(0xFF76B900)
+            // The two greens are darkened from the brand values to hold 3:1 on white.
+            NVIDIA -> Color(0xFF5E9400)
             META -> Color(0xFF0081FB)
-            LONGCAT -> Color(0xFF29E154)
+            LONGCAT -> Color(0xFF1A9E3A)
             else -> null
         }
 }
@@ -90,7 +91,7 @@ fun VendorMark(vendor: ModelVendor, harness: String?, size: androidx.compose.ui.
 /** The mark for a chosen model: its vendor's, else its harness's. */
 @androidx.compose.runtime.Composable
 fun ModelMark(model: String?, harness: String?, size: androidx.compose.ui.unit.Dp) =
-    VendorMark(model?.let { ModelVendor.of(it) } ?: ModelVendor.OTHER, harness, size)
+    VendorMark(model?.let { ModelVendor.of(it, harness) } ?: ModelVendor.OTHER, harness, size)
 
 @androidx.compose.runtime.Composable
 private fun MarkGlyph(mark: BrandMark, color: Color, size: androidx.compose.ui.unit.Dp, modifier: androidx.compose.ui.Modifier) {
@@ -111,7 +112,8 @@ private fun MarkGlyph(mark: BrandMark, color: Color, size: androidx.compose.ui.u
  * many vendors under one provider. Order is the picker's section order.
  */
 enum class ModelVendor(val title: String, val mark: BrandMark?, private val prefixes: List<String>) {
-    ANTHROPIC("Anthropic", BrandMark.CLAUDE, listOf("claude")),
+    // Cursor names Claude models by family alone (`sonnet-4.5`).
+    ANTHROPIC("Anthropic", BrandMark.CLAUDE, listOf("claude", "opus", "sonnet", "haiku", "fable")),
     OPENAI("OpenAI", BrandMark.OPENAI, listOf("gpt", "codex", "o1", "o3", "o4", "chatgpt")),
     GOOGLE("Google", BrandMark.GEMINI, listOf("gemini", "gemma")),
     XAI("xAI", BrandMark.GROK, listOf("grok")),
@@ -128,7 +130,13 @@ enum class ModelVendor(val title: String, val mark: BrandMark?, private val pref
     OTHER("Other", null, emptyList());
 
     companion object {
-        fun of(modelId: String): ModelVendor {
+        fun of(modelId: String, harness: String? = null): ModelVendor {
+            // A first-party harness only runs its maker's models, whatever the
+            // id (`default`, `opus`).
+            when (harness) {
+                "claude-code", "mock" -> return ANTHROPIC
+                "codex" -> return OPENAI
+            }
             val name = modelId.substringAfterLast('/').lowercase()
             return entries.firstOrNull { v -> v.prefixes.any { name.startsWith(it) } } ?: OTHER
         }

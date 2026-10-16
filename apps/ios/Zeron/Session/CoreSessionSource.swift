@@ -218,7 +218,7 @@ final class CoreSessionSource: SessionSource {
                 guard let self else { return done([]) }
                 Task { @MainActor in
                     let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
-                    let grouped = vendorGroups(models, id: \.id)
+                    let grouped = vendorGroups(models, harness: harness, id: \.id)
                     let action = { (m: ModelInfo) in
                         UIAction(title: m.label, subtitle: grouped == nil ? m.description : nil, state: m.id == row.model ? .on : .off) { [weak self] _ in
                             self?.setConfig { $0.model = m.id }

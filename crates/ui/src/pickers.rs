@@ -6042,6 +6042,11 @@ pub(crate) fn model_brand_icon(
     harness: HarnessId,
     model_id: &str,
 ) -> (&'static str, Option<gpui::Hsla>) {
+    // A first-party harness only runs its maker's models, whatever the id
+    // (`default`, `opus`); mobile's `ModelVendor.of` matches this.
+    if matches!(harness, HarnessId::ClaudeCode | HarnessId::Mock | HarnessId::Codex) {
+        return harness_brand_icon(harness);
+    }
     match crate::icons::model_vendor_mark(model_id) {
         Some(mark) => (mark, crate::icons::mark_brand(mark)),
         None => harness_brand_icon(harness),

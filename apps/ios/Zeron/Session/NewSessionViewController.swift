@@ -401,7 +401,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
                 }
             }
             let children: [UIMenuElement]
-            if let groups = vendorGroups(models, id: \.id) {
+            if let groups = vendorGroups(models, harness: h, id: \.id) {
                 children = groups.map { g in
                     UIMenu(title: g.vendor.title, subtitle: g.models.count == 1 ? "1 model" : "\(g.models.count) models",
                            image: BrandMarks.image(for: g.vendor, harness: h, side: 16), children: g.models.map(action))

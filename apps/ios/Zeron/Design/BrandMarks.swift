@@ -109,9 +109,10 @@ enum BrandMark {
         case .qwen: return UIColor(hex: 0x6F69F7)
         case .minimax: return UIColor(hex: 0xF0365E)
         case .mistral: return UIColor(hex: 0xFA500F)
-        case .nvidia: return UIColor(hex: 0x76B900)
+        // The two greens are darkened from the brand values to hold 3:1 on white.
+        case .nvidia: return UIColor(hex: 0x5E9400)
         case .meta: return UIColor(hex: 0x0081FB)
-        case .longcat: return UIColor(hex: 0x29E154)
+        case .longcat: return UIColor(hex: 0x1A9E3A)
         default: return nil
         }
     }
@@ -455,7 +456,8 @@ enum ModelVendor: CaseIterable {
 
     private var prefixes: [String] {
         switch self {
-        case .anthropic: return ["claude"]
+        // Cursor names Claude models by family alone (`sonnet-4.5`).
+        case .anthropic: return ["claude", "opus", "sonnet", "haiku", "fable"]
         case .openai: return ["gpt", "codex", "o1", "o3", "o4", "chatgpt"]
         case .google: return ["gemini", "gemma"]
         case .xai: return ["grok"]
@@ -473,7 +475,14 @@ enum ModelVendor: CaseIterable {
         }
     }
 
-    static func of(_ modelId: String) -> ModelVendor {
+    static func of(_ modelId: String, harness: String? = nil) -> ModelVendor {
+        // A first-party harness only runs its maker's models, whatever the
+        // id (`default`, `opus`).
+        switch harness {
+        case "claude-code", "mock": return .anthropic
+        case "codex": return .openai
+        default: break
+        }
         let name = (modelId.split(separator: "/").last.map(String.init) ?? modelId).lowercased()
         return allCases.first { v in v.prefixes.contains { name.hasPrefix($0) } } ?? .other
     }
@@ -481,8 +490,8 @@ enum ModelVendor: CaseIterable {
 
 /// Models grouped by vendor in picker order; nil when they're all one
 /// vendor's, so short lists stay flat.
-func vendorGroups<T>(_ models: [T], id: (T) -> String) -> [(vendor: ModelVendor, models: [T])]? {
-    let groups = Dictionary(grouping: models) { ModelVendor.of(id($0)) }
+func vendorGroups<T>(_ models: [T], harness: String?, id: (T) -> String) -> [(vendor: ModelVendor, models: [T])]? {
+    let groups = Dictionary(grouping: models) { ModelVendor.of(id($0), harness: harness) }
     guard groups.count > 1 else { return nil }
     return ModelVendor.allCases.compactMap { v in groups[v].map { (v, $0) } }
 }
@@ -500,7 +509,7 @@ enum BrandMarks {
 
     /// The mark for a chosen model: its vendor's, else its harness's.
     static func image(forModel model: String?, harness: String?, side: CGFloat = 15) -> UIImage? {
-        image(for: model.map(ModelVendor.of) ?? .other, harness: harness, side: side)
+        image(for: model.map { ModelVendor.of($0, harness: harness) } ?? .other, harness: harness, side: side)
     }
 
     /// A model vendor's mark; `.other` falls back to the harness mark.
