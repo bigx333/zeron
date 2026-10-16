@@ -1050,20 +1050,25 @@ async fn install_at(paths: &Paths, token: &str, auto_update: bool) -> Result<Ski
 /// through the authenticated network path, so local commands never need to
 /// fetch a missing blob without credentials.
 async fn ensure_full_clone(checkout: &Path) -> Result<(), String> {
-    let partial = git(
-        Some(checkout),
-        &["config", "--get", "remote.origin.partialclonefilter"],
-    )
-    .await
-    .is_ok();
+    // Any marker counts: the promisor ones are cleared only after the full
+    // fetch succeeds, so an interrupted migration is retried next time.
+    let mut partial = false;
+    for key in [
+        "remote.origin.partialclonefilter",
+        "remote.origin.promisor",
+        "extensions.partialclone",
+    ] {
+        partial |= git(Some(checkout), &["config", "--get", key]).await.is_ok();
+    }
     if !partial {
         return Ok(());
     }
-    git(
+    // Without the filter the refetch downloads everything a full clone has.
+    let _ = git(
         Some(checkout),
         &["config", "--unset-all", "remote.origin.partialclonefilter"],
     )
-    .await?;
+    .await;
     git_in(
         Some(checkout),
         true,
@@ -1754,6 +1759,9 @@ mod tests {
                 checkout.to_str().unwrap(),
             ],
         );
+        // An interrupted migration: the filter is gone but objects are still
+        // missing. The promisor markers remain, so it is picked up again.
+        run(&checkout, &["config", "--unset-all", "remote.origin.partialclonefilter"]);
         ensure_full_clone(&checkout).await.unwrap();
         assert!(git(Some(&checkout), &["config", "--get", "remote.origin.partialclonefilter"]).await.is_err());
         assert!(git(Some(&checkout), &["config", "--get", "remote.origin.promisor"]).await.is_err());

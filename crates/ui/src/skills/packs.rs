@@ -750,6 +750,7 @@ impl SkillsPage {
                 .child(
                     widgets::toggle_switch(theme, auto, format!("skills-pack-auto-{name}"))
                         .id(SharedString::from(format!("skills-pack-auto-{name}")))
+                        .when(busy == Some(PackBusy::Toggling), |el| el.opacity(0.6))
                         .role(gpui::Role::Switch)
                         .aria_label(format!("Update {name} automatically"))
                         .aria_toggled(if auto {
@@ -767,6 +768,11 @@ impl SkillsPage {
                             let name = name.clone();
                             move |page, _, _, cx| {
                                 cx.stop_propagation();
+                                // One request per pack at a time; a click while
+                                // one is pending would lose its rollback value.
+                                if page.pack_busy.contains_key(&name) {
+                                    return;
+                                }
                                 // Show it now; the engine's reply settles it.
                                 // A failure restores the value from before
                                 // (not an inversion of whatever a refresh
