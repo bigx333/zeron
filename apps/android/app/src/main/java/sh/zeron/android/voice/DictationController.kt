@@ -209,8 +209,8 @@ class DictationController(
                 toast("Zeron Nova needs microphone access to dictate.", "Settings") { openAppSettings(context) }
                 return@launch
             }
-            // A call may have started while the prompt was up.
-            if (voice.live) return@launch reset()
+            // A call may have started, or the app gone to the background, while the prompt was up.
+            if (voice.live || !foreground()) return@launch reset()
             val recorder = Recorder.start(context, File(folder, "${UUID.randomUUID()}.m4a"), onLimit = ::finish) {
                 if (generation == this@DictationController.generation) failed("Recording stopped unexpectedly. Your draft is safe.")
             }
@@ -299,6 +299,10 @@ class DictationController(
             if (owner !in attached && owns(owner)) cancel()
         }
     }
+
+    /** Recording only starts while the app is on screen, where its stop control is. */
+    private fun foreground(): Boolean =
+        ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
 
     // ── Microphone permission ──────────────────────────────────────────────
 

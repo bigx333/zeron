@@ -89,6 +89,8 @@ final class CodexDictationController: NSObject {
         let id = host?.id
         let client = app?.client
         guard id != lastHost || client !== lastClient else { return }
+        // A new account (or sign-out) never inherits the old one's dictation.
+        if client !== lastClient, busy { cancel() }
         lastHost = id
         lastClient = client
         if enabled { refreshStatus() } else { changed() }
