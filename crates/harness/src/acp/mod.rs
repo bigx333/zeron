@@ -31,6 +31,7 @@
 
 mod antigravity_paths;
 mod devin_models;
+mod grok_questions;
 mod normalize;
 mod subagent;
 mod subagent_devin;
@@ -3076,7 +3077,12 @@ fn handle_server_request_live(
     params: &Value,
     request_input: &std::sync::Arc<RequestInputFn>,
     session_id: &str,
+    grok_questions: &mut grok_questions::Questions,
 ) -> Vec<AgentEvent> {
+    if method == grok_questions::METHOD {
+        grok_questions.request(client, id, params, request_input, session_id);
+        return Vec::new();
+    }
     if params
         .get("sessionId")
         .and_then(Value::as_str)
@@ -4074,6 +4080,7 @@ async fn run_session(session: Session) {
         };
     }
 
+    let mut grok_questions = grok_questions::Questions::default();
     let mut child_exit = None;
     let mut exit_drain_deadline = None;
     'main: loop {
@@ -4175,6 +4182,9 @@ async fn run_session(session: Session) {
                 while let Ok(inc) = incoming.try_recv() {
                     match inc {
                         Incoming::Notification { method, params } => {
+                            if params["sessionId"].as_str() == Some(session_id.as_str()) {
+                                grok_questions.notification(&method, &params);
+                            }
                             let events =
                                 session_update_events(&method, &params, &session_id, &mut subagents);
                             for ev in events {
@@ -4192,6 +4202,7 @@ async fn run_session(session: Session) {
                                 &params,
                                 &request_input,
                                 &session_id,
+                                &mut grok_questions,
                             ) {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -4208,6 +4219,7 @@ async fn run_session(session: Session) {
                 if consumer_gone {
                     break 'main;
                 }
+                grok_questions.cancel_all();
                 let (prev, _next) = rotate(&mut assistant_message_id);
                 if !send(
                     &event_tx,
@@ -4390,6 +4402,9 @@ async fn run_session(session: Session) {
                     }
                     // Other notifications (other sessions, agent noise) are
                     // tolerated by design.
+                    if params["sessionId"].as_str() == Some(session_id.as_str()) {
+                        grok_questions.notification(&method, &params);
+                    }
                     let events =
                         session_update_events(&method, &params, &session_id, &mut subagents);
                     for ev in events {
@@ -4418,6 +4433,7 @@ async fn run_session(session: Session) {
                         &params,
                         &request_input,
                         &session_id,
+                        &mut grok_questions,
                     ) {
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -4511,6 +4527,9 @@ async fn run_session(session: Session) {
                         while let Ok(inc) = incoming.try_recv() {
                             match inc {
                                 Incoming::Notification { method, params } => {
+                                    if params["sessionId"].as_str() == Some(session_id.as_str()) {
+                                        grok_questions.notification(&method, &params);
+                                    }
                                     let events =
                                         session_update_events(&method, &params, &session_id, &mut subagents);
                                     for ev in events {
@@ -4527,7 +4546,8 @@ async fn run_session(session: Session) {
                                         &method,
                                         &params,
                                         &request_input,
-                                &session_id,
+                                        &session_id,
+                                        &mut grok_questions,
                                     ) {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -4908,6 +4928,7 @@ async fn run_session(session: Session) {
             // (background work the agent holds keeps running). Steers still
             // waiting for this turn's end go with it.
             _ = turn_control.stop_requested(), if !interrupted => {
+                grok_questions.cancel_all();
                 queued_steers.clear();
                 steer_backlog.clear();
                 // A steer still in flight goes with the turn too: its answer
@@ -4938,6 +4959,7 @@ async fn run_session(session: Session) {
             },
 
             _ = interrupt.cancelled(), if !interrupt_sent => {
+                grok_questions.cancel_all();
                 interrupt_sent = true;
                 interrupted = true;
                 if turn.is_some() {
@@ -5014,6 +5036,8 @@ async fn run_session(session: Session) {
             _ = event_tx.closed() => break 'main,
         }
     }
+
+    drop(grok_questions);
 
     // A vanished Devin process cannot send subagent_completed. Settle every
     // open nested transcript before the parent's terminal Done.
