@@ -9044,6 +9044,9 @@ impl Shell {
         } else {
             match status {
                 zeron_proto::ChatIndicator::Working => Some("Working"),
+                // T3 spells it out: a question blocks the run, and the Inbox
+                // is where the user looks for what's waiting on them.
+                zeron_proto::ChatIndicator::AwaitingInput if t3 => Some("Waiting input"),
                 zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
                 zeron_proto::ChatIndicator::Errored => Some("Failed"),
                 zeron_proto::ChatIndicator::Completed => Some("Done"),
@@ -9053,6 +9056,13 @@ impl Shell {
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
+        // Compact T3 rows put a pending question in the time slot: the dot
+        // alone read as just another idle row.
+        let compact_waiting = compact
+            && t3
+            && status == zeron_proto::ChatIndicator::AwaitingInput
+            && !queued
+            && !undelivered;
         // Subagents running under this chat show as a "● N" pill beside the
         // row's own activity indicator, never in place of it: the pill takes
         // the time stamp's spot (compact) or leads the status (regular), and
@@ -9624,9 +9634,12 @@ impl Shell {
                         let text_hint = compact_jump_label
                             .as_ref()
                             .is_some_and(|label| label.chars().count() > 3);
-                        // Running subagents take the time stamp's place; the
-                        // legend and the hover archive still win.
-                        let pill = (!show_legend && !show_archive && !show_actions)
+                        // A pending question, then running subagents, take the
+                        // time stamp's place; the legend and the hover
+                        // actions still win.
+                        let show_waiting =
+                            compact_waiting && !show_legend && !show_archive && !show_actions;
+                        let pill = (!show_legend && !show_archive && !show_actions && !show_waiting)
                             .then(|| subagent_pill("compact"))
                             .flatten();
                         let archive_id = id.clone();
@@ -9671,6 +9684,8 @@ impl Shell {
                                     "Session actions"
                                 } else if show_archive {
                                     archive_label
+                                } else if show_waiting {
+                                    "Waiting input"
                                 } else {
                                     "Session time"
                                 })
@@ -9710,6 +9725,15 @@ impl Shell {
                                         .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                                         .flex_none()
                                         .text_color(theme.text_muted)
+                                        .into_any_element()
+                                } else if show_waiting {
+                                    div()
+                                        .whitespace_nowrap()
+                                        .text_right()
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(status_color)
+                                        .child("Waiting input")
                                         .into_any_element()
                                 } else if let Some(pill) = pill {
                                     pill
