@@ -14,14 +14,13 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
@@ -191,7 +190,8 @@ fun EffortSlider(
     fun commit() = onEffort(efforts[step])
 
     Column(modifier) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.heightIn(min = 40.dp)) {
+        // Fixed height: the reset button coming and going must not resize the sheet.
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.height(48.dp)) {
             ZIcon(ZIcons.Effort, null, Modifier.size(20.dp), tint = accent)
             Spacer(Modifier.width(10.dp))
             AnimatedContent(
@@ -242,7 +242,8 @@ fun EffortSlider(
                 .pointerInput(efforts) {
                     val r = size.height / 2f
                     fun at(x: Float) = ((x - r) / (size.width - 2 * r)).coerceIn(0f, 1f)
-                    detectHorizontalDragGestures(
+                    // Any direction, so a wobble in the finger can't drag the sheet instead.
+                    detectDragGestures(
                         onDragStart = { o -> dragging = at(o.x) },
                         onDragEnd = {
                             dragging = null
