@@ -9,8 +9,9 @@
 //!   are ports of the hand-drawn inline SVGs in zeron's `terminal-panel.tsx` /
 //!   `composer-actions.tsx`.
 //! - The harness brand marks (`claude-mark`, `openai-mark`, `cursor-mark`) are
-//!   ports of zeron's `icons.tsx`. gpui tints SVGs with the text color, so the
-//!   Claude mark's brand orange is applied at the call site ([`CLAUDE_BRAND`]).
+//!   ports of zeron's `icons.tsx`; the model vendor marks (`gemini-mark`, ...)
+//!   come from Lobe Icons (MIT). gpui tints SVGs with the text color, so a
+//!   mark's brand color is applied at the call site ([`mark_brand`]).
 //!
 //! Icons render via [`icon`]: `icon(icons::PAPERCLIP).size(px(16.)).text_color(…)`.
 
@@ -228,6 +229,19 @@ icon_assets![
     (PI_MARK, "pi-mark"),
     (OPENCODE_MARK, "opencode-mark"),
     (ANTIGRAVITY_MARK, "antigravity-mark"),
+    // Model vendor marks (Lobe Icons, MIT): a model row wears its maker's mark,
+    // since one gateway harness (opencode) serves every vendor.
+    (GEMINI_MARK, "gemini-mark"),
+    (DEEPSEEK_MARK, "deepseek-mark"),
+    (QWEN_MARK, "qwen-mark"),
+    (KIMI_MARK, "kimi-mark"),
+    (ZAI_MARK, "zai-mark"),
+    (MINIMAX_MARK, "minimax-mark"),
+    (MISTRAL_MARK, "mistral-mark"),
+    (NVIDIA_MARK, "nvidia-mark"),
+    (META_MARK, "meta-mark"),
+    (XIAOMI_MARK, "xiaomi-mark"),
+    (LONGCAT_MARK, "longcat-mark"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity
@@ -263,6 +277,53 @@ impl AssetSource for Assets {
 /// monochrome surface.
 pub fn claude_brand() -> Hsla {
     gpui::rgb(0xD97757).into()
+}
+
+/// A brand mark's own color; `None` for black-or-white marks (OpenAI, Cursor,
+/// xAI, ...), which take the surface's text color. Mobile mirrors this table
+/// (`BrandMark.color` in BrandMarks.kt / BrandMarks.swift).
+pub fn mark_brand(mark: &str) -> Option<Hsla> {
+    let rgb = match mark {
+        CLAUDE_MARK => 0xD97757,
+        DEVIN_MARK => 0x0294DE,
+        ANTIGRAVITY_MARK | GEMINI_MARK => 0x3186FF,
+        DEEPSEEK_MARK => 0x4D6BFE,
+        QWEN_MARK => 0x6F69F7,
+        MINIMAX_MARK => 0xF0365E,
+        MISTRAL_MARK => 0xFA500F,
+        NVIDIA_MARK => 0x76B900,
+        META_MARK => 0x0081FB,
+        LONGCAT_MARK => 0x29E154,
+        _ => return None,
+    };
+    Some(gpui::rgb(rgb).into())
+}
+
+/// The mark of the vendor that makes a model, read from its id (the part after
+/// any `provider/`); `None` when unrecognized. Mobile mirrors these prefixes
+/// (`ModelVendor`).
+pub fn model_vendor_mark(model_id: &str) -> Option<&'static str> {
+    const VENDORS: &[(&str, &[&str])] = &[
+        (CLAUDE_MARK, &["claude"]),
+        (OPENAI_MARK, &["gpt", "codex", "o1", "o3", "o4", "chatgpt"]),
+        (GEMINI_MARK, &["gemini", "gemma"]),
+        (GROK_MARK, &["grok"]),
+        (DEEPSEEK_MARK, &["deepseek"]),
+        (QWEN_MARK, &["qwen", "qwq"]),
+        (KIMI_MARK, &["kimi", "moonshot"]),
+        (ZAI_MARK, &["glm"]),
+        (MINIMAX_MARK, &["minimax"]),
+        (MISTRAL_MARK, &["mistral", "codestral", "devstral", "magistral", "ministral"]),
+        (META_MARK, &["llama", "muse"]),
+        (NVIDIA_MARK, &["nemotron"]),
+        (XIAOMI_MARK, &["mimo"]),
+        (LONGCAT_MARK, &["longcat"]),
+    ];
+    let name = model_id.rsplit('/').next().unwrap_or(model_id).to_ascii_lowercase();
+    VENDORS
+        .iter()
+        .find(|(_, prefixes)| prefixes.iter().any(|p| name.starts_with(p)))
+        .map(|(mark, _)| *mark)
 }
 
 /// An icon element for an embedded asset path. Size and colour are set by the
@@ -419,5 +480,15 @@ mod tests {
     fn list_filters_by_prefix() {
         assert!(!Assets.list("icons/").unwrap().is_empty());
         assert!(Assets.list("fonts/").unwrap().is_empty());
+    }
+    #[test]
+    fn model_vendor_mark_reads_the_model_after_its_provider() {
+        assert_eq!(model_vendor_mark("opencode/gemini-4-argon"), Some(GEMINI_MARK));
+        assert_eq!(model_vendor_mark("claude-opus-5-5"), Some(CLAUDE_MARK));
+        assert_eq!(model_vendor_mark("openrouter/qwen/qwen3.8-max"), Some(QWEN_MARK));
+        assert_eq!(model_vendor_mark("GPT-5.5"), Some(OPENAI_MARK));
+        assert_eq!(model_vendor_mark("opencode/big-pickle"), None);
+        assert_eq!(mark_brand(OPENAI_MARK), None);
+        assert!(mark_brand(GEMINI_MARK).is_some());
     }
 }
