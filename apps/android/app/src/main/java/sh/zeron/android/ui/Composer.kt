@@ -272,7 +272,7 @@ fun Composer(
             action = when {
                 editingId != null -> ComposerAction.Send
                 running && !draft.hasContent -> ComposerAction.Stop
-                running -> ComposerAction.Queue
+                running && delivery == Delivery.Queue -> ComposerAction.Queue
                 else -> ComposerAction.Send
             },
             onAction = { if (editingId == null && running && !draft.hasContent) runCatching { handle.interrupt() } else send() },

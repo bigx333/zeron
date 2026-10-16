@@ -557,6 +557,28 @@ fn steering_while_busy_sends_a_steer_not_a_queue_row() {
 }
 
 #[test]
+fn opening_a_chat_learns_steering_without_the_new_session_picker() {
+    let (client, _dir) = demo(DemoOptions::default());
+    // Straight from the session list: nothing has listed the host's harnesses.
+    let session = client.open_session("chat-home").unwrap();
+    session.send(SendRequest::text("first")).unwrap();
+    wait_for("turn running and steerable", Duration::from_secs(5), || {
+        let composer = session.composer();
+        composer.live.turn_running && composer.host.capabilities.mid_turn_steering == Some(true)
+    });
+    let outcome = session
+        .send(SendRequest {
+            busy: zeron_client::BusyPolicy::Steer,
+            ..SendRequest::text("also this")
+        })
+        .unwrap();
+    assert!(
+        matches!(outcome, SendOutcome::Steered { .. }),
+        "steer, not queue: {outcome:?}"
+    );
+}
+
+#[test]
 fn queueing_while_busy_at_realistic_speed() {
     let (client, _dir) = demo(DemoOptions::default());
     let session = client.open_session("chat-home").unwrap();
