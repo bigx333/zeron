@@ -2258,6 +2258,10 @@ struct MarkdownImages {
     recent: VecDeque<KeptImage>,
     /// The current paint pass.
     frame: u64,
+    /// Images dropped since the last pass, for releasing their decoded
+    /// copies: gpui keeps those until told, and the attachment cache only
+    /// releases what it still tracks.
+    retired: Vec<Arc<gpui::Image>>,
 }
 
 struct KeptImage {
@@ -2269,24 +2273,32 @@ struct KeptImage {
 
 impl MarkdownImages {
     /// Start a paint pass: drop images neither of the last two passes
-    /// painted, beyond the few kept for scrolling back.
-    fn begin_frame(&mut self) {
+    /// painted, beyond the few kept for scrolling back. Returns every image
+    /// dropped since the last pass, for release.
+    fn begin_frame(&mut self) -> Vec<Arc<gpui::Image>> {
         self.frame += 1;
         let frame = self.frame;
         let mut stale = 0;
+        let mut retired = std::mem::take(&mut self.retired);
         self.recent.retain(|kept| {
             if frame - kept.painted <= 2 {
                 return true;
             }
             stale += 1;
-            stale <= MARKDOWN_IMAGES_KEPT
+            let keep = stale <= MARKDOWN_IMAGES_KEPT;
+            if !keep {
+                retired.push(kept.image.image.clone());
+            }
+            keep
         });
+        retired
     }
 
     /// Point at another chat's host: its images can't be the same files.
     fn set_device(&mut self, device: Option<String>) {
         if self.device != device {
-            self.recent.clear();
+            self.retired
+                .extend(self.recent.drain(..).map(|kept| kept.image.image));
             self.requests.clear();
             self.device = device;
         }
@@ -10452,7 +10464,10 @@ impl Render for Transcript {
         // Release gpui-side decoded copies of any images the attachment LRU
         // evicted since the last frame (no-op when nothing was evicted).
         crate::attachments::flush_evicted(Some(window), cx);
-        self.markdown_images.borrow_mut().begin_frame();
+        let retired = self.markdown_images.borrow_mut().begin_frame();
+        for image in retired {
+            gpui::ImageSource::Image(image).evict(Some(window), cx);
+        }
         // Diagram requests are scoped to paint passes; rasters follow the
         // reading column and display density (a no-op while both hold).
         let released_diagrams = {
@@ -12352,11 +12367,16 @@ mod tests {
             images.keep("mac", &format!("/tmp/{i}.png"), image("n"));
         }
         images.begin_frame();
-        images.begin_frame();
+        assert!(images.begin_frame().is_empty());
         assert_eq!(images.recent.len(), 9);
         // …once passes repaint only some, those stay, plus a few older ones.
         assert!(images.recent("mac", "/tmp/0.png").is_some());
-        images.begin_frame();
+        let retired = images.begin_frame();
+        assert_eq!(
+            retired.len(),
+            9 - 1 - MARKDOWN_IMAGES_KEPT,
+            "dropped images are released"
+        );
         images.begin_frame();
         assert_eq!(images.recent.len(), 1 + MARKDOWN_IMAGES_KEPT);
         assert!(images.recent("mac", "/tmp/0.png").is_some());
@@ -12375,6 +12395,7 @@ mod tests {
         // Another chat's host starts empty.
         images.set_device(Some("linux".into()));
         assert!(images.recent.is_empty());
+        assert_eq!(images.begin_frame().len(), 1 + MARKDOWN_IMAGES_KEPT);
     }
 
     #[test]
