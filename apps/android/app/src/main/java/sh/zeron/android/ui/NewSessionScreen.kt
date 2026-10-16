@@ -486,6 +486,7 @@ private fun DraftModelChip(
             efforts = efforts,
             onEffort = { onPick(draft.copy(effort = it)) },
             onDismiss = { open = false },
+            defaultEffort = choice?.model?.defaultReasoning,
         )
     }
 }

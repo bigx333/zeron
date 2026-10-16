@@ -329,6 +329,7 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
                 efforts = levels,
                 onEffort = { l -> setConfig { it.copy(reasoning = l) } },
                 onDismiss = { menu = null },
+                defaultEffort = model?.defaultReasoning,
             )
         }
     }

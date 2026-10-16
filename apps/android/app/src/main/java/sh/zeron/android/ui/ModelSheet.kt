@@ -14,12 +14,10 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -32,13 +30,11 @@ import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SegmentedListItem
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -59,7 +55,6 @@ import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import uniffi.zeron_core.ModelInfo
 import uniffi.zeron_core.reasoningLabel
-import kotlin.math.roundToInt
 
 /** One harness's models in a [ModelSheet]. */
 class ModelSection(
@@ -94,8 +89,8 @@ fun ModelChip(model: String?, harness: String?, label: String, effort: String?, 
  * Model and effort in one sheet. Effort is a stepped slider over the chosen
  * model's levels; models keep the list short: with more than one vendor in
  * it, the vendors come first and each opens its models (back returns). One
- * vendor's models are listed directly. Picking a model closes the sheet;
- * effort applies as the slider settles and the sheet stays open.
+ * vendor's models are listed directly. Picking a model returns to the top,
+ * where the effort follows the new model; Done (or a swipe) closes the sheet.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -105,12 +100,15 @@ fun ModelSheet(
     efforts: List<String>,
     onEffort: (String) -> Unit,
     onDismiss: () -> Unit,
+    defaultEffort: String? = null,
 ) {
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     fun close() {
         scope.launch { sheet.hide() }.invokeOnCompletion { if (!sheet.isVisible) onDismiss() }
     }
+    val haptics = LocalHapticFeedback.current
+    fun pickedHaptic() = haptics.performHapticFeedback(HapticFeedbackType.Confirm)
     val grouped = sections.map { it to vendorGroups(it.models, it.harness) }
     val categories = grouped.sumOf { (_, groups) -> groups.size } > 1
     // Keyed by harness and vendor, not the section: a refreshed list brings new callbacks.
@@ -127,14 +125,13 @@ fun ModelSheet(
     ) {
         BackHandler(enabled = page != null) { open = null }
         Column(Modifier.animateContentSize(MaterialTheme.motionScheme.defaultSpatialSpec())) {
-            Text(
-                "Model",
-                style = MaterialTheme.typography.headlineSmallEmphasized,
-                modifier = Modifier.padding(start = 24.dp, bottom = 12.dp),
-            )
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 24.dp, end = 12.dp, bottom = 12.dp)) {
+                Text("Model", style = MaterialTheme.typography.headlineSmallEmphasized, modifier = Modifier.weight(1f))
+                TextButton(onClick = ::close) { Text("Done", style = MaterialTheme.typography.titleMedium) }
+            }
             // The chosen model's effort; hidden while browsing a vendor, whose models have their own ladders.
             AnimatedVisibility(page == null && effort != null && efforts.size > 1, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
-                if (effort != null) EffortSlider(effort, efforts, onEffort, Modifier.padding(start = 24.dp, end = 24.dp, bottom = 12.dp))
+                if (effort != null) EffortSlider(effort, efforts, defaultEffort, onEffort, Modifier.padding(start = 24.dp, end = 24.dp, bottom = 16.dp))
             }
             AnimatedContent(
                 page,
@@ -169,7 +166,7 @@ fun ModelSheet(
                             } else {
                                 ModelRows(section, section.models, describe = true) { m ->
                                     section.onPick(m)
-                                    close()
+                                    pickedHaptic()
                                 }
                             }
                         }
@@ -195,7 +192,8 @@ fun ModelSheet(
                         }
                         ModelRows(section, models, describe = providers > 1) { m ->
                             section.onPick(m)
-                            close()
+                            pickedHaptic()
+                            open = null
                         }
                     }
                 }
@@ -301,43 +299,4 @@ private fun SheetRow(
         trailingContent = trailing,
         modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = ListItemDefaults.SegmentedGap),
     ) { Text(title, style = MaterialTheme.typography.titleMedium) }
-}
-
-/**
- * The model's effort levels as a stepped slider, low to high, with the level
- * named above it. Each step ticks; the choice applies when the thumb settles.
- */
-@Composable
-private fun EffortSlider(effort: String, efforts: List<String>, onEffort: (String) -> Unit, modifier: Modifier = Modifier) {
-    val haptics = LocalHapticFeedback.current
-    val last = efforts.size - 1
-    var value by remember(efforts) { mutableFloatStateOf(efforts.indexOf(effort).coerceAtLeast(0).toFloat()) }
-    // A change from elsewhere (another device, a model switch) moves the thumb.
-    LaunchedEffect(effort, efforts) { value = efforts.indexOf(effort).coerceAtLeast(0).toFloat() }
-    val step = value.roundToInt().coerceIn(0, last)
-    Column(modifier) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Effort", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            AnimatedContent(
-                reasoningLabel(efforts[step]),
-                transitionSpec = { fadeIn() togetherWith fadeOut() using SizeTransform(clip = false) },
-                contentAlignment = Alignment.CenterEnd,
-                label = "effort",
-            ) { Text(it, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary) }
-        }
-        Slider(
-            value = value,
-            onValueChange = {
-                if (it.roundToInt() != value.roundToInt()) haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
-                value = it
-            },
-            valueRange = 0f..last.toFloat(),
-            steps = (last - 1).coerceAtLeast(0),
-            onValueChangeFinished = { onEffort(efforts[value.roundToInt().coerceIn(0, last)]) },
-        )
-        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-            Text(reasoningLabel(efforts.first()), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(reasoningLabel(efforts.last()), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
 }
