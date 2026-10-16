@@ -12,6 +12,15 @@ val coreOut = repoRoot.resolve("target/android-core")
 val iconsOut = layout.buildDirectory.dir("generated/zeron-icons")
 val skipCore = providers.gradleProperty("zeronSkipCore").isPresent
 
+// The commit this APK was built from, shown in Settings › About, so an
+// installed build can be told apart from another of the same version.
+// "+dirty" marks uncommitted changes; "unknown" when git isn't available.
+fun git(vararg args: String): String =
+    providers.exec { workingDir = repoRoot; commandLine("git", *args) }.standardOutput.asText.get().trim()
+val gitCommit: String = runCatching {
+    git("rev-parse", "--short=8", "HEAD") + if (git("status", "--porcelain").isEmpty()) "" else "+dirty"
+}.getOrDefault("unknown")
+
 val buildCore by tasks.registering(Exec::class) {
     description = "Builds crates/mobile for Android and generates Kotlin bindings."
     val ndk = System.getenv("ANDROID_NDK_HOME")
@@ -49,6 +58,7 @@ android {
         versionCode = 2
         versionName = "0.2.113"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
     }
 
     buildTypes {
@@ -63,7 +73,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
 
     sourceSets["main"].apply {
         kotlin.directories.add(coreOut.resolve("kotlin").path)
