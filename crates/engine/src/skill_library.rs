@@ -578,8 +578,17 @@ fn encode_path(path: &str) -> String {
         .join("/")
 }
 
-async fn fetch_raw(owner: &str, repo: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
-    let url = format!("{GITHUB_RAW}/{owner}/{repo}/HEAD/{}", encode_path(path));
+/// `path` at `revision` (a commit SHA, or `HEAD` for previews).
+async fn fetch_raw(
+    owner: &str,
+    repo: &str,
+    revision: &str,
+    path: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let url = format!(
+        "{GITHUB_RAW}/{owner}/{repo}/{revision}/{}",
+        encode_path(path)
+    );
     let response = client().get(url).send().await.map_err(|_| {
         "GitHub couldn't be reached. Check your connection and try again.".to_string()
     })?;
@@ -615,36 +624,67 @@ struct TreeEntry {
     size: Option<u64>,
 }
 
-async fn repository_tree(owner: &str, repo: &str) -> Result<Vec<TreeEntry>, String> {
-    #[derive(Deserialize)]
-    struct Tree {
-        tree: Vec<TreeEntry>,
-    }
+/// The repository at one commit: everything an install reads comes from it,
+/// so a push mid-install can't mix files from two revisions.
+struct Snapshot {
+    commit: String,
+    tree: Vec<TreeEntry>,
+}
+
+async fn github_get(owner: &str, repo: &str, url: String, accept: &str) -> Result<reqwest::Response, String> {
     let response = client()
-        .get(format!(
-            "{GITHUB_API}/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
-        ))
-        .header("accept", "application/vnd.github+json")
+        .get(url)
+        .header("accept", accept)
         .send()
         .await
         .map_err(|_| {
             "GitHub couldn't be reached. Check your connection and try again.".to_string()
         })?;
     match response.status() {
-        status if status.is_success() => {}
-        reqwest::StatusCode::NOT_FOUND => {
-            return Err(format!("{owner}/{repo} wasn't found on GitHub."));
-        }
+        status if status.is_success() => Ok(response),
+        reqwest::StatusCode::NOT_FOUND => Err(format!("{owner}/{repo} wasn't found on GitHub.")),
         reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::TOO_MANY_REQUESTS => {
-            return Err("GitHub's download limit was reached. Try again in a few minutes.".into());
+            Err("GitHub's download limit was reached. Try again in a few minutes.".into())
         }
-        status => return Err(format!("GitHub refused the download ({status}).")),
+        status => Err(format!("GitHub refused the download ({status}).")),
     }
-    let tree: Tree = response
-        .json()
-        .await
-        .map_err(|_| "GitHub sent a response Zeron doesn't understand.".to_string())?;
-    Ok(tree.tree)
+}
+
+async fn repository_snapshot(owner: &str, repo: &str) -> Result<Snapshot, String> {
+    #[derive(Deserialize)]
+    struct Tree {
+        tree: Vec<TreeEntry>,
+    }
+    let unreadable = || "GitHub sent a response Zeron doesn't understand.".to_string();
+    let commit = github_get(
+        owner,
+        repo,
+        format!("{GITHUB_API}/repos/{owner}/{repo}/commits/HEAD"),
+        "application/vnd.github.sha",
+    )
+    .await?
+    .text()
+    .await
+    .map_err(|_| unreadable())?
+    .trim()
+    .to_owned();
+    if commit.len() < 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(unreadable());
+    }
+    let tree: Tree = github_get(
+        owner,
+        repo,
+        format!("{GITHUB_API}/repos/{owner}/{repo}/git/trees/{commit}?recursive=1"),
+        "application/vnd.github+json",
+    )
+    .await?
+    .json()
+    .await
+    .map_err(|_| unreadable())?;
+    Ok(Snapshot {
+        commit,
+        tree: tree.tree,
+    })
 }
 
 /// The folder in `tree` that holds `skill`'s `SKILL.md`: the shallowest one
@@ -682,12 +722,13 @@ async fn locate_skill(
     owner: &str,
     repo: &str,
     skill: &str,
-    tree: &[TreeEntry],
+    snapshot: &Snapshot,
 ) -> Result<String, String> {
-    if let Some(folder) = skill_folder(tree, skill) {
+    if let Some(folder) = skill_folder(&snapshot.tree, skill) {
         return Ok(folder);
     }
-    let candidates: Vec<String> = tree
+    let candidates: Vec<String> = snapshot
+        .tree
         .iter()
         .filter(|entry| entry.kind == "blob")
         .filter(|entry| entry.path.ends_with("/SKILL.md"))
@@ -698,8 +739,9 @@ async fn locate_skill(
         .into_iter()
         .map(|path| {
             let (owner, repo) = (owner.to_owned(), repo.to_owned());
+            let commit = snapshot.commit.clone();
             async move {
-                let text = fetch_raw(&owner, &repo, &path).await.ok().flatten()?;
+                let text = fetch_raw(&owner, &repo, &commit, &path).await.ok().flatten()?;
                 let name = zeron_harness::skill_declared_name(&String::from_utf8_lossy(&text))?;
                 Some((path, name))
             }
@@ -743,21 +785,21 @@ pub async fn preview(id: String) -> Result<RegistryPreview, String> {
     let attempts = conventional_folders(skill).map(|folder| {
         let (owner, repo) = (owner.to_owned(), repo.to_owned());
         let path = format!("{folder}/{SKILL_FILE}");
-        async move { fetch_raw(&owner, &repo, &path).await }
+        async move { fetch_raw(&owner, &repo, "HEAD", &path).await }
     });
     let mut text = futures::future::join_all(attempts)
         .await
         .into_iter()
         .find_map(|result| result.ok().flatten());
     if text.is_none() {
-        let tree = repository_tree(owner, repo).await?;
-        let folder = locate_skill(owner, repo, skill, &tree).await?;
+        let snapshot = repository_snapshot(owner, repo).await?;
+        let folder = locate_skill(owner, repo, skill, &snapshot).await?;
         let path = if folder.is_empty() {
             SKILL_FILE.to_owned()
         } else {
             format!("{folder}/{SKILL_FILE}")
         };
-        text = fetch_raw(owner, repo, &path).await?;
+        text = fetch_raw(owner, repo, &snapshot.commit, &path).await?;
     }
     let text = text.ok_or_else(|| format!("{skill} wasn't found in {owner}/{repo}."))?;
     let text = String::from_utf8_lossy(&text);
@@ -831,9 +873,11 @@ async fn install_into(root: &Path, id: &str) -> Result<LibrarySkill, String> {
     if tokio::fs::symlink_metadata(&target).await.is_ok() {
         return Err(format!("A skill named {skill} is already installed."));
     }
-    let tree = repository_tree(owner, repo).await?;
-    let folder = locate_skill(owner, repo, skill, &tree).await?;
-    let files = install_plan(&tree, &folder)?;
+    let snapshot = repository_snapshot(owner, repo).await?;
+    let folder = locate_skill(owner, repo, skill, &snapshot).await?;
+    let files = install_plan(&snapshot.tree, &folder)?;
+    // The tree's sizes are a plan; the bytes actually downloaded are bounded too.
+    let downloaded = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Stage beside the library, never inside it: harnesses scan the root,
     // and a half-written skill must not be picked up.
@@ -858,12 +902,20 @@ async fn install_into(root: &Path, id: &str) -> Result<LibrarySkill, String> {
             .map(|(path, executable)| {
                 let (owner, repo) = (owner.to_owned(), repo.to_owned());
                 let (path, executable) = (path.clone(), *executable);
+                let commit = snapshot.commit.clone();
+                let downloaded = downloaded.clone();
                 let remote = source(&path);
                 let local = staging.join(&path);
                 async move {
-                    let bytes = fetch_raw(&owner, &repo, &remote)
+                    let bytes = fetch_raw(&owner, &repo, &commit, &remote)
                         .await?
                         .ok_or_else(|| format!("{path} disappeared from {owner}/{repo}."))?;
+                    let total = downloaded
+                        .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed)
+                        + bytes.len() as u64;
+                    if total > MAX_INSTALL_BYTES {
+                        return Err("This skill is too large to install.".to_string());
+                    }
                     write_file(&local, &bytes, executable)
                         .await
                         .map_err(|error| format!("Couldn't save {path}: {error}"))

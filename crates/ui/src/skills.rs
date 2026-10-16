@@ -121,6 +121,12 @@ pub struct SkillsPage {
     add_pack: Option<packs::AddPack>,
     /// Stale packs were checked for updates this session.
     checked_packs: bool,
+    /// A pack install in flight, held apart from the dialog that started it.
+    pack_install: Option<Task<()>>,
+    /// Library replies are numbered when requested; one older than the
+    /// library on screen is dropped, so a slow refresh can't undo a change.
+    library_sent: u64,
+    library_shown: u64,
     _search_events: Subscription,
     _observe: Subscription,
 }
@@ -186,6 +192,9 @@ impl SkillsPage {
             removing_pack: None,
             add_pack: None,
             checked_packs: false,
+            pack_install: None,
+            library_sent: 0,
+            library_shown: 0,
             _search_events: search_events,
             _observe: observe,
         }
@@ -252,15 +261,16 @@ impl SkillsPage {
         if !matches!(self.library, Loadable::Ready(_)) {
             self.library = Loadable::Loading;
         }
+        let seq = self.next_library_seq();
         self.library_task = self.call(
             methods::LIST_SKILL_LIBRARY,
             serde_json::json!({}),
             cx,
-            |page, result: Result<Library, String>, cx| {
+            move |page, result: Result<Library, String>, cx| {
                 page.library_task = None;
                 match result {
                     Ok(library) => {
-                        page.set_library(library, cx);
+                        page.accept_library(seq, library, cx);
                         page.check_stale_packs(cx);
                     }
                     // A failed refresh keeps the list on screen.
@@ -272,6 +282,20 @@ impl SkillsPage {
             },
         );
         cx.notify();
+    }
+
+    fn next_library_seq(&mut self) -> u64 {
+        self.library_sent += 1;
+        self.library_sent
+    }
+
+    /// Show `library` unless a newer request's library is already shown.
+    fn accept_library(&mut self, seq: u64, library: Library, cx: &mut Context<Self>) {
+        if seq < self.library_shown {
+            return;
+        }
+        self.library_shown = seq;
+        self.set_library(library, cx);
     }
 
     fn set_library(&mut self, library: Library, cx: &mut Context<Self>) {
@@ -534,6 +558,7 @@ impl SkillsPage {
         };
         let name = skill.name.clone();
         let directory = skill.directory.clone();
+        let seq = self.next_library_seq();
         self.remove_task = self.call(
             methods::REMOVE_LIBRARY_SKILL,
             serde_json::json!({ "directory": directory }),
@@ -548,7 +573,8 @@ impl SkillsPage {
                         ) {
                             page.close_detail(cx);
                         }
-                        page.set_library(library, cx);
+                        page.accept_library(seq, library, cx);
+                        page.load_library(cx);
                         crate::toast::success(cx, format!("Removed {name}."));
                     }
                     Err(error) => {
@@ -2042,16 +2068,18 @@ fn header_icon_button(
         .tooltip(widgets::text_tooltip(label))
 }
 
+/// An icon action in a row; `label` is its accessible name and its one tooltip.
 fn row_icon_button(
     id: String,
-    label: &'static str,
+    label: impl Into<SharedString>,
     glyph: &'static str,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    let label: SharedString = label.into();
     div()
         .id(SharedString::from(id))
         .role(gpui::Role::Button)
-        .aria_label(label)
+        .aria_label(label.clone())
         .tab_index(0)
         .size(px(28.0))
         .flex_none()

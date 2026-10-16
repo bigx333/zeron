@@ -61,13 +61,15 @@ impl SkillsPage {
             .into_iter()
             .map(|field| {
                 cx.subscribe(field, |page: &mut Self, _, event, cx| match event {
-                    // A changed source invalidates what was inspected.
+                    // A changed source invalidates what was (or is being)
+                    // inspected: dropping the task drops a reply in flight.
                     ComposerInputEvent::Edited => {
                         if let Some(add) = &mut page.add_pack
-                            && matches!(add.stage, AddStage::Ready(_))
+                            && matches!(add.stage, AddStage::Ready(_) | AddStage::Inspecting)
                         {
                             add.stage = AddStage::Editing;
                             add.error = None;
+                            add.task = None;
                             cx.notify();
                         }
                     }
@@ -164,13 +166,23 @@ impl SkillsPage {
         let auto_update = add.auto_update;
         add.stage = AddStage::Installing(inspection.clone());
         add.error = None;
-        let task = self.call(
+        let seq = self.next_library_seq();
+        // Held by the page, not the dialog: closing the dialog mid-install
+        // must not drop the reply the engine is still working on.
+        self.pack_install = self.call(
             methods::INSTALL_SKILL_PACK,
             serde_json::json!({ "token": inspection.token, "autoUpdate": auto_update }),
             cx,
             move |page, result: Result<Library, String>, cx| match result {
                 Ok(library) => {
-                    page.add_pack = None;
+                    page.pack_install = None;
+                    if page
+                        .add_pack
+                        .as_ref()
+                        .is_some_and(|add| matches!(add.stage, AddStage::Installing(_)))
+                    {
+                        page.add_pack = None;
+                    }
                     let linked = inspection.skills.len() - inspection.clashes.len();
                     crate::toast::success(
                         cx,
@@ -181,21 +193,25 @@ impl SkillsPage {
                         ),
                     );
                     page.expanded_packs.insert(inspection.name.clone());
-                    page.set_library(library, cx);
+                    page.accept_library(seq, library, cx);
+                    page.load_library(cx);
                 }
                 Err(error) => {
-                    if let Some(add) = &mut page.add_pack {
-                        add.task = None;
-                        // An expired token needs a fresh inspection.
-                        add.stage = AddStage::Editing;
-                        add.error = Some(error);
+                    page.pack_install = None;
+                    match &mut page.add_pack {
+                        Some(add) if matches!(add.stage, AddStage::Installing(_)) => {
+                            // An expired token needs a fresh inspection.
+                            add.stage = AddStage::Editing;
+                            add.error = Some(error);
+                        }
+                        _ => crate::toast::error(
+                            cx,
+                            format!("Couldn't install {}. {error}", inspection.name),
+                        ),
                     }
                 }
             },
         );
-        if let Some(add) = &mut self.add_pack {
-            add.task = task;
-        }
         cx.notify();
     }
 
@@ -212,6 +228,7 @@ impl SkillsPage {
             return;
         }
         let key = name.clone();
+        let seq = self.next_library_seq();
         let task = self.call(
             method,
             params,
@@ -238,10 +255,14 @@ impl SkillsPage {
                             }
                             _ => {}
                         }
-                        page.set_library(library, cx);
+                        page.accept_library(seq, library, cx);
                     }
                     Err(error) => crate::toast::error(cx, error),
                 }
+                // Settle on the engine's state after any mutation: a list
+                // served while it ran may predate it, and a failed toggle
+                // must not keep its optimistic value.
+                page.load_library(cx);
             },
         );
         if let Some(task) = task {
@@ -262,14 +283,15 @@ impl SkillsPage {
         });
         if stale && !self.checked_packs {
             self.checked_packs = true;
+            let seq = self.next_library_seq();
             let check = self.call(
                 methods::CHECK_SKILL_PACK_UPDATES,
                 serde_json::json!({}),
                 cx,
-                |page, result: Result<Library, String>, cx| {
+                move |page, result: Result<Library, String>, cx| {
                     // Quiet: a failed background check shows on its pack.
                     if let Ok(library) = result {
-                        page.set_library(library, cx);
+                        page.accept_library(seq, library, cx);
                     }
                 },
             );
@@ -668,11 +690,10 @@ impl SkillsPage {
             row.child(
                 super::row_icon_button(
                     format!("skills-pack-check-{name}"),
-                    "Check for updates",
+                    checked,
                     icons::REFRESH,
                     theme,
                 )
-                .tooltip(widgets::text_tooltip(checked))
                 .on_click(cx.listener(move |page, _, _, cx| {
                     cx.stop_propagation();
                     page.pack_action(

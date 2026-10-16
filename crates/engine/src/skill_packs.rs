@@ -274,15 +274,57 @@ fn parse_subpath(subpath: Option<&str>) -> Result<Option<String>, String> {
 
 // ---- git ----
 
+const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+
+/// The user's credential helpers, read once from their own git config, so
+/// private packs still authenticate while every other configured command
+/// (filters, fsmonitor, ssh wrappers) stays out of reach.
+async fn credential_helpers() -> &'static [String] {
+    static HELPERS: tokio::sync::OnceCell<Vec<String>> = tokio::sync::OnceCell::const_new();
+    HELPERS
+        .get_or_init(|| async {
+            let mut cmd = tokio::process::Command::new("git");
+            zeron_harness::compose_login_shell_path(&mut cmd);
+            // Outside any repository: only system and global config apply.
+            cmd.args(["config", "--get-all", "credential.helper"])
+                .current_dir(std::env::temp_dir())
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_CONFIG_PARAMETERS")
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(10), cmd.output()).await;
+            match output {
+                Ok(Ok(output)) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                _ => Vec::new(),
+            }
+        })
+        .await
+}
+
 async fn git(cwd: Option<&Path>, args: &[&str]) -> Result<String, String> {
     let mut cmd = tokio::process::Command::new("git");
     zeron_harness::compose_login_shell_path(&mut cmd);
-    // Nothing from the repository runs: no hooks, no submodules, and only
-    // network transports.
-    let null_hooks = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    // Nothing from the repository runs. Inherited git environment and the
+    // system and global config are dropped, so no configured filter, hook or
+    // helper can be switched on by the pack's `.gitattributes`; symlinks are
+    // checked out as plain files, so nothing in a pack can point outside it.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_") {
+            cmd.env_remove(key);
+        }
+    }
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", NULL_DEVICE);
     cmd.args([
         "-c",
-        &format!("core.hooksPath={null_hooks}"),
+        &format!("core.hooksPath={NULL_DEVICE}"),
+        "-c",
+        "core.symlinks=false",
         "-c",
         "submodule.recurse=false",
         "-c",
@@ -292,6 +334,9 @@ async fn git(cwd: Option<&Path>, args: &[&str]) -> Result<String, String> {
         "-c",
         "core.fsmonitor=false",
     ]);
+    for helper in credential_helpers().await {
+        cmd.arg("-c").arg(format!("credential.helper={helper}"));
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -360,23 +405,39 @@ async fn clone(url: &str, dest: &Path) -> Result<(), String> {
     .map_err(|error| format!("Couldn't clone {url}: {error}"))
 }
 
-/// Release tags, newest first: `v1.2.3`, `1.2`, never pre-releases.
+/// Release tags, newest first: `v1.2.3`, `1.2`, never pre-releases. Ordered
+/// by their numbers, so `2.0.0` outranks `v1.9.0` whatever the prefix.
 async fn release_tags(checkout: &Path) -> Result<Vec<String>, String> {
-    let tags = git(Some(checkout), &["tag", "--list", "--sort=-v:refname"]).await?;
-    Ok(tags
+    let tags = git(Some(checkout), &["tag", "--list"]).await?;
+    let mut releases: Vec<(Vec<u64>, String)> = tags
         .lines()
-        .filter(|tag| is_release_tag(tag))
-        .map(str::to_owned)
-        .collect())
+        .filter_map(|tag| release_key(tag).map(|key| (key, tag.to_owned())))
+        .collect();
+    releases.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    Ok(releases.into_iter().map(|(_, tag)| tag).collect())
+}
+
+/// A release tag's numbers, zero-padded for comparison: `v1.2` → `[1, 2, 0, 0]`.
+fn release_key(tag: &str) -> Option<Vec<u64>> {
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    let parts: Vec<&str> = version.split('.').collect();
+    if version.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut key = parts
+        .into_iter()
+        .map(|part| {
+            (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| part.parse::<u64>().ok())
+                .flatten()
+        })
+        .collect::<Option<Vec<u64>>>()?;
+    key.resize(4, 0);
+    Some(key)
 }
 
 fn is_release_tag(tag: &str) -> bool {
-    let version = tag.strip_prefix('v').unwrap_or(tag);
-    !version.is_empty()
-        && version.split('.').count() <= 4
-        && version
-            .split('.')
-            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    release_key(tag).is_some()
 }
 
 async fn default_branch(checkout: &Path) -> Result<String, String> {
@@ -431,6 +492,15 @@ fn holds_skills(dir: &Path) -> bool {
     })
 }
 
+/// `path` resolves inside `checkout` (both canonicalized; `/tmp` and
+/// `/private/tmp` are one place on macOS).
+fn within(checkout: &Path, path: &Path) -> bool {
+    std::fs::canonicalize(path)
+        .ok()
+        .zip(std::fs::canonicalize(checkout).ok())
+        .is_some_and(|(path, checkout)| path.starts_with(checkout))
+}
+
 fn relative(checkout: &Path, path: &Path) -> String {
     let relative = path.strip_prefix(checkout).unwrap_or(path);
     let text = relative.to_string_lossy().replace('\\', "/");
@@ -444,7 +514,7 @@ fn detect(checkout: &Path, base: &Path) -> Layout {
     let mut layout = Layout::default();
     let add_plugin = |layout: &mut Layout, plugin: &Path| {
         let skills = plugin.join("skills");
-        if holds_skills(&skills) {
+        if within(checkout, &skills) && holds_skills(&skills) {
             layout.skills_roots.push(relative(checkout, &skills));
             if plugin.join(".claude-plugin/plugin.json").is_file() {
                 layout.plugin_dirs.push(relative(checkout, plugin));
@@ -463,8 +533,9 @@ fn detect(checkout: &Path, base: &Path) -> Layout {
             let Some(source) = plugin.get("source").and_then(|source| source.as_str()) else {
                 continue;
             };
-            let source = source.trim_start_matches("./");
-            if parse_subpath(Some(source)).ok().flatten().is_some() {
+            // Join the validated path, never the raw one: `/elsewhere`
+            // validates as `elsewhere` but would join as absolute.
+            if let Ok(Some(source)) = parse_subpath(Some(source.trim_start_matches("./"))) {
                 add_plugin(&mut layout, &base.join(source));
             }
         }
@@ -478,7 +549,10 @@ fn detect(checkout: &Path, base: &Path) -> Layout {
             add_plugin(&mut layout, &plugin);
         }
     }
-    if layout.skills_roots.is_empty() && holds_skills(&base.join("skills")) {
+    if layout.skills_roots.is_empty()
+        && within(checkout, &base.join("skills"))
+        && holds_skills(&base.join("skills"))
+    {
         add_plugin(&mut layout, base);
         if layout.skills_roots.is_empty() {
             layout
@@ -486,7 +560,7 @@ fn detect(checkout: &Path, base: &Path) -> Layout {
                 .push(relative(checkout, &base.join("skills")));
         }
     }
-    if layout.skills_roots.is_empty() && holds_skills(base) {
+    if layout.skills_roots.is_empty() && within(checkout, base) && holds_skills(base) {
         layout.skills_roots.push(relative(checkout, base));
     }
     layout
@@ -497,7 +571,11 @@ fn detect(checkout: &Path, base: &Path) -> Layout {
 fn pack_skills(checkout: &Path, layout: &Layout) -> Vec<(String, PathBuf)> {
     let mut skills = BTreeMap::new();
     for root in &layout.skills_roots {
-        let Ok(entries) = std::fs::read_dir(checkout.join(root)) else {
+        let root = checkout.join(root);
+        if !within(checkout, &root) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&root) else {
             continue;
         };
         let mut folders: Vec<_> = entries
@@ -514,8 +592,15 @@ fn pack_skills(checkout: &Path, layout: &Layout) -> Vec<(String, PathBuf)> {
                 && name
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+            // A real file inside the checkout: a manifest that is a link
+            // could show text from anywhere as the skill's instructions.
+            let manifest = folder.join(SKILL_FILE);
+            let contained = std::fs::symlink_metadata(&manifest)
+                .is_ok_and(|meta| meta.file_type().is_file())
+                && within(checkout, &folder);
             if linkable
-                && zeron_harness::read_skill_manifest(&folder.join(SKILL_FILE)).is_some()
+                && contained
+                && zeron_harness::read_skill_manifest(&manifest).is_some()
                 && skills.len() < MAX_PACK_SKILLS
             {
                 skills.entry(name.to_owned()).or_insert(folder);
@@ -679,9 +764,16 @@ fn unlink(link: &Path) {
     }
 }
 
+/// A link change `relink` made, kept so a failure can undo it.
+enum LinkChange {
+    Created(PathBuf),
+    Removed { link: PathBuf, target: PathBuf },
+}
+
 /// Link `skills` into the library, replacing only this pack's own links.
 /// Returns what was linked and what was skipped for a taken name; links this
-/// pack made for skills no longer listed are removed.
+/// pack made for skills no longer listed are removed. All or nothing: on an
+/// error every change made so far is undone.
 fn relink(
     paths: &Paths,
     checkout: &Path,
@@ -690,11 +782,41 @@ fn relink(
 ) -> Result<(Vec<String>, Vec<String>), String> {
     std::fs::create_dir_all(&paths.skills)
         .map_err(|error| format!("Couldn't create {}: {error}", paths.skills.display()))?;
+    let mut changes = Vec::new();
+    let result = relink_with(paths, checkout, previous, skills, &mut changes);
+    if result.is_err() {
+        for change in changes.into_iter().rev() {
+            match change {
+                LinkChange::Created(link) => unlink(&link),
+                LinkChange::Removed { link, target } => {
+                    let _ = make_link(&target, &link);
+                }
+            }
+        }
+    }
+    result
+}
+
+fn relink_with(
+    paths: &Paths,
+    checkout: &Path,
+    previous: &[String],
+    skills: &[(String, PathBuf)],
+    changes: &mut Vec<LinkChange>,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let remove = |link: PathBuf, changes: &mut Vec<LinkChange>| -> Result<(), String> {
+        let target = std::fs::read_link(&link).map_err(|error| error.to_string())?;
+        std::fs::remove_file(&link)
+            .or_else(|_| std::fs::remove_dir(&link))
+            .map_err(|error| format!("Couldn't unlink {}: {error}", link.display()))?;
+        changes.push(LinkChange::Removed { link, target });
+        Ok(())
+    };
     let current: HashSet<&str> = skills.iter().map(|(name, _)| name.as_str()).collect();
     for name in previous {
         let link = paths.skills.join(name);
         if !current.contains(name.as_str()) && links_into(&link, checkout) {
-            unlink(&link);
+            remove(link, changes)?;
         }
     }
     let mut linked = Vec::new();
@@ -710,9 +832,10 @@ fn relink(
                 linked.push(name.clone());
                 continue;
             }
-            unlink(&link);
+            remove(link.clone(), changes)?;
         }
         make_link(folder, &link).map_err(|error| format!("Couldn't link {name}: {error}"))?;
+        changes.push(LinkChange::Created(link));
         linked.push(name.clone());
     }
     Ok((linked, skipped))
@@ -865,9 +988,7 @@ async fn install_at(paths: &Paths, token: &str, auto_update: bool) -> Result<Ski
     let (linked, skipped) = match relink(paths, &checkout, &[], &skills) {
         Ok(result) => result,
         Err(error) => {
-            // Leave nothing half-installed behind.
-            let names: Vec<String> = skills.iter().map(|(name, _)| name.clone()).collect();
-            let _ = relink(paths, &checkout, &names, &[]);
+            // `relink` undid its links; drop the checkout too.
             let _ = std::fs::remove_dir_all(&checkout);
             return Err(error);
         }
@@ -895,7 +1016,12 @@ async fn install_at(paths: &Paths, token: &str, auto_update: bool) -> Result<Ski
         directory: checkout.to_string_lossy().into_owned(),
     };
     packs.push(pack.clone());
-    save(paths, &packs)?;
+    if let Err(error) = save(paths, &packs) {
+        // Unrecorded, the pack could be neither managed nor reinstalled.
+        let _ = relink(paths, &checkout, &pack.skills, &[]);
+        let _ = std::fs::remove_dir_all(&checkout);
+        return Err(error);
+    }
     Ok(pack)
 }
 
@@ -913,7 +1039,10 @@ async fn check(paths: &Paths, pack: &mut SkillPack) -> Result<(), String> {
     pack.checked_at = Some(Utc::now());
     pack.update = match pack.channel {
         Channel::Tags => match release_tags(&checkout).await?.into_iter().next() {
-            Some(tag) if tag != pack.reference => {
+            Some(tag)
+                if tag != pack.reference
+                    && release_key(&tag) > release_key(&pack.reference) =>
+            {
                 let commit = commit_of(&checkout, &tag).await?;
                 let version = version_at(&checkout, &tag, pack)
                     .await
@@ -974,7 +1103,17 @@ async fn apply(paths: &Paths, pack: &mut SkillPack) -> Result<(), String> {
         .map_or(checkout.clone(), |sub| checkout.join(sub));
     let layout = detect(&checkout, &base);
     let skills = pack_skills(&checkout, &layout);
-    let (linked, skipped) = relink(paths, &checkout, &pack.skills, &skills)?;
+    // `relink` is all or nothing; put the old release back with it, so the
+    // record, the checkout and the links keep agreeing.
+    let (linked, skipped) = match relink(paths, &checkout, &pack.skills, &skills) {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(match checkout_detached(&checkout, &pack.commit).await {
+                Ok(()) => error,
+                Err(restore) => format!("{error} Restoring the previous release failed too: {restore}"),
+            });
+        }
+    };
     pack.version = declared_version(&checkout, &base, &layout).or(update.version);
     pack.reference = update.reference;
     pack.commit = update.commit;
@@ -1228,6 +1367,69 @@ mod tests {
         assert!(!is_release_tag("v1.0.0-rc.1"));
         assert!(!is_release_tag("nightly"));
         assert!(!is_release_tag("v"));
+    }
+
+    #[test]
+    fn releases_order_by_number_whatever_the_prefix() {
+        assert!(release_key("2.0.0") > release_key("v1.9.0"));
+        assert!(release_key("v1.10") > release_key("1.9.9"));
+        assert_eq!(release_key("v1.2"), release_key("1.2.0"));
+        assert_eq!(release_key("99999999999999999999999"), None);
+    }
+
+    #[test]
+    fn layout_ignores_marketplace_paths_outside_the_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        skill(&outside.join("skills"), "leak");
+        std::fs::create_dir_all(repo.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            repo.join(".claude-plugin/marketplace.json"),
+            serde_json::json!({ "plugins": [{ "source": outside.to_string_lossy() }] }).to_string(),
+        )
+        .unwrap();
+        assert!(detect(&repo, &repo).skills_roots.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_manifests_and_folders_are_not_pack_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        skill(&repo.join("skills"), "real");
+        std::fs::create_dir_all(repo.join("skills/leak")).unwrap();
+        let secret = temp.path().join("secret.md");
+        std::fs::write(&secret, "---\nname: leak\n---\nnot yours\n").unwrap();
+        std::os::unix::fs::symlink(&secret, repo.join("skills/leak/SKILL.md")).unwrap();
+        skill(temp.path(), "elsewhere");
+        std::os::unix::fs::symlink(temp.path().join("elsewhere"), repo.join("skills/elsewhere"))
+            .unwrap();
+        let layout = detect(&repo, &repo);
+        let names: Vec<_> = pack_skills(&repo, &layout).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["real"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_relink_changes_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths(temp.path());
+        let checkout = paths.checkout("pack");
+        skill(&checkout.join("skills"), "old");
+        skill(&checkout.join("skills"), "new");
+        let layout = detect(&checkout, &checkout);
+        let all = pack_skills(&checkout, &layout);
+        let old: Vec<_> = all.iter().filter(|(n, _)| n == "old").cloned().collect();
+        let new: Vec<_> = all.iter().filter(|(n, _)| n == "new").cloned().collect();
+        relink(&paths, &checkout, &[], &old).unwrap();
+        // A read-only library: removing `old` fails before `new` is linked.
+        std::fs::set_permissions(&paths.skills, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(relink(&paths, &checkout, &["old".into()], &new).is_err());
+        std::fs::set_permissions(&paths.skills, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(links_into(&paths.skills.join("old"), &checkout));
+        assert!(std::fs::symlink_metadata(paths.skills.join("new")).is_err());
     }
 
     #[test]
