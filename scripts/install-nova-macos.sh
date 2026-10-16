@@ -23,6 +23,7 @@ DEST="/Applications/Zeron Nova.app"
 BACKUP="/tmp/Zeron Nova.old.app"
 LOG="/tmp/zeron-nova-install.log"
 BUNDLE_ID="sh.zeron.app.nova"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 # The GUI runs the bare binary; `zeron mcp` and other subcommands launched
 # from the bundle are left alone so attached agents keep their tools.
 GUI_PATTERN="^$DEST/Contents/MacOS/zeron\$"
@@ -142,6 +143,20 @@ if [[ -d "$DEST" ]]; then mv "$DEST" "$BACKUP"; fi
 ditto "$SRC" "$DEST"
 codesign --verify "$DEST"
 echo "installed $(defaults read "$DEST/Contents/Info" CFBundleShortVersionString) ($(stat -f '%Sm' "$DEST/Contents/MacOS/zeron")) to $DEST (previous: $BACKUP)"
+
+# Leave $DEST the only bundle LaunchServices knows for $BUNDLE_ID. Banners
+# take their icon from whichever registered copy the id resolves to, and a
+# stale build or backup (e.g. one from before the Nova icon) wins often
+# enough to put the old logo on notifications. A path can hold several
+# records, so each one is unregistered separately.
+"$LSREGISTER" -dump 2>/dev/null \
+  | awk -v id="$BUNDLE_ID" '/^path:/ { sub(/^path: */, ""); sub(/ \(0x[0-9a-f]+\)$/, ""); path = $0 }
+                            /^identifier:/ && $2 == id { print path }' \
+  | while IFS= read -r stale; do
+      [[ "$stale" == "$DEST" ]] && continue
+      "$LSREGISTER" -u "$stale" 2>/dev/null && echo "unregistered stale copy: $stale"
+    done || true
+"$LSREGISTER" -f "$DEST"
 
 # -n: a `zeron mcp` child of this bundle makes LaunchServices treat the app
 # as already running, so a plain `open` would do nothing.
