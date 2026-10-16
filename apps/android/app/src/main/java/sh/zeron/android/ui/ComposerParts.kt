@@ -312,14 +312,17 @@ class ModelSection(
     val onPick: (ModelInfo) -> Unit,
 )
 
-/** Models grouped by vendor in picker order; null when they're all one vendor's, so short lists stay flat. */
-private fun vendorGroups(models: List<ModelInfo>, harness: String?): List<Pair<ModelVendor, List<ModelInfo>>>? {
+/** Models grouped by vendor in picker order. */
+private fun vendorGroups(models: List<ModelInfo>, harness: String?): List<Pair<ModelVendor, List<ModelInfo>>> {
     val groups = models.groupBy { ModelVendor.of(it.id, harness) }
-    if (groups.size < 2) return null
     return ModelVendor.entries.mapNotNull { v -> groups[v]?.let { v to it } }
 }
 
-/** A model picker; a harness serving several vendors' models lists the vendors first, then that vendor's models. */
+/**
+ * A model picker that keeps the list short: with more than one vendor in it
+ * (several harnesses, or a gateway serving many vendors) it lists the
+ * vendors first, then that vendor's models. One vendor's models stay flat.
+ */
 @Composable
 fun ModelMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<ModelSection>) {
     // Keyed by harness, not the section itself: a refreshed list or draft
@@ -341,13 +344,18 @@ fun ModelMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<ModelSect
                 MenuChoice(m.label, section.selected(m), m.description?.takeIf { providers > 1 }, { VendorMark(vendor, section.harness, 18.dp) }) { section.onPick(m) }
             }),
         )
-    } ?: sections.map { section ->
-        val groups = vendorGroups(section.models, section.harness)
+    } ?: run {
+        val grouped = sections.map { it to vendorGroups(it.models, it.harness) }
+        val categories = grouped.sumOf { (_, groups) -> groups.size } > 1
+        grouped.map { (section, groups) -> section to groups.takeIf { categories } }
+    }.map { (section, groups) ->
         MenuSection(
             section.title,
             groups?.map { (vendor, list) ->
                 val count = if (list.size == 1) "1 model" else "${list.size} models"
-                MenuChoice(vendor.title, list.any(section.selected), count, { VendorMark(vendor, section.harness, 18.dp) }, keepsOpen = true, drills = true) {
+                // The chosen model shows on its vendor's row, since the check is behind it.
+                val detail = list.firstOrNull(section.selected)?.let { "${it.label} · $count" } ?: count
+                MenuChoice(vendor.title, list.any(section.selected), detail, { VendorMark(vendor, section.harness, 18.dp) }, keepsOpen = true, drills = true) {
                     open = section.harness to vendor
                 }
             } ?: section.models.map { m ->
