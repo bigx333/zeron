@@ -2240,10 +2240,10 @@ const MARKDOWN_IMAGE_HEIGHT: f32 = 300.0;
 
 /// Markdown images the transcript keeps drawn even after the shared
 /// attachment cache evicts them, so screenshots on screen can't evict and
-/// reload each other forever: everything painted within the window stays,
-/// plus this many older ones.
-const MARKDOWN_IMAGES_KEPT: usize = 6;
-const MARKDOWN_IMAGE_PAINT_WINDOW: Duration = Duration::from_secs(3);
+/// reload each other: everything painted in the last two passes stays (a
+/// pass may have laid out only some rows when it asks), plus this many
+/// older ones for scrolling back.
+const MARKDOWN_IMAGES_KEPT: usize = 2;
 
 /// Host images in settled replies: the chat's host device, the images rows
 /// asked for while painting, and the ones drawn lately.
@@ -2256,53 +2256,65 @@ struct MarkdownImages {
     requests: Vec<(String, &'static str)>,
     /// Most recently painted first.
     recent: VecDeque<KeptImage>,
+    /// The current paint pass.
+    frame: u64,
 }
 
 struct KeptImage {
     device: String,
     path: String,
     image: crate::attachments::CachedAttachmentImage,
-    painted: Instant,
+    painted: u64,
 }
 
 impl MarkdownImages {
+    /// Start a paint pass: drop images neither of the last two passes
+    /// painted, beyond the few kept for scrolling back.
+    fn begin_frame(&mut self) {
+        self.frame += 1;
+        let frame = self.frame;
+        let mut stale = 0;
+        self.recent.retain(|kept| {
+            if frame - kept.painted <= 2 {
+                return true;
+            }
+            stale += 1;
+            stale <= MARKDOWN_IMAGES_KEPT
+        });
+    }
+
+    /// Point at another chat's host: its images can't be the same files.
+    fn set_device(&mut self, device: Option<String>) {
+        if self.device != device {
+            self.recent.clear();
+            self.requests.clear();
+            self.device = device;
+        }
+    }
+
     fn recent(
         &mut self,
         device: &str,
         path: &str,
-        now: Instant,
     ) -> Option<crate::attachments::CachedAttachmentImage> {
         let ix = self
             .recent
             .iter()
             .position(|kept| kept.device == device && kept.path == path)?;
         let image = self.recent[ix].image.clone();
-        self.keep(device, path, image.clone(), now);
+        self.keep(device, path, image.clone());
         Some(image)
     }
 
-    fn keep(
-        &mut self,
-        device: &str,
-        path: &str,
-        image: crate::attachments::CachedAttachmentImage,
-        now: Instant,
-    ) {
+    fn keep(&mut self, device: &str, path: &str, image: crate::attachments::CachedAttachmentImage) {
         self.recent
             .retain(|kept| kept.device != device || kept.path != path);
         self.recent.push_front(KeptImage {
             device: device.to_owned(),
             path: path.to_owned(),
             image,
-            painted: now,
+            painted: self.frame,
         });
-        while self.recent.len() > MARKDOWN_IMAGES_KEPT
-            && self.recent.back().is_some_and(|kept| {
-                now.saturating_duration_since(kept.painted) > MARKDOWN_IMAGE_PAINT_WINDOW
-            })
-        {
-            self.recent.pop_back();
-        }
     }
 }
 
@@ -2356,12 +2368,10 @@ fn markdown_image_renderer(
         let snapshot = attachment_snapshot_for(&AttachmentKey::new(&device, &path, Some(mime)));
         let loaded = match &snapshot {
             AttachmentSnapshot::Loaded(loaded) => {
-                images
-                    .borrow_mut()
-                    .keep(&device, &path, loaded.clone(), Instant::now());
+                images.borrow_mut().keep(&device, &path, loaded.clone());
                 Some(loaded.clone())
             }
-            _ => images.borrow_mut().recent(&device, &path, Instant::now()),
+            _ => images.borrow_mut().recent(&device, &path),
         };
         let Some(loaded) = loaded else {
             let mut images = images.borrow_mut();
@@ -6706,7 +6716,7 @@ impl Transcript {
                     .map(|chat| chat.device_id.clone())
             })
             .flatten();
-        self.markdown_images.borrow_mut().device = host;
+        self.markdown_images.borrow_mut().set_device(host);
         let cache = self.diagrams.clone();
         let owner = cx.weak_entity();
         let images = self.markdown_images.clone();
@@ -10442,6 +10452,7 @@ impl Render for Transcript {
         // Release gpui-side decoded copies of any images the attachment LRU
         // evicted since the last frame (no-op when nothing was evicted).
         crate::attachments::flush_evicted(Some(window), cx);
+        self.markdown_images.borrow_mut().begin_frame();
         // Diagram requests are scoped to paint passes; rasters follow the
         // reading column and display density (a no-op while both hold).
         let released_diagrams = {
@@ -12331,29 +12342,39 @@ mod tests {
             image: Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, Vec::new())),
         };
         let mut images = MarkdownImages::default();
-        let t0 = Instant::now();
+        images.set_device(Some("mac".into()));
         for _ in 0..3 {
-            images.keep("mac", "/tmp/a.png", image("a"), t0);
+            images.keep("mac", "/tmp/a.png", image("a"));
         }
         assert_eq!(images.recent.len(), 1, "repaints don't duplicate");
-        // Everything painted within the window stays, however many…
-        for i in 0..MARKDOWN_IMAGES_KEPT + 2 {
-            images.keep("mac", &format!("/tmp/{i}.png"), image("n"), t0);
+        // Everything the last two passes painted stays, however many…
+        for i in 0..8 {
+            images.keep("mac", &format!("/tmp/{i}.png"), image("n"));
         }
-        assert_eq!(images.recent.len(), MARKDOWN_IMAGES_KEPT + 3);
-        // …and once they go stale, only the latest few are kept.
-        let later = t0 + MARKDOWN_IMAGE_PAINT_WINDOW * 2;
-        images.keep("mac", "/tmp/new.png", image("new"), later);
-        assert_eq!(images.recent.len(), MARKDOWN_IMAGES_KEPT);
+        images.begin_frame();
+        images.begin_frame();
+        assert_eq!(images.recent.len(), 9);
+        // …once passes repaint only some, those stay, plus a few older ones.
+        assert!(images.recent("mac", "/tmp/0.png").is_some());
+        images.begin_frame();
+        images.begin_frame();
+        assert_eq!(images.recent.len(), 1 + MARKDOWN_IMAGES_KEPT);
+        assert!(images.recent("mac", "/tmp/0.png").is_some());
         assert!(
-            images.recent("mac", "/tmp/a.png", later).is_none(),
-            "oldest evicted"
+            images.recent("mac", "/tmp/7.png").is_some(),
+            "newest stale kept"
         );
         assert!(
-            images.recent("phone", "/tmp/7.png", later).is_none(),
+            images.recent("phone", "/tmp/7.png").is_none(),
             "keyed by device"
         );
-        assert!(images.recent("mac", "/tmp/7.png", later).is_some());
+        assert!(
+            images.recent("mac", "/tmp/a.png").is_none(),
+            "oldest dropped"
+        );
+        // Another chat's host starts empty.
+        images.set_device(Some("linux".into()));
+        assert!(images.recent.is_empty());
     }
 
     #[test]
