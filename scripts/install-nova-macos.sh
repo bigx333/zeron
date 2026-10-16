@@ -2,13 +2,17 @@
 # Reinstall Zeron Nova on this Mac: quit every running instance, replace
 # /Applications/Zeron Nova.app with the packaged build, and reopen it.
 #
-# Usage: scripts/install-nova-macos.sh [--build]
-#   --build  run scripts/package-macos.sh first (otherwise installs the
-#            existing target/package/Zeron Nova.app)
+# Usage: scripts/install-nova-macos.sh [--build] [--dry-run]
+#   --build    run scripts/package-macos.sh first (otherwise installs the
+#              existing target/package/Zeron Nova.app)
+#   --dry-run  go through detection and the detached hand-off, log what
+#              would happen, and change nothing
 # The previous install is kept at /tmp/Zeron Nova.old.app.
 #
-# Safe to run from a chat inside Zeron Nova: the swap detaches from the app
-# it is about to quit and logs to /tmp/zeron-nova-install.log.
+# The quit-swap-reopen always runs in a detached job (its own session,
+# reparented to launchd) that writes /tmp/zeron-nova-install.log, so it
+# survives Nova quitting even when this script runs from a chat inside
+# Nova. From a terminal, the script follows that log until the job ends.
 
 set -euo pipefail
 
@@ -36,21 +40,59 @@ is_ancestor() {
 }
 
 if [[ "${ZERON_NOVA_INSTALL_DETACHED:-}" != 1 ]]; then
-  if [[ "${1:-}" == "--build" ]]; then
-    "$ROOT/scripts/package-macos.sh"
-  fi
+  build=0 dry=0
+  for arg in "$@"; do
+    case "$arg" in
+      --build) build=1 ;;
+      --dry-run) dry=1 ;;
+      *) echo "unknown argument: $arg" >&2; exit 2 ;;
+    esac
+  done
+  [[ $build == 1 ]] && "$ROOT/scripts/package-macos.sh"
   [[ -d "$SRC" ]] || { echo "no build at $SRC; run with --build" >&2; exit 1; }
   codesign --verify "$SRC"
 
-  for pid in $(gui_pids); do
-    if is_ancestor "$pid"; then
-      # Quitting Nova takes this shell down with it; finish in a new session.
-      ZERON_NOVA_INSTALL_DETACHED=1 nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' \
-        "${BASH_SOURCE[0]}" >"$LOG" 2>&1 </dev/null &
-      echo "running inside Zeron Nova; it will quit, update and reopen (log: $LOG)"
-      exit 0
-    fi
-  done
+  inside=0
+  for pid in $(gui_pids); do is_ancestor "$pid" && inside=1; done
+
+  # Hand the swap to a job in its own session, reparented to launchd. The
+  # perl parent returns only once the child has called setsid and exec'd
+  # (the pipe closes on exec), so whatever tears down this script's process
+  # group afterwards (a chat's command runner, Nova quitting) can't reach it.
+  job="$(ZERON_NOVA_INSTALL_DETACHED=1 ZERON_NOVA_INSTALL_DRY="$dry" perl -MPOSIX -e '
+    pipe(my $r, my $w) or die "pipe: $!";
+    my $pid = fork // die "fork: $!";
+    if ($pid) { close $w; <$r>; print "$pid\n"; exit 0 }
+    close $r;
+    POSIX::setsid() or die "setsid: $!";
+    open STDIN, "<", "/dev/null";
+    open STDOUT, ">", "/dev/null";
+    open STDERR, ">", "/dev/null";
+    exec @ARGV or die "exec: $!";
+  ' "${BASH_SOURCE[0]}")"
+
+  if [[ $inside == 1 ]]; then
+    echo "running inside Zeron Nova; job $job will quit, update and reopen it (log: $LOG)"
+    exit 0
+  fi
+  # From a terminal: follow the job's log until it finishes.
+  while kill -0 "$job" 2>/dev/null; do sleep 0.25; done
+  cat "$LOG"
+  tail -n 1 "$LOG" | grep -q '^done:' && exit 0 || exit 1
+fi
+
+# ── The detached job ────────────────────────────────────────────────────
+exec >"$LOG" 2>&1
+echo "$(date '+%F %T') job $$ started: $SRC -> $DEST"
+trap 'echo "failed: line $LINENO (previous build: $BACKUP)"' ERR
+
+if [[ "${ZERON_NOVA_INSTALL_DRY:-0}" == 1 ]]; then
+  echo "dry run: Nova running as pid(s): $(gui_pids | tr '\n' ' ')"
+  # Outlive the caller and anything that cleans up after it.
+  sleep 3
+  echo "dry run: job $$ still alive in session $(ps -o sess= -p $$ | tr -d ' '), parent $(ps -o ppid= -p $$ | tr -d ' ')"
+  echo "done: dry run, nothing changed"
+  exit 0
 fi
 
 if [[ -n "$(gui_pids)" ]]; then
@@ -62,28 +104,30 @@ if [[ -n "$(gui_pids)" ]]; then
     sleep 0.25
   done
   if [[ -n "$(gui_pids)" ]]; then
-    echo "Zeron Nova did not quit in 10s; terminating" >&2
+    echo "Zeron Nova did not quit in 10s; terminating"
     pkill -a -TERM -f "$GUI_PATTERN" || true
     sleep 2
     pkill -a -KILL -f "$GUI_PATTERN" || true
+    sleep 0.5
   fi
+  [[ -z "$(gui_pids)" ]] || { echo "failed: Zeron Nova is still running"; exit 1; }
 fi
 
 rm -rf "$BACKUP"
-[[ -d "$DEST" ]] && mv "$DEST" "$BACKUP"
+if [[ -d "$DEST" ]]; then mv "$DEST" "$BACKUP"; fi
 ditto "$SRC" "$DEST"
 codesign --verify "$DEST"
-echo "installed $(defaults read "$DEST/Contents/Info" CFBundleShortVersionString) to $DEST (previous: $BACKUP)"
+echo "installed $(defaults read "$DEST/Contents/Info" CFBundleShortVersionString) ($(stat -f '%Sm' "$DEST/Contents/MacOS/zeron")) to $DEST (previous: $BACKUP)"
 
 # -n: a `zeron mcp` child of this bundle makes LaunchServices treat the app
 # as already running, so a plain `open` would do nothing.
 open -n "$DEST"
 for _ in $(seq 1 40); do
   if [[ -n "$(gui_pids)" ]]; then
-    echo "Zeron Nova is running (pid $(gui_pids | tr '\n' ' '))"
+    echo "done: Zeron Nova is running (pid $(gui_pids | tr '\n' ' '))"
     exit 0
   fi
   sleep 0.25
 done
-echo "Zeron Nova did not start; check Console for crashes (previous build: $BACKUP)" >&2
+echo "failed: Zeron Nova did not start; check Console for crashes (previous build: $BACKUP)"
 exit 1
