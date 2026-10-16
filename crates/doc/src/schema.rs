@@ -11,7 +11,7 @@
 //!   id, text, attachments?, issuedBy, issuedAt, editedAt? }        (any device writes)
 //!
 //! Part maps: { id, kind: "text"|"reasoning"|"tool"|"input"|"error"|"image", text?: LoroText,
-//! reasoning?: LoroText, call?: json, isError?, questions?: json, resolved?, message? }.
+//! reasoning?: LoroText, call?: json, isError?, questions?: json, resolved?, nonBlocking?, message? }.
 //! Text bodies are **LoroText** so streaming appends RLE-merge (1.03x oplog overhead vs
 //! 125x for whole-value rewrites).
 
@@ -90,6 +90,8 @@ struct DocPartJson {
     questions: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    non_blocking: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
     /// Fork seam (`kind: "fork"`, additive): the chat the history above was
@@ -208,11 +210,13 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             request_id,
             questions,
             resolved,
+            non_blocking,
         } => DocPartJson {
             id: request_id.clone(),
             kind: "input".into(),
             questions: Some(serde_json::to_value(questions)?),
             resolved: Some(*resolved),
+            non_blocking: non_blocking.then_some(true),
             ..Default::default()
         },
         MessagePart::Error { id, message } => DocPartJson {
@@ -284,6 +288,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 .and_then(|q| serde_json::from_value(q).ok())
                 .unwrap_or_default(),
             resolved: p.resolved.unwrap_or(false),
+            non_blocking: p.non_blocking.unwrap_or(false),
         },
         "error" => MessagePart::Error {
             id: p.id,
@@ -881,6 +886,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(resolved) = doc_part.resolved {
         map.insert("resolved", resolved)?;
     }
+    if let Some(non_blocking) = doc_part.non_blocking {
+        map.insert("nonBlocking", non_blocking)?;
+    }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
     }
@@ -1339,6 +1347,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(resolved) = doc_part.resolved {
         map.insert("resolved", resolved)?;
     }
+    if let Some(non_blocking) = doc_part.non_blocking {
+        map.insert("nonBlocking", non_blocking)?;
+    }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
     }
@@ -1795,6 +1806,61 @@ mod tests {
     }
 
     #[test]
+    fn async_input_survives_doc_snapshot_and_can_be_resolved() {
+        let doc = SessionDoc::init("async-input").unwrap();
+        let part = MessagePart::Input {
+            id: "in-async-1".into(),
+            request_id: "async-1".into(),
+            questions: vec![],
+            resolved: false,
+            non_blocking: true,
+        };
+        doc.push_message(&SessionMessageEntry {
+            id: "m1".into(),
+            role: MessageRole::Assistant,
+            parts: vec![part],
+            created_at: 1,
+            device_id: "dev-a".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        let imported = LoroDoc::new();
+        imported.import(&doc.export_snapshot().unwrap()).unwrap();
+        let restored = SessionDoc::from_doc(imported);
+        assert!(matches!(
+            &restored.read_entries().unwrap()[0].parts[0],
+            MessagePart::Input {
+                non_blocking: true,
+                resolved: false,
+                ..
+            }
+        ));
+        assert!(restored.resolve_input("async-1").unwrap());
+        assert!(matches!(
+            &restored.read_entries().unwrap()[0].parts[0],
+            MessagePart::Input {
+                non_blocking: true,
+                resolved: true,
+                ..
+            }
+        ));
+        // Missing mode on historical parts keeps their blocking semantics.
+        let legacy: DocPartJson = serde_json::from_value(serde_json::json!({
+            "id":"legacy", "kind":"input", "questions":[], "resolved":false
+        }))
+        .unwrap();
+        assert!(matches!(
+            from_doc_part(legacy),
+            MessagePart::Input {
+                non_blocking: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn resolve_input_stamps_the_part_in_place() {
         let doc = SessionDoc::init("chat-1").unwrap();
         doc.push_message(&SessionMessageEntry {
@@ -1805,6 +1871,7 @@ mod tests {
                 request_id: "r1".into(),
                 questions: vec![],
                 resolved: false,
+                non_blocking: false,
             }],
             created_at: 1,
             device_id: "dev-a".into(),

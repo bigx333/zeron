@@ -597,6 +597,47 @@ async fn rejected_steer_falls_back_to_a_follow_up_turn() {
 }
 
 #[tokio::test]
+async fn async_input_questions_do_not_block_the_agent_or_use_the_sync_bridge() {
+    let (mut controls, _steer, _token) = controls("Yes");
+    controls.request_input = Box::new(|_| panic!("async questions have no blocking resolver"));
+    let events = run_to_end(&harness(), request("scenario:async-input"), controls).await;
+    let inputs: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::AsyncInputRequested {
+                request_id,
+                questions,
+            } => Some((request_id, questions)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(inputs.len(), 2, "{events:?}");
+    let (id, questions) = inputs[0];
+    assert_eq!(id, "codex-async-ask-1");
+    assert_eq!(questions.len(), 2);
+    assert_eq!(questions[0].id, "ask-1-0");
+    assert_eq!(questions[0].question, "Which improvement?");
+    assert_eq!(questions[0].options, ["Fix a bug", "Improve usability"]);
+    assert_eq!(questions[1].question, "Any constraints?");
+    assert!(
+        questions[1].options.is_empty(),
+        "free-text questions need no options"
+    );
+    assert_eq!(inputs[1].0, "codex-async-ask-2");
+    assert!(inputs[1].1[0].options.is_empty());
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::TextDelta { text } if text == "Independent work continues."
+    )));
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn approvals_round_trip_as_input_requests() {
     // Approvals must reach the ENGINE's input bridge (`request_input`) — and
     // the harness must NOT emit its own `InputRequested`/`InputResolved`

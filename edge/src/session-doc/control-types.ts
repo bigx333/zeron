@@ -87,11 +87,13 @@ export type MessagePart =
       readonly diff?: ToolPartDiff;
     }
   | {
-      /** An interactive question the agent asked. Unresolved ⇒ awaiting the user. */
+      /** An interactive question the agent asked. */
       readonly kind: "input";
       readonly requestId: string;
       readonly questions: ReadonlyArray<UserInputQuestion>;
       readonly resolved?: boolean;
+      /** The agent continues working; answers arrive as later user messages. */
+      readonly nonBlocking?: boolean;
     }
   | {
       /** The run ended abnormally (harness failure, stall, interrupt). */

@@ -282,6 +282,7 @@ mod tests {
                         request_id: "req-1".into(),
                         questions: vec![],
                         resolved: false,
+                        non_blocking: false,
                     },
                 ],
             ),

@@ -207,6 +207,9 @@ pub enum MessagePart {
         questions: Vec<UserInputQuestion>,
         #[serde(default)]
         resolved: bool,
+        /// Answer through a user message; keep open across turn boundaries.
+        #[serde(default)]
+        non_blocking: bool,
     },
     Error {
         id: String,
@@ -292,7 +295,8 @@ impl MessagePart {
 ///   (a tool call in between breaks the text block).
 /// - `ToolCall` appends, or refreshes in place when the id already exists (SDK retry idempotence).
 /// - `ToolResult` marks the matching tool part resolved / errored in place.
-/// - `InputRequested` appends an input part; `InputResolved` marks it resolved.
+/// - Input requests append a part; async requests set `non_blocking`.
+///   `InputResolved` marks either kind resolved.
 /// - `Error` and `Done{error}` become visible error parts.
 pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
     match event {
@@ -421,6 +425,10 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         AgentEvent::InputRequested {
             request_id,
             questions,
+        }
+        | AgentEvent::AsyncInputRequested {
+            request_id,
+            questions,
         } => {
             let id = format!("in-{request_id}");
             if !out.iter().any(|p| p.id() == id) {
@@ -429,6 +437,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     request_id: request_id.clone(),
                     questions: questions.clone(),
                     resolved: false,
+                    non_blocking: matches!(event, AgentEvent::AsyncInputRequested { .. }),
                 });
             }
         }

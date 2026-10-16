@@ -691,6 +691,7 @@ impl DemoHost {
                         request_id,
                         questions,
                         resolved: false,
+                        non_blocking: false,
                     });
                     sync(&parts, &mut written, &mut index);
                     awaiting = true;

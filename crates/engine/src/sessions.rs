@@ -2825,7 +2825,7 @@ async fn drive_run(
                         MessagePart::Tool { id, resolved: false, .. } => {
                             id != zeron_proto::LIVE_PLAN_TOOL_ID
                         }
-                        MessagePart::Input { resolved: false, .. } => true,
+                        MessagePart::Input { resolved: false, non_blocking: false, .. } => true,
                         _ => false,
                     }) =>
                 {
@@ -3065,7 +3065,7 @@ async fn drive_run(
         // push the quiesce watchdog's window out.
         inner.touch_session(&chat_id);
         last_stream_activity = tokio::time::Instant::now();
-        // The engine's input bridge is the sole authority on input requests:
+        // The engine's input bridge owns blocking input requests:
         // it mints the id and parks the resolver BEFORE emitting the event,
         // so a legitimate id is always pending here. A harness emitting its
         // own copy (a different id no resolver knows) would fold an
@@ -3086,6 +3086,13 @@ async fn drive_run(
                      the engine input bridge owns this lifecycle)"
                 );
                 continue;
+            }
+        }
+        if let AgentEvent::InputResolved { request_id } = &event {
+            // Async questions may belong to an earlier, finalized segment.
+            // Resolve that durable part as well as the live fold.
+            if let Err(err) = doc.resolve_input(request_id) {
+                tracing::warn!(%chat_id, %request_id, error = %err, "input resolve failed");
             }
         }
         // Capacity/occupancy can settle after Done; updating it must not reopen a turn.
@@ -3363,6 +3370,10 @@ async fn drive_run(
         if let AgentEvent::InputRequested {
             request_id,
             questions,
+        }
+        | AgentEvent::AsyncInputRequested {
+            request_id,
+            questions,
         } = &event
         {
             inner.notify_best_effort(
@@ -3386,7 +3397,7 @@ async fn drive_run(
         }
 
         if let AgentEvent::Done { status, .. } = &event {
-            // A question still pending at turn end can never be legitimately
+            // A blocking question pending at turn end cannot be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks
             // the session into Working with no turn behind it — stranded
@@ -3405,12 +3416,15 @@ async fn drive_run(
                 DoneStatus::Interrupted => MessageStatus::Aborted,
                 DoneStatus::Completed | DoneStatus::Errored => MessageStatus::Complete,
             };
-            // No dangling chips: a run that ends for ANY reason (completed,
-            // errored, interrupted) terminally resolves its input parts — an
-            // unresolved question must not outlive the run that asked it
-            // (its resolver died with the run; an answer could never land).
+            // Blocking questions lose their resolver at turn end. Async
+            // questions are answered through a later message and stay open.
             for part in folded.iter_mut() {
-                if let MessagePart::Input { resolved, .. } = part {
+                if let MessagePart::Input {
+                    resolved,
+                    non_blocking: false,
+                    ..
+                } = part
+                {
                     *resolved = true;
                 }
             }
