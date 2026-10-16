@@ -2239,12 +2239,14 @@ const MARKDOWN_IMAGE_WIDTH: f32 = 480.0;
 const MARKDOWN_IMAGE_HEIGHT: f32 = 300.0;
 
 /// Markdown images the transcript keeps drawn even after the shared
-/// attachment cache evicts them, so a few large screenshots on screen can't
-/// evict and reload each other forever.
+/// attachment cache evicts them, so screenshots on screen can't evict and
+/// reload each other forever: everything painted within the window stays,
+/// plus this many older ones.
 const MARKDOWN_IMAGES_KEPT: usize = 6;
+const MARKDOWN_IMAGE_PAINT_WINDOW: Duration = Duration::from_secs(3);
 
 /// Host images in settled replies: the chat's host device, the images rows
-/// asked for while painting, and the latest ones loaded.
+/// asked for while painting, and the ones drawn lately.
 #[derive(Default)]
 struct MarkdownImages {
     /// The chat's host only: a host path names a file on that machine, never
@@ -2252,7 +2254,15 @@ struct MarkdownImages {
     device: Option<String>,
     /// `(path, mime)` still to load.
     requests: Vec<(String, &'static str)>,
-    recent: VecDeque<(String, String, crate::attachments::CachedAttachmentImage)>,
+    /// Most recently painted first.
+    recent: VecDeque<KeptImage>,
+}
+
+struct KeptImage {
+    device: String,
+    path: String,
+    image: crate::attachments::CachedAttachmentImage,
+    painted: Instant,
 }
 
 impl MarkdownImages {
@@ -2260,22 +2270,39 @@ impl MarkdownImages {
         &mut self,
         device: &str,
         path: &str,
+        now: Instant,
     ) -> Option<crate::attachments::CachedAttachmentImage> {
         let ix = self
             .recent
             .iter()
-            .position(|(d, p, _)| d == device && p == path)?;
-        let entry = self.recent.remove(ix)?;
-        let image = entry.2.clone();
-        self.recent.push_front(entry);
+            .position(|kept| kept.device == device && kept.path == path)?;
+        let image = self.recent[ix].image.clone();
+        self.keep(device, path, image.clone(), now);
         Some(image)
     }
 
-    fn keep(&mut self, device: &str, path: &str, image: crate::attachments::CachedAttachmentImage) {
-        self.recent.retain(|(d, p, _)| d != device || p != path);
+    fn keep(
+        &mut self,
+        device: &str,
+        path: &str,
+        image: crate::attachments::CachedAttachmentImage,
+        now: Instant,
+    ) {
         self.recent
-            .push_front((device.to_owned(), path.to_owned(), image));
-        self.recent.truncate(MARKDOWN_IMAGES_KEPT);
+            .retain(|kept| kept.device != device || kept.path != path);
+        self.recent.push_front(KeptImage {
+            device: device.to_owned(),
+            path: path.to_owned(),
+            image,
+            painted: now,
+        });
+        while self.recent.len() > MARKDOWN_IMAGES_KEPT
+            && self.recent.back().is_some_and(|kept| {
+                now.saturating_duration_since(kept.painted) > MARKDOWN_IMAGE_PAINT_WINDOW
+            })
+        {
+            self.recent.pop_back();
+        }
     }
 }
 
@@ -2329,10 +2356,12 @@ fn markdown_image_renderer(
         let snapshot = attachment_snapshot_for(&AttachmentKey::new(&device, &path, Some(mime)));
         let loaded = match &snapshot {
             AttachmentSnapshot::Loaded(loaded) => {
-                images.borrow_mut().keep(&device, &path, loaded.clone());
+                images
+                    .borrow_mut()
+                    .keep(&device, &path, loaded.clone(), Instant::now());
                 Some(loaded.clone())
             }
-            _ => images.borrow_mut().recent(&device, &path),
+            _ => images.borrow_mut().recent(&device, &path, Instant::now()),
         };
         let Some(loaded) = loaded else {
             let mut images = images.borrow_mut();
@@ -12302,17 +12331,29 @@ mod tests {
             image: Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, Vec::new())),
         };
         let mut images = MarkdownImages::default();
+        let t0 = Instant::now();
         for _ in 0..3 {
-            images.keep("mac", "/tmp/a.png", image("a"));
+            images.keep("mac", "/tmp/a.png", image("a"), t0);
         }
         assert_eq!(images.recent.len(), 1, "repaints don't duplicate");
+        // Everything painted within the window stays, however many…
         for i in 0..MARKDOWN_IMAGES_KEPT + 2 {
-            images.keep("mac", &format!("/tmp/{i}.png"), image("n"));
+            images.keep("mac", &format!("/tmp/{i}.png"), image("n"), t0);
         }
+        assert_eq!(images.recent.len(), MARKDOWN_IMAGES_KEPT + 3);
+        // …and once they go stale, only the latest few are kept.
+        let later = t0 + MARKDOWN_IMAGE_PAINT_WINDOW * 2;
+        images.keep("mac", "/tmp/new.png", image("new"), later);
         assert_eq!(images.recent.len(), MARKDOWN_IMAGES_KEPT);
-        assert!(images.recent("mac", "/tmp/a.png").is_none(), "oldest evicted");
-        assert!(images.recent("phone", "/tmp/7.png").is_none(), "keyed by device");
-        assert!(images.recent("mac", "/tmp/7.png").is_some());
+        assert!(
+            images.recent("mac", "/tmp/a.png", later).is_none(),
+            "oldest evicted"
+        );
+        assert!(
+            images.recent("phone", "/tmp/7.png", later).is_none(),
+            "keyed by device"
+        );
+        assert!(images.recent("mac", "/tmp/7.png", later).is_some());
     }
 
     #[test]

@@ -1704,6 +1704,19 @@ mod generated_image_tests {
         .unwrap();
         assert_eq!(decoded.width, 2048.0);
         assert!(decoded.bytes < IMAGE_CACHE_BUDGET_BYTES);
+        // A 5K screenshot is wider than undownscaled previews accept, but
+        // still yields a bounded thumbnail.
+        let mut wide = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(5120, 16)
+            .write_to(&mut wide, image::ImageFormat::Png)
+            .unwrap();
+        let wide = crate::image_media::decode_generated_image(
+            wide.into_inner(),
+            "image/png",
+            MAX_ATTACHMENT_BYTES as usize,
+        )
+        .unwrap();
+        assert_eq!(wide.width, 2048.0);
         assert!(
             crate::image_media::decode_generated_image(
                 b"GIF89a".to_vec(),
@@ -1843,7 +1856,7 @@ mod generated_image_tests {
         for (width, target, expected, succeeds) in [
             (64, Some("remote-owner"), "image/png", true),
             (64, None, "image/png", true),
-            (4097, None, "image/png", false),
+            (8193, None, "image/png", false),
             (64, None, "image/gif", false),
         ] {
             let mut png = std::io::Cursor::new(Vec::new());

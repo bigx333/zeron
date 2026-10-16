@@ -286,17 +286,27 @@ impl Uploads {
     ) -> Result<AttachmentChunk, EngineError> {
         use std::io::{Read, Seek};
         let file = self.inspect(path, extra_roots)?;
-        let size = file.size;
+        // Open beneath the pinned root without following symlinks: in a shared
+        // temp dir another local user could swap a checked path for a link
+        // between the jail check and this open.
+        let relative = file
+            .resolved
+            .strip_prefix(&file.root)
+            .map_err(|_| EngineError::Other("Attachment is outside the upload cache".into()))?;
+        let (mut handle, _pinned_directories) = open_generated_file(&file.root, relative)
+            .map_err(|_| EngineError::Other("Attachment is outside the upload cache".into()))?;
+        let meta = handle.metadata()?;
+        if !meta.is_file() {
+            return Err(EngineError::Other("Attachment is not a file".into()));
+        }
+        if meta.len() > MAX_BYTES {
+            return Err(EngineError::Other("Attachment is too large".into()));
+        }
+        let size = meta.len();
         let start = offset.min(size);
         let next_offset = (start + READ_CHUNK_BYTES).min(size);
         // Read ONLY this chunk's byte range — never the whole file per chunk.
         let mut buf = vec![0u8; (next_offset - start) as usize];
-        let mut handle = std::fs::File::open(&file.resolved)?;
-        if !still_resolves_to(&handle, &file.resolved) {
-            return Err(EngineError::Other(
-                "Attachment is outside the upload cache".into(),
-            ));
-        }
         handle.seek(std::io::SeekFrom::Start(start))?;
         let mut read = 0usize;
         while read < buf.len() {
@@ -401,13 +411,11 @@ impl Uploads {
         }
         // Canonicalize BOTH sides so symlinks can't escape.
         let resolved = std::fs::canonicalize(path).map_err(|_| outside())?;
-        let allowed = roots
+        let root = roots
             .iter()
             .filter_map(|root| std::fs::canonicalize(root).ok())
-            .any(|root| resolved.starts_with(&root) && resolved != root);
-        if !allowed {
-            return Err(outside());
-        }
+            .find(|root| resolved.starts_with(root) && resolved != *root)
+            .ok_or_else(outside)?;
         let meta = std::fs::metadata(&resolved)?;
         if !meta.is_file() {
             return Err(EngineError::Other("Attachment is not a file".into()));
@@ -436,17 +444,18 @@ impl Uploads {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "attachment".into()),
             mime_type: mime_type.to_string(),
-            size: meta.len(),
+            root,
             resolved,
         })
     }
 }
 
 struct InspectedFile {
+    /// The canonical jail root `resolved` lies beneath.
+    root: PathBuf,
     resolved: PathBuf,
     name: String,
     mime_type: String,
-    size: u64,
 }
 
 /// An absolute local path's components with `.`/`..` resolved WITHOUT
@@ -890,27 +899,6 @@ fn canonicalize_existing(path: &Path) -> PathBuf {
             _ => return path.to_path_buf(),
         }
     }
-}
-
-/// The jail checked `resolved`, then the read opened it again. In a shared
-/// temp dir another local user could swap a component for a symlink in
-/// between; the open file must still be the one at that canonical path.
-#[cfg(unix)]
-fn still_resolves_to(handle: &std::fs::File, resolved: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let (Ok(open), Ok(canonical)) = (handle.metadata(), std::fs::canonicalize(resolved)) else {
-        return false;
-    };
-    let Ok(now) = std::fs::metadata(&canonical) else {
-        return false;
-    };
-    canonical == resolved && open.dev() == now.dev() && open.ino() == now.ino()
-}
-
-/// Windows temp dirs are per-user, so no other account can race the path.
-#[cfg(not(unix))]
-fn still_resolves_to(_: &std::fs::File, _: &Path) -> bool {
-    true
 }
 
 fn same_generated_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {

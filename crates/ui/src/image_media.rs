@@ -264,6 +264,17 @@ pub(crate) fn raster_limits() -> image::Limits {
     limits
 }
 
+/// Decoder bounds for a preview that is downscaled before it is retained:
+/// the full-size frame only lives for the decode, so a 5K or 8K screenshot
+/// (7680 × 4320 RGBA is ~127 MiB) still yields a bounded thumbnail.
+fn downscaled_raster_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(160 * 1024 * 1024);
+    limits
+}
+
 fn decode_raster_image_bounded(
     bytes: Vec<u8>,
     max_bytes: usize,
@@ -275,7 +286,10 @@ fn decode_raster_image_bounded(
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
-    reader.limits(raster_limits());
+    reader.limits(match max_side {
+        Some(_) => downscaled_raster_limits(),
+        None => raster_limits(),
+    });
     // Decode one frame and encode a static PNG so GPUI cannot expand unbounded animation frames.
     let decoded = reader.decode().map_err(|e| e.to_string())?;
     // Generated previews retain one bounded 8-bit frame. This keeps each
