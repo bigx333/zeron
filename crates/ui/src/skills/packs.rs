@@ -160,9 +160,17 @@ impl SkillsPage {
     }
 
     fn install_pack(&mut self, inspection: PackInspection, cx: &mut Context<Self>) {
+        // One at a time: a closed dialog's install may still be running, and
+        // replacing its task would drop the reply it is waiting on.
+        let busy = self.pack_install.is_some();
         let Some(add) = &mut self.add_pack else {
             return;
         };
+        if busy {
+            add.error = Some("Another pack is still installing. Try again when it finishes.".into());
+            cx.notify();
+            return;
+        }
         let auto_update = add.auto_update;
         add.stage = AddStage::Installing(inspection.clone());
         add.error = None;
@@ -223,9 +231,9 @@ impl SkillsPage {
         method: &'static str,
         params: serde_json::Value,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.pack_busy.contains_key(&name) {
-            return;
+            return false;
         }
         let key = name.clone();
         let seq = self.next_library_seq();
@@ -257,7 +265,14 @@ impl SkillsPage {
                         }
                         page.accept_library(seq, library, cx);
                     }
-                    Err(error) => crate::toast::error(cx, error),
+                    Err(error) => {
+                        // A toggle that didn't stick goes back to what the
+                        // engine still has, whether or not a reload succeeds.
+                        if label == Some(PackBusy::Toggling) {
+                            page.flip_auto_update(&name);
+                        }
+                        crate::toast::error(cx, error)
+                    }
                 }
                 // Settle on the engine's state after any mutation: a list
                 // served while it ran may predate it, and a failed toggle
@@ -265,10 +280,21 @@ impl SkillsPage {
                 page.load_library(cx);
             },
         );
+        let sent = task.is_some();
         if let Some(task) = task {
             self.pack_busy.insert(key, (busy, task));
         }
         cx.notify();
+        sent
+    }
+
+    /// Flip a pack's shown auto-update setting (optimistically, or back).
+    fn flip_auto_update(&mut self, name: &str) {
+        if let crate::popover::Loadable::Ready(library) = &mut self.library
+            && let Some(pack) = library.packs.iter_mut().find(|pack| pack.name == name)
+        {
+            pack.auto_update = !pack.auto_update;
+        }
     }
 
     /// Packs not checked for a while are checked when the page opens, so a
@@ -738,20 +764,20 @@ impl SkillsPage {
                             let name = name.clone();
                             move |page, _, _, cx| {
                                 cx.stop_propagation();
-                                // Flip it now; the engine's reply settles it.
-                                if let crate::popover::Loadable::Ready(library) = &mut page.library
-                                    && let Some(pack) =
-                                        library.packs.iter_mut().find(|pack| pack.name == name)
-                                {
-                                    pack.auto_update = !auto;
-                                }
-                                page.pack_action(
+                                // Flip it now; the engine's reply settles it,
+                                // and an unsent request undoes it at once.
+                                page.flip_auto_update(&name);
+                                let sent = page.pack_action(
                                     name.clone(),
                                     PackBusy::Toggling,
                                     methods::SET_SKILL_PACK_AUTO_UPDATE,
                                     serde_json::json!({ "name": name, "enabled": !auto }),
                                     cx,
                                 );
+                                if !sent {
+                                    page.flip_auto_update(&name);
+                                    crate::toast::error(cx, "Zeron's engine isn't connected.");
+                                }
                             }
                         })),
                 ),

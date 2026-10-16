@@ -276,43 +276,60 @@ fn parse_subpath(subpath: Option<&str>) -> Result<Option<String>, String> {
 
 const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 
-/// The user's credential helpers, read once from their own git config, so
-/// private packs still authenticate while every other configured command
-/// (filters, fsmonitor, ssh wrappers) stays out of reach.
-async fn credential_helpers() -> &'static [String] {
-    static HELPERS: tokio::sync::OnceCell<Vec<String>> = tokio::sync::OnceCell::const_new();
-    HELPERS
+/// The user's `credential.*` config, in order and with its host scopes and
+/// empty resets, read once outside any repository. Network commands get it
+/// so private packs still authenticate; nothing else from the user's config
+/// (filters, fsmonitor, ssh wrappers) reaches git.
+async fn credential_config() -> &'static [(String, Option<String>)] {
+    static CONFIG: tokio::sync::OnceCell<Vec<(String, Option<String>)>> =
+        tokio::sync::OnceCell::const_new();
+    CONFIG
         .get_or_init(|| async {
             let mut cmd = tokio::process::Command::new("git");
             zeron_harness::compose_login_shell_path(&mut cmd);
-            // Outside any repository: only system and global config apply.
-            cmd.args(["config", "--get-all", "credential.helper"])
+            for (key, _) in std::env::vars_os() {
+                if key.to_string_lossy().starts_with("GIT_") {
+                    cmd.env_remove(key);
+                }
+            }
+            cmd.args(["config", "--null", "--get-regexp", r"^credential\."])
                 .current_dir(std::env::temp_dir())
-                .env_remove("GIT_DIR")
-                .env_remove("GIT_CONFIG_PARAMETERS")
                 .stdin(std::process::Stdio::null())
                 .kill_on_drop(true);
             let output = tokio::time::timeout(Duration::from_secs(10), cmd.output()).await;
             match output {
-                Ok(Ok(output)) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
+                Ok(Ok(output)) if output.status.success() => parse_config_list(&output.stdout),
                 _ => Vec::new(),
             }
         })
         .await
 }
 
-async fn git(cwd: Option<&Path>, args: &[&str]) -> Result<String, String> {
+/// `git config --null` output: `key\nvalue\0` per entry, or `key\0` for a
+/// valueless (boolean) key.
+fn parse_config_list(bytes: &[u8]) -> Vec<(String, Option<String>)> {
+    String::from_utf8_lossy(bytes)
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| match entry.split_once('\n') {
+            Some((key, value)) => (key.to_owned(), Some(value.to_owned())),
+            None => (entry.to_owned(), None),
+        })
+        .collect()
+}
+
+/// Run git on `repo` (or none, for a clone). Nothing from the repository
+/// runs: inherited git environment and the system and global config are
+/// dropped, so no configured filter, hook or helper can be switched on by the
+/// pack's `.gitattributes`, and symlinks are checked out as plain files.
+///
+/// Only `network` commands (clone, fetch) get the user's credential config,
+/// and they run from an empty folder with the repository given as
+/// `GIT_DIR`, so a helper written as a relative command can never resolve to
+/// a script inside the pack. Clones are full, so local commands never fetch.
+async fn git_in(repo: Option<&Path>, network: bool, args: &[&str]) -> Result<String, String> {
     let mut cmd = tokio::process::Command::new("git");
     zeron_harness::compose_login_shell_path(&mut cmd);
-    // Nothing from the repository runs. Inherited git environment and the
-    // system and global config are dropped, so no configured filter, hook or
-    // helper can be switched on by the pack's `.gitattributes`; symlinks are
-    // checked out as plain files, so nothing in a pack can point outside it.
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
             cmd.env_remove(key);
@@ -334,9 +351,25 @@ async fn git(cwd: Option<&Path>, args: &[&str]) -> Result<String, String> {
         "-c",
         "core.fsmonitor=false",
     ]);
-    for helper in credential_helpers().await {
-        cmd.arg("-c").arg(format!("credential.helper={helper}"));
-    }
+    let empty = if network {
+        for (key, value) in credential_config().await {
+            cmd.arg("-c").arg(match value {
+                Some(value) => format!("{key}={value}"),
+                None => key.clone(),
+            });
+        }
+        let empty = tempfile::tempdir().map_err(|error| format!("git couldn't start: {error}"))?;
+        cmd.current_dir(empty.path());
+        if let Some(repo) = repo {
+            cmd.env("GIT_DIR", repo.join(".git"));
+        }
+        Some(empty)
+    } else {
+        if let Some(repo) = repo {
+            cmd.current_dir(repo);
+        }
+        None
+    };
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -350,9 +383,6 @@ async fn git(cwd: Option<&Path>, args: &[&str]) -> Result<String, String> {
         .env("GCM_INTERACTIVE", "never")
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
-    if let Some(cwd) = cwd {
-        cmd.current_dir(cwd);
-    }
     let output = tokio::time::timeout(GIT_TIMEOUT, cmd.output())
         .await
         .map_err(|_| "git took too long and was stopped.".to_string())?
@@ -362,6 +392,7 @@ async fn git(cwd: Option<&Path>, args: &[&str]) -> Result<String, String> {
             }
             _ => format!("git couldn't start: {error}"),
         })?;
+    drop(empty);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let message = stderr
@@ -376,28 +407,16 @@ async fn git(cwd: Option<&Path>, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// A local git command on `repo`; it never reaches the network.
+async fn git(repo: Option<&Path>, args: &[&str]) -> Result<String, String> {
+    git_in(repo, false, args).await
+}
+
 async fn clone(url: &str, dest: &Path) -> Result<(), String> {
     let dest = dest.to_string_lossy();
-    // Partial clones keep big repositories light; not every host has them.
-    let partial = git(
+    git_in(
         None,
-        &[
-            "clone",
-            "--quiet",
-            "--no-checkout",
-            "--filter=blob:none",
-            "--",
-            url,
-            &dest,
-        ],
-    )
-    .await;
-    if partial.is_ok() {
-        return Ok(());
-    }
-    let _ = tokio::fs::remove_dir_all(dest.as_ref()).await;
-    git(
-        None,
+        true,
         &["clone", "--quiet", "--no-checkout", "--", url, &dest],
     )
     .await
@@ -1030,8 +1049,9 @@ async fn install_at(paths: &Paths, token: &str, auto_update: bool) -> Result<Ski
 /// Fetch and record whether a newer release exists; never moves the checkout.
 async fn check(paths: &Paths, pack: &mut SkillPack) -> Result<(), String> {
     let checkout = paths.checkout(&pack.name);
-    git(
+    git_in(
         Some(&checkout),
+        true,
         &["fetch", "--quiet", "--tags", "--force", "--prune", "origin"],
     )
     .await
@@ -1138,13 +1158,35 @@ where
         .iter_mut()
         .find(|pack| pack.name == name)
         .ok_or_else(|| format!("{name} isn't installed."))?;
+    let before = pack.clone();
     let result = operation(paths, pack).await;
     if let Err(error) = &result {
         pack.last_error = Some(error.clone());
     }
-    let pack = pack.clone();
-    save(paths, &packs)?;
-    result.map(|()| pack)
+    let after = pack.clone();
+    if let Err(error) = save(paths, &packs) {
+        // The record must keep describing the checkout and its links: an
+        // update that can't be recorded is undone.
+        if before.commit != after.commit || before.skills != after.skills {
+            if let Err(restore) = restore_release(paths, &before, &after).await {
+                return Err(format!("{error} Undoing the update failed too: {restore}"));
+            }
+        }
+        return Err(error);
+    }
+    result.map(|()| after)
+}
+
+/// Put `before`'s release back after `after` was applied but not recorded.
+async fn restore_release(paths: &Paths, before: &SkillPack, after: &SkillPack) -> Result<(), String> {
+    let checkout = paths.checkout(&before.name);
+    checkout_detached(&checkout, &before.commit).await?;
+    let base = before
+        .subpath
+        .as_deref()
+        .map_or(checkout.clone(), |sub| checkout.join(sub));
+    let skills = pack_skills(&checkout, &detect(&checkout, &base));
+    relink(paths, &checkout, &after.skills, &skills).map(drop)
 }
 
 pub async fn check_updates(name: Option<String>) -> Result<Vec<SkillPack>, String> {
@@ -1367,6 +1409,23 @@ mod tests {
         assert!(!is_release_tag("v1.0.0-rc.1"));
         assert!(!is_release_tag("nightly"));
         assert!(!is_release_tag("v"));
+    }
+
+    #[test]
+    fn credential_config_keeps_order_scopes_and_resets() {
+        let raw = b"credential.helper\nosxkeychain\0credential.helper\n\0credential.https://github.com.helper\n!gh auth git-credential\0credential.usehttppath\0";
+        assert_eq!(
+            parse_config_list(raw),
+            [
+                ("credential.helper".to_string(), Some("osxkeychain".to_string())),
+                ("credential.helper".to_string(), Some(String::new())),
+                (
+                    "credential.https://github.com.helper".to_string(),
+                    Some("!gh auth git-credential".to_string())
+                ),
+                ("credential.usehttppath".to_string(), None),
+            ]
+        );
     }
 
     #[test]
@@ -1612,6 +1671,19 @@ mod tests {
             Some("Adds new.")
         );
         save(&paths, &[record]).unwrap();
+        // An update that can't be recorded is undone: release and links.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let old_commit = commit_of(&paths.checkout("pack"), "HEAD").await.unwrap();
+            std::fs::set_permissions(&paths.packs, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let failed = update_at(&paths, "pack").await;
+            std::fs::set_permissions(&paths.packs, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(failed.is_err());
+            assert_eq!(commit_of(&paths.checkout("pack"), "HEAD").await.unwrap(), old_commit);
+            assert!(paths.skills.join("old/SKILL.md").is_file());
+            assert!(std::fs::symlink_metadata(paths.skills.join("new")).is_err());
+            assert_eq!(load(&paths)[0].version.as_deref(), Some("1.0.0"));
+        }
         let updated = update_at(&paths, "pack").await.unwrap();
         assert_eq!(updated.skills, ["how", "new"]);
         assert_eq!(updated.version.as_deref(), Some("1.1.0"));
