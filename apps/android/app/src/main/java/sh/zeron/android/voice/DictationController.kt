@@ -6,6 +6,9 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -105,8 +108,12 @@ class DictationController(
     /** A pending microphone prompt for [DictationHost] to show. */
     val permissionRequest: StateFlow<CompletableDeferred<Boolean>?> = _permissionRequest.asStateFlow()
 
-    /** The composer dictating (its draft gets the text), its inserter, and the host chosen at the start. */
-    private var owner: Any? = null
+    /**
+     * The composer dictating (its draft gets the text), its inserter, and the host chosen at the start.
+     * [owner] is snapshot state: a composer's controls read it through [owns], and must
+     * redraw when it takes the dictation, or the idle microphone stays up while recording.
+     */
+    private var owner: Any? by mutableStateOf(null)
     private var insert: ((String) -> Unit)? = null
     private var hostId: String? = null
     private var recorder: Recorder? = null
