@@ -15,8 +15,10 @@ mod cloud;
 pub(crate) mod companions;
 mod providers;
 pub use providers::UsageWindowInfo;
+mod dictation;
 mod session;
 mod voice;
+pub use dictation::*;
 pub use voice::*;
 mod types;
 
@@ -62,6 +64,7 @@ where
 #[derive(uniffi::Object)]
 pub struct CoreClient {
     pub(crate) client: zc::Client,
+    pub(crate) dictation: DictationClients,
 }
 
 #[allow(dead_code)] // consumed in Rust by the layout engine
@@ -94,7 +97,10 @@ impl CoreClient {
             credentials.into(),
             Arc::new(ListenerBridge(listener)),
         )?;
-        Ok(Arc::new(Self { client }))
+        Ok(Arc::new(Self {
+            client,
+            dictation: Default::default(),
+        }))
     }
 
     pub fn is_demo(&self) -> bool {

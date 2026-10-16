@@ -36,6 +36,7 @@ pub(crate) fn init(root: PathBuf, cx: &mut App) {
         input_select: widgets::SelectState::default(),
         voice_select: widgets::SelectState::default(),
         host_select: widgets::SelectState::default(),
+        engine_select: widgets::SelectState::default(),
         hosts: Vec::new(),
         call_live: false,
         voices: zeron_proto::voice::DEFAULT_VOICES
@@ -50,10 +51,14 @@ pub(crate) fn directory(cx: &App) -> PathBuf {
     cx.global::<VoiceGlobal>().directory.clone()
 }
 pub(crate) fn enabled(cx: &App) -> bool {
-    settings::current(cx).dictation_enabled
-        && cx
-            .try_global::<VoiceGlobal>()
-            .is_some_and(|g| g.card.read(cx).ready)
+    let settings = settings::current(cx);
+    settings.dictation_enabled
+        && match settings.dictation_engine {
+            settings::DictationEngine::Local => cx
+                .try_global::<VoiceGlobal>()
+                .is_some_and(|g| g.card.read(cx).ready),
+            settings::DictationEngine::Codex => super::codex::available(cx),
+        }
 }
 pub(crate) fn card(cx: &mut App) -> Entity<VoiceCard> {
     if !cx.has_global::<VoiceGlobal>() {
@@ -74,6 +79,7 @@ pub(crate) struct VoiceCard {
     input_select: widgets::SelectState,
     voice_select: widgets::SelectState,
     host_select: widgets::SelectState,
+    engine_select: widgets::SelectState,
     hosts: Vec<(Option<String>, String, bool, String)>,
     call_live: bool,
     /// Native voice styles, refreshed with the live session's reported catalog.
@@ -120,8 +126,23 @@ impl VoiceCard {
         cx.notify();
     }
     fn primary(&mut self, cx: &mut Context<Self>) {
+        let settings = settings::current(cx);
         if let Some(cancel) = &self.cancel {
             cancel.store(true, Ordering::Release);
+        } else if settings.dictation_engine == settings::DictationEngine::Codex {
+            if settings.dictation_enabled {
+                self.set_enabled(false, cx);
+            } else {
+                match super::codex::status(cx) {
+                    Some(Ok(())) => self.set_enabled(true, cx),
+                    Some(Err(reason)) => {
+                        self.error = Some(super::codex::unavailable_message(reason).into())
+                    }
+                    None => {
+                        self.error = Some("Still checking Codex. Try again in a moment.".into())
+                    }
+                }
+            }
         } else if self.ready {
             self.set_enabled(!settings::current(cx).dictation_enabled, cx);
         } else {
@@ -430,10 +451,24 @@ impl Render for VoiceCard {
                 .search_anchor(SettingId::CodexVoiceStyle),
         );
         let enabled = settings::current(cx).dictation_enabled;
+        let engine = settings::current(cx).dictation_engine;
+        let codex = engine == settings::DictationEngine::Codex;
+        let codex_status = super::codex::status(cx);
         let downloading = self.cancel.is_some();
-        let on = downloading || (enabled && self.ready);
+        let usable = if codex {
+            codex_status == Some(Ok(()))
+        } else {
+            self.ready
+        };
+        let on = downloading || (enabled && usable);
         let size_mb = zeron_voice::download_size() as f64 / 1e6;
-        let meta = if downloading {
+        let meta = if codex {
+            Some(match codex_status {
+                Some(Ok(())) => "Sent to ChatGPT with your Codex account".to_owned(),
+                Some(Err(reason)) => super::codex::unavailable_message(reason).to_owned(),
+                None => "Checking for a Codex ChatGPT account…".to_owned(),
+            })
+        } else if downloading {
             Some(format!(
                 "Downloading · {:.0} of {size_mb:.0} MB",
                 self.progress as f64 / 1e6
@@ -503,7 +538,68 @@ impl Render for VoiceCard {
             )
             .child(switch)
             .search_anchor(SettingId::Dictation);
-        let microphone_row = (enabled && self.ready).then(|| {
+        let engine_row = {
+            let codex_detail = match codex_status {
+                Some(Ok(())) => "ChatGPT, via your Codex account",
+                Some(Err(_)) => "Needs Codex signed in with ChatGPT",
+                None => "Checking…",
+            };
+            let codex_ready = codex_status == Some(Ok(()));
+            let control = widgets::select(
+                "dictation-engine",
+                "Transcription",
+                &theme,
+                |card: &mut Self| &mut card.engine_select,
+            )
+            .options(
+                vec![
+                    widgets::SelectOption::new("On this device").detail("Parakeet v3, private"),
+                    widgets::SelectOption::new("Codex").detail(codex_detail),
+                ],
+                usize::from(codex),
+            )
+            .width(200.0)
+            .on_select(move |_, ix, _, cx| {
+                let engine = if ix == 1 {
+                    // Only with an account to lend; the detail says why not.
+                    if !codex_ready {
+                        return;
+                    }
+                    settings::DictationEngine::Codex
+                } else {
+                    settings::DictationEngine::Local
+                };
+                settings::update(settings::SavePolicy::Immediate, cx, |s| {
+                    s.dictation_engine = engine
+                });
+                cx.refresh_windows();
+                cx.notify();
+            })
+            .render(&self.engine_select, cx);
+            widgets::card_row(&theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .flex()
+                        .flex_col()
+                        .child(widgets::row_title(&theme, "Transcription"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                if codex {
+                                    "Audio goes from this device to ChatGPT"
+                                } else {
+                                    "Audio never leaves this device"
+                                }
+                                .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(control)
+                .search_anchor(SettingId::DictationEngine)
+        };
+        let microphone_row = (enabled && usable).then(|| {
             self.refresh_inputs(cx);
             let saved = settings::current(cx).dictation_input.clone();
             let (options, selected) = self.input_options(saved.as_deref());
@@ -636,6 +732,7 @@ impl Render for VoiceCard {
                                 .child(
                                     widgets::section_card(&theme)
                                         .child(dictation_row)
+                                        .child(engine_row)
                                         .children(microphone_row)
                                         .child(shortcut_row),
                                 )
@@ -691,6 +788,51 @@ mod tests {
             assert_eq!(card.input_options(Some("coreaudio:usb")).1, 2);
             let (options, selected) = card.input_options(Some("coreaudio:gone"));
             assert_eq!((options.len(), selected), (4, 3));
+        });
+    }
+    #[gpui::test]
+    fn codex_dictation_needs_an_account_the_host_can_lend(cx: &mut gpui::TestAppContext) {
+        use zeron_proto::voice::dictation::DictationUnavailable;
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| settings::init(settings::UiSettings::default(), dir.path(), cx));
+        cx.update(|cx| {
+            settings::update(settings::SavePolicy::Immediate, cx, |s| {
+                s.dictation_engine = settings::DictationEngine::Codex
+            })
+        });
+        let card = cx.update(card);
+        // Unknown: the toggle explains instead of enabling.
+        card.update(cx, |card, cx| {
+            card.primary(cx);
+            assert!(card.error.is_some());
+            card.error = None;
+        });
+        cx.update(|cx| {
+            super::super::codex::set_status_for_test(
+                Some(Err(DictationUnavailable::NoChatgptAccount)),
+                cx,
+            )
+        });
+        card.update(cx, |card, cx| {
+            card.primary(cx);
+            assert!(!settings::current(cx).dictation_enabled);
+            assert!(card.error.as_deref().unwrap().contains("ChatGPT"));
+        });
+        // No local model needed once the host can lend a credential.
+        cx.update(|cx| super::super::codex::set_status_for_test(Some(Ok(())), cx));
+        card.update(cx, |card, cx| {
+            assert!(!card.ready);
+            card.primary(cx);
+        });
+        cx.update(|cx| assert!(enabled(cx)));
+        // The account goes away: dictation is hidden, the choice is kept.
+        cx.update(|cx| {
+            super::super::codex::set_status_for_test(
+                Some(Err(DictationUnavailable::SignInRequired)),
+                cx,
+            );
+            assert!(!enabled(cx));
+            assert!(settings::current(cx).dictation_enabled);
         });
     }
     #[gpui::test]

@@ -141,6 +141,8 @@ settings_index! {
         "speech tone"),
     (Dictation, Voice, None, "Dictation",
         "speech to text transcribe talk"),
+    (DictationEngine, Voice, None, "Transcription",
+        "dictation engine codex chatgpt parakeet local on device cloud"),
     (Microphone, Voice, None, "Microphone",
         "input audio mic"),
     (SpeechModel, Voice, None, "Speech model",

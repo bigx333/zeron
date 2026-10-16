@@ -47,7 +47,6 @@ impl Fixture {
         let cancel = Arc::new(AtomicBool::new(false));
         let level = Arc::new(AtomicU32::new(0));
         let job = Job {
-            dir: Default::default(),
             stop: stop.clone(),
             cancel: cancel.clone(),
             level: level.clone(),
@@ -238,7 +237,6 @@ fn cancelled_load_keeps_start_and_model_removal_guarded_until_native_work_return
 fn stop_before_capture_start_never_opens_the_microphone() {
     let (events, _) = mpsc::sync_channel(4);
     let job = Job {
-        dir: Default::default(),
         stop: Arc::new(AtomicBool::new(true)),
         cancel: Arc::new(AtomicBool::new(false)),
         level: Arc::new(AtomicU32::new(0)),
@@ -295,4 +293,23 @@ fn audio_buffer_still_caps_recording_at_sixty_seconds() {
     );
     assert_eq!(audio.samples.lock().unwrap().len(), rate as usize * 60);
     assert!(audio.full.load(Ordering::Acquire));
+}
+
+#[test]
+fn speech_16k_skips_silence_and_short_clips_and_resamples() {
+    assert!(
+        crate::speech_16k(vec![0.0; 48_000], 48_000)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        crate::speech_16k(vec![0.5; 4_000], 48_000)
+            .unwrap()
+            .is_none()
+    );
+    let speech = crate::speech_16k(vec![0.25; 48_000], 48_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(speech.len(), 16_000);
+    assert!(crate::speech_16k(vec![0.5; 100], 4_000).is_err());
 }

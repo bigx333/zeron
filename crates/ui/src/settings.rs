@@ -901,6 +901,17 @@ pub enum ComposerSendBehavior {
     ModEnter,
 }
 
+/// Who turns composer dictation into text.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DictationEngine {
+    /// Parakeet v3 on this device; audio never leaves it.
+    #[default]
+    Local,
+    /// ChatGPT, with the Codex device's ChatGPT credential.
+    Codex,
+}
+
 /// Persist the latest revision. Safe to call at shutdown.
 pub fn flush(cx: &mut App) {
     if !cx.has_global::<SettingsStore>() {
@@ -1058,6 +1069,8 @@ pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 9] = [
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
     pub dictation_enabled: bool,
+    #[serde(default)]
+    pub dictation_engine: DictationEngine,
     /// Dictation microphone as a `zeron_voice::InputDevice` id; `None`
     /// follows the system default.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1288,6 +1301,7 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             dictation_enabled: false,
+            dictation_engine: DictationEngine::Local,
             dictation_input: None,
             window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
@@ -2130,6 +2144,7 @@ impl UiSettings {
         }
         merge!(
             dictation_enabled,
+            dictation_engine,
             dictation_input,
             window_geometry,
             composer_send_behavior,
@@ -3300,6 +3315,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
             dictation_enabled: false,
+            dictation_engine: DictationEngine::Codex,
             dictation_input: Some("coreaudio:usb-mic".into()),
             window_geometry: None,
             codex_voice: Some("ember".into()),

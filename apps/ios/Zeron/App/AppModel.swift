@@ -42,6 +42,7 @@ final class AppModel {
     @MainActor lazy var terminals = TerminalStore(app: self)
     /// Cloud for this account (status, GitHub, agent logins, billing).
     @MainActor lazy var cloud = CloudStore(app: self)
+    @MainActor lazy var dictation = CodexDictationController(app: self)
     private(set) var client: CoreClient?
     private(set) var frontPage = FrontPage()
     private(set) var archived: [SessionRowVM] = []

@@ -178,6 +178,50 @@ pub fn login_command(codex_home: &std::path::Path) -> Result<Command, HarnessErr
     Ok(cmd)
 }
 
+/// The live login's ChatGPT access token, as Codex's own app-server reports it.
+/// Debug omits the secret.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChatgptToken {
+    pub access_token: String,
+    /// `chatgpt_account_id` claim, sent as `ChatGPT-Account-Id`.
+    pub account_id: Option<String>,
+    /// The token's `exp` claim in Unix milliseconds.
+    pub expires_at_ms: Option<i64>,
+}
+impl std::fmt::Debug for ChatgptToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatgptToken")
+            .field("account_id", &self.account_id)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish_non_exhaustive()
+    }
+}
+impl ChatgptToken {
+    /// Reads the account and expiry claims; the signature is ChatGPT's to check.
+    pub fn from_jwt(access_token: String) -> Self {
+        use base64::Engine as _;
+        let claims = access_token
+            .split('.')
+            .nth(1)
+            .and_then(|payload| {
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(payload.trim_end_matches('='))
+                    .ok()
+            })
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .unwrap_or(Value::Null);
+        let account_id = claims["https://api.openai.com/auth"]["chatgpt_account_id"]
+            .as_str()
+            .map(str::to_owned);
+        let expires_at_ms = claims["exp"].as_i64().map(|exp| exp.saturating_mul(1000));
+        Self {
+            access_token,
+            account_id,
+            expires_at_ms,
+        }
+    }
+}
+
 /// The Codex harness. Construct with [`CodexHarness::new`]; tests point it at a
 /// fake app server with [`CodexHarness::with_executable`].
 pub struct CodexHarness {
@@ -296,6 +340,65 @@ impl CodexHarness {
         }
     }
 
+    /// Short-lived auth probe: the live login's ChatGPT access token via
+    /// `getAuthStatus`, the way Codex's desktop app reads it. Codex owns the
+    /// refresh (`refresh` forces one after ChatGPT rejected the token). `None`
+    /// when the live login is not a ChatGPT one (API key, logged out).
+    pub async fn chatgpt_access_token(
+        &self,
+        refresh: bool,
+    ) -> Result<Option<ChatgptToken>, HarnessError> {
+        let exe = self.resolve_executable()?;
+        let mut cmd = Command::new(&exe);
+        cmd.arg("app-server");
+        crate::compose_child_path(&mut cmd, &exe);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
+            } else {
+                HarnessError::Io(e)
+            }
+        })?;
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            shutdown_child(&mut child, self.kill_grace).await;
+            return Err(HarnessError::Protocol("codex child has no stdio".into()));
+        };
+        let (client, _incoming) = RpcClient::new(stdin, stdout);
+        let probe = async {
+            client
+                .request(
+                    "initialize",
+                    json!({
+                        "clientInfo": {
+                            "name": "zeron-native",
+                            "title": "Zeron",
+                            "version": env!("CARGO_PKG_VERSION"),
+                        },
+                        "capabilities": { "experimentalApi": true },
+                    }),
+                )
+                .await?;
+            client.notify("initialized", None);
+            client
+                .request(
+                    "getAuthStatus",
+                    json!({ "includeToken": true, "refreshToken": refresh }),
+                )
+                .await
+        };
+        let result = tokio::time::timeout(Duration::from_secs(20), probe).await;
+        shutdown_child(&mut child, self.kill_grace).await;
+        let status = match result {
+            Ok(inner) => inner?,
+            Err(_) => return Err(HarnessError::Protocol("auth status timed out".into())),
+        };
+        Ok(chatgpt_token_from_status(&status))
+    }
+
     /// Short-lived live catalog probe. `model/list` is paginated and already
     /// applies the signed-in account's rollout/visibility policy, so hidden or
     /// unavailable models (including staged Astra rollouts) never leak into a
@@ -389,6 +492,19 @@ impl CodexHarness {
             Err(_) => Err(HarnessError::Protocol("model discovery timed out".into())),
         }
     }
+}
+
+/// `getAuthStatus` → token, only for ChatGPT logins. API keys and other
+/// providers cannot call ChatGPT's backend.
+fn chatgpt_token_from_status(status: &Value) -> Option<ChatgptToken> {
+    matches!(
+        status["authMethod"].as_str(),
+        Some("chatgpt" | "chatgptAuthTokens")
+    )
+    .then(|| status["authToken"].as_str())
+    .flatten()
+    .filter(|token| !token.is_empty())
+    .map(|token| ChatgptToken::from_jwt(token.to_owned()))
 }
 
 /// The `serviceTier` a request runs with; "default" (Standard) is omitted.
@@ -2933,6 +3049,27 @@ use crate::{Signal, send_signal, shutdown_child};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_status_token_is_only_lent_for_chatgpt_logins() {
+        let jwt = "e30.eyJleHAiOjEsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhIn19.s";
+        let token = chatgpt_token_from_status(&json!({"authMethod":"chatgpt","authToken":jwt}))
+            .expect("chatgpt");
+        assert_eq!(token.account_id.as_deref(), Some("a"));
+        assert_eq!(token.expires_at_ms, Some(1000));
+        assert!(
+            chatgpt_token_from_status(&json!({"authMethod":"chatgptAuthTokens","authToken":"x"}))
+                .is_some_and(|t| t.account_id.is_none() && t.expires_at_ms.is_none())
+        );
+        for status in [
+            json!({"authMethod":"apikey","authToken":"sk-x"}),
+            json!({"authMethod":"chatgpt","authToken":null}),
+            json!({"authMethod":"chatgpt","authToken":""}),
+            json!({"authMethod":null,"authToken":null}),
+        ] {
+            assert!(chatgpt_token_from_status(&status).is_none(), "{status}");
+        }
+    }
     use serde_json::json;
 
     #[test]

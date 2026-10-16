@@ -3,6 +3,7 @@
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
+pub(crate) mod codex;
 pub(crate) mod glass;
 mod meter;
 mod model;
@@ -68,10 +69,21 @@ fn origin_window() -> usize {
 struct Native {
     pending: Option<Event>,
     origin_window: usize,
+    engine: crate::settings::DictationEngine,
     dir: std::path::PathBuf,
+    /// Codex's upload, built at start so the credential prefetch overlaps capture.
+    codex: Option<zeron_voice::Backend>,
     device: Option<String>,
     session: Option<zeron_voice::Session>,
     finished: bool,
+}
+impl Native {
+    fn backend(&mut self) -> zeron_voice::Backend {
+        match (self.engine, self.codex.take()) {
+            (crate::settings::DictationEngine::Codex, Some(codex)) => codex,
+            _ => zeron_voice::Backend::Parakeet(self.dir.clone()),
+        }
+    }
 }
 impl Transcriber for Native {
     fn poll(&mut self) -> Option<Event> {
@@ -98,7 +110,7 @@ impl Transcriber for Native {
                     self.finished = true;
                     return Some(Event::Cancelled);
                 }
-                _ => match zeron_voice::Session::start(self.dir.clone(), self.device.clone()) {
+                _ => match zeron_voice::Session::start_with(self.backend(), self.device.clone()) {
                     Ok(s) => self.session = Some(s),
                     Err(e) => {
                         self.finished = true;
@@ -130,6 +142,11 @@ pub(crate) fn start(cx: &gpui::App) -> Option<Box<dyn Transcriber>> {
     if !enabled(cx) {
         return None;
     }
+    let settings = crate::settings::current(cx);
+    let codex = match settings.dictation_engine {
+        crate::settings::DictationEngine::Codex => Some(codex::backend(cx)?),
+        crate::settings::DictationEngine::Local => None,
+    };
     let origin_window = origin_window();
     #[cfg(target_os = "macos")]
     if permission() == 0 {
@@ -140,8 +157,10 @@ pub(crate) fn start(cx: &gpui::App) -> Option<Box<dyn Transcriber>> {
     Some(Box::new(Native {
         pending: None,
         origin_window,
+        engine: settings.dictation_engine,
         dir: model::directory(cx),
-        device: crate::settings::current(cx).dictation_input.clone(),
+        codex,
+        device: settings.dictation_input.clone(),
         session: None,
         finished: false,
     }))
@@ -286,7 +305,9 @@ mod tests {
         let mut native = Native {
             pending: None,
             origin_window: 0,
+            engine: crate::settings::DictationEngine::Local,
             dir: std::path::PathBuf::new(),
+            codex: None,
             device: None,
             session: None,
             finished: false,

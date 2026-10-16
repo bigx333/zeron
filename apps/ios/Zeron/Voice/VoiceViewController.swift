@@ -8,9 +8,10 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
     private var dataSource: UICollectionViewDiffableDataSource<Section, Row>!
     private var voiceToken: AnyObject?
     private var appToken: AnyObject?
+    private var dictationToken: AnyObject?
     private var signature = ""
 
-    enum Section: Int, Hashable { case hero, hosts, voice, call }
+    enum Section: Int, Hashable { case hero, hosts, voice, dictation, call }
 
     struct Row: Hashable {
         let id: String
@@ -20,6 +21,8 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
         var selected = false
         var enabled = true
         var status: UIColor?
+        /// A switch, on or off.
+        var toggle: Bool? = nil
     }
 
     init(app: AppModel) {
@@ -82,9 +85,23 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
             if row.id == "style", let menu = self?.styleMenu() {
                 accessories.append(.popUpMenu(menu, options: .init(tintColor: Palette.secondary)))
             }
+            if let on = row.toggle {
+                let toggle = UISwitch()
+                toggle.isOn = on
+                // Turning off is always allowed.
+                toggle.isEnabled = row.enabled || on
+                toggle.onTintColor = Palette.accent
+                toggle.accessibilityLabel = row.title
+                toggle.accessibilityIdentifier = "toggle-\(row.id)"
+                toggle.addAction(UIAction { [weak self, weak toggle] _ in
+                    self?.toggled(row.id, toggle?.isOn ?? false)
+                }, for: .valueChanged)
+                accessories.append(.customView(configuration: .init(customView: toggle, placement: .trailing())))
+            }
             cell.accessories = accessories
             cell.accessibilityIdentifier = "voice-\(row.id)"
             cell.accessibilityTraits = row.selected ? [.button, .selected] : row.enabled ? .button : .notEnabled
+            if row.toggle != nil { cell.accessibilityTraits = row.enabled ? [] : .notEnabled }
         }
         let header = UICollectionView.SupplementaryRegistration<UICollectionViewListCell>(elementKind: UICollectionView.elementKindSectionHeader) { view, _, path in
             var c = UIListContentConfiguration.groupedHeader()
@@ -111,6 +128,9 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
         }
         voiceToken = app.voice.observe { [weak self] in self?.reload() }
         appToken = app.observe { [weak self] in self?.reload() }
+        dictationToken = app.dictation.observe { [weak self] in self?.reload() }
+        // Opening Settings asks the host again (Codex may have signed in or out).
+        app.dictation.refreshStatus()
         reload()
     }
 
@@ -118,6 +138,7 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
         switch section {
         case .hosts: "Codex runs on"
         case .voice: "Voice"
+        case .dictation: "Dictation"
         case .call: "During a call"
         default: nil
         }
@@ -138,15 +159,19 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
 
     private func reload() {
         let voice = app.voice
+        let dictation = app.dictation
+        // A different host (picked above) has its own Codex sign-in.
+        dictation.refreshStatusIfStale()
         let devices = self.devices
         // Level frames during a call must not rebuild the list.
         let signature = "\(voice.live)|\(voice.selectedHost ?? "")|\(voice.selectedStyle ?? "")|\(voice.styles)|"
+            + "\(dictation.enabled)|\(dictation.canEnable)|\(dictation.settingsDetail)|"
             + devices.map { "\($0.id):\($0.online):\($0.capabilities)" }.joined()
         guard signature != self.signature else { return }
         self.signature = signature
 
         var s = NSDiffableDataSourceSnapshot<Section, Row>()
-        s.appendSections([.hero, .hosts, .voice, .call])
+        s.appendSections([.hero, .hosts, .voice, .dictation, .call])
         s.appendItems([Row(id: "hero", title: "")], toSection: .hero)
         let chosen = voice.startHost?.id
         if devices.isEmpty {
@@ -167,6 +192,7 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
             }, toSection: .hosts)
         }
         s.appendItems([Row(id: "style", title: "Voice", symbol: "person.wave.2")], toSection: .voice)
+        s.appendItems([Row(id: "codex-dictation", title: "Codex dictation", subtitle: dictation.settingsDetail, symbol: "waveform.and.mic", enabled: dictation.canEnable, toggle: dictation.enabled)], toSection: .dictation)
         s.appendItems([
             Row(id: "tip-ear", title: "Hold it to your ear", subtitle: "The screen turns off and Codex plays through the earpiece.", symbol: "ear", enabled: true),
             Row(id: "tip-lock", title: "Lock your iPhone", subtitle: "The call keeps going. An incoming call ends it.", symbol: "lock", enabled: true),
@@ -194,6 +220,12 @@ final class VoiceViewController: UIViewController, UICollectionViewDelegate {
         let voice = app.voice
         guard row.id.hasPrefix("host-"), row.enabled else { return }
         voice.selectedHost = String(row.id.dropFirst("host-".count))
+        UISelectionFeedbackGenerator().selectionChanged()
+    }
+
+    private func toggled(_ id: String, _ on: Bool) {
+        guard id == "codex-dictation" else { return }
+        app.dictation.enabled = on
         UISelectionFeedbackGenerator().selectionChanged()
     }
 

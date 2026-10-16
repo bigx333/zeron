@@ -43,6 +43,10 @@ pub mod methods {
     pub const REPORT_VOICE_MEDIA_V2: &str = "ReportVoiceMediaV2";
     pub const STOP_VOICE_V2: &str = "StopVoiceV2";
     pub const CANCEL_VOICE_ATTEMPT_V2: &str = "CancelVoiceAttemptV2";
+    /// Whether the host can lend a ChatGPT credential for Codex dictation.
+    pub const CODEX_DICTATION_STATUS_V1: &str = "CodexDictationStatusV1";
+    /// Lends the host's ChatGPT access token; audio goes straight to ChatGPT.
+    pub const CODEX_DICTATION_CREDENTIAL_V1: &str = "CodexDictationCredentialV1";
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const CANCEL_INSTALL: &str = "CancelInstall";

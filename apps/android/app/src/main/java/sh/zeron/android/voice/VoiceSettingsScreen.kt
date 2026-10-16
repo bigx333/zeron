@@ -27,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedListItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -60,11 +61,12 @@ import uniffi.zeron_core.VoiceOrb
 /**
  * Voice settings (iOS `VoiceViewController`), in the Settings list style:
  * which registered device runs Codex for a call and which voice it speaks
- * with. Calls start from the bar.
+ * with, and Codex dictation (that device lends ChatGPT). Calls start from
+ * the bar.
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun VoiceSettingsScreen(controller: VoiceController, onBack: () -> Unit) {
+fun VoiceSettingsScreen(controller: VoiceController, dictation: DictationController, onBack: () -> Unit) {
     val s by controller.snapshot.collectAsState()
     val all by controller.devices.collectAsState()
     val selectedHost by controller.selectedHost.collectAsState()
@@ -75,6 +77,9 @@ fun VoiceSettingsScreen(controller: VoiceController, onBack: () -> Unit) {
     val haptics = LocalHapticFeedback.current
     var styles by remember { mutableStateOf(false) }
     val list = rememberLazyListState()
+    // Whether the device can lend ChatGPT: asked on open and when the device changes.
+    val dictationHost by dictation.host.collectAsState()
+    LaunchedEffect(dictationHost?.id) { dictation.refresh() }
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         LazyColumn(
@@ -205,6 +210,10 @@ fun VoiceSettingsScreen(controller: VoiceController, onBack: () -> Unit) {
                 }
             }
             footer("Applies to your next call.")
+
+            section("Dictation")
+            item { DictationSetting(dictation, Modifier.padding(horizontal = 16.dp)) }
+            footer("Tap the microphone in the composer and speak, up to a minute. The text goes into your draft; nothing is sent until you send it.")
 
             section("During a call")
             item {

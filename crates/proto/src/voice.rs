@@ -1,5 +1,6 @@
 //! Ephemeral local voice contracts. These must never enter the document journal.
 use serde::{Deserialize, Serialize};
+pub mod dictation;
 pub mod remote;
 
 pub const MAX_AUDIO_BYTES: usize = 16_384;
