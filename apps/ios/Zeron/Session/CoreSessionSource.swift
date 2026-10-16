@@ -15,6 +15,8 @@ final class CoreSessionSource: SessionSource {
         didSet { if hostDevice != oldValue { connectVisuals() } }
     }
     private weak var engine: TranscriptView?
+    /// Behind the context meter's token counts menu.
+    private var contextUsage: ContextUsage?
 
     init(app: AppModel, client: CoreClient, handle: SessionHandle, chatId: String) {
         self.app = app
@@ -75,16 +77,17 @@ final class CoreSessionSource: SessionSource {
         } else if let b = row?.branch, !b.isEmpty {
             chips.append(ComposerChip(id: "branch", title: b, symbol: nil, icon: BranchIcon.sized()))
         }
-        if let usage = c.contextUsage, let tokens = usage.tokens, let window = usage.window, window > 0 {
-            let fraction = Double(tokens) / Double(window)
-            if fraction >= 0.5 {
-                chips.append(ComposerChip(
-                    id: "context",
-                    title: "\(Int((fraction * 100).rounded()))% context",
-                    symbol: fraction >= 0.85 ? "exclamationmark.circle" : "circle.lefthalf.filled",
-                    tint: fraction >= 0.85 ? Palette.warning : nil
-                ))
-            }
+        contextUsage = c.contextUsage
+        // Shown whenever the harness reports a window, like the desktop footer.
+        if let usage = c.contextUsage, let window = usage.window, window > 0 {
+            let fraction = Double(usage.tokens ?? 0) / Double(window)
+            chips.append(ComposerChip(
+                id: "context",
+                title: usage.tokens == nil ? "—" : "\(Int((fraction * 100).rounded()))%",
+                symbol: nil,
+                tint: usage.tokens == nil ? Palette.tertiary : fraction >= 0.9 ? Palette.danger : fraction >= 0.75 ? Palette.warning : nil,
+                ring: fraction
+            ))
         }
         next.chips = chips
         if let sendFailure {
@@ -249,6 +252,19 @@ final class CoreSessionSource: SessionSource {
             return UIMenu(title: row.pullRequest?.title ?? "", children: [
                 UIAction(title: "Open Pull Request", image: UIImage(systemName: "safari")) { _ in UIApplication.shared.open(url) },
                 UIAction(title: "Copy Link", image: UIImage(systemName: "link")) { _ in UIPasteboard.general.url = url },
+            ])
+        case "context":
+            guard let window = contextUsage?.window, window > 0 else { return nil }
+            let count = { (n: UInt64) in n.formatted(.number) }
+            guard let tokens = contextUsage?.tokens else {
+                return UIMenu(title: "Context window", children: [
+                    UIAction(title: "\(count(window)) token capacity", attributes: .disabled) { _ in },
+                    UIAction(title: "Waiting for context usage", attributes: .disabled) { _ in },
+                ])
+            }
+            return UIMenu(title: "Context window", children: [
+                UIAction(title: "\(count(tokens)) / \(count(window)) tokens", attributes: .disabled) { _ in },
+                UIAction(title: "\(count(window - min(tokens, window))) tokens remaining", attributes: .disabled) { _ in },
             ])
         default:
             return nil
