@@ -1046,9 +1046,41 @@ async fn install_at(paths: &Paths, token: &str, auto_update: bool) -> Result<Ski
 
 // ---- update ----
 
+/// Turn a pack cloned partially (by an earlier Zeron) into a full clone,
+/// through the authenticated network path, so local commands never need to
+/// fetch a missing blob without credentials.
+async fn ensure_full_clone(checkout: &Path) -> Result<(), String> {
+    let partial = git(
+        Some(checkout),
+        &["config", "--get", "remote.origin.partialclonefilter"],
+    )
+    .await
+    .is_ok();
+    if !partial {
+        return Ok(());
+    }
+    git(
+        Some(checkout),
+        &["config", "--unset-all", "remote.origin.partialclonefilter"],
+    )
+    .await?;
+    git_in(
+        Some(checkout),
+        true,
+        &["fetch", "--quiet", "--refetch", "--tags", "--force", "origin"],
+    )
+    .await
+    .map_err(|error| format!("Couldn't finish downloading the pack: {error}"))?;
+    for key in ["remote.origin.promisor", "extensions.partialclone"] {
+        let _ = git(Some(checkout), &["config", "--unset-all", key]).await;
+    }
+    Ok(())
+}
+
 /// Fetch and record whether a newer release exists; never moves the checkout.
 async fn check(paths: &Paths, pack: &mut SkillPack) -> Result<(), String> {
     let checkout = paths.checkout(&pack.name);
+    ensure_full_clone(&checkout).await?;
     git_in(
         Some(&checkout),
         true,
@@ -1116,6 +1148,7 @@ async fn apply(paths: &Paths, pack: &mut SkillPack) -> Result<(), String> {
         return Ok(());
     };
     let checkout = paths.checkout(&pack.name);
+    ensure_full_clone(&checkout).await?;
     checkout_detached(&checkout, &update.commit).await?;
     let base = pack
         .subpath
@@ -1185,7 +1218,12 @@ async fn restore_release(paths: &Paths, before: &SkillPack, after: &SkillPack) -
         .subpath
         .as_deref()
         .map_or(checkout.clone(), |sub| checkout.join(sub));
-    let skills = pack_skills(&checkout, &detect(&checkout, &base));
+    // Only what was linked before: a skill skipped then for a taken name
+    // stays unlinked, as the restored record says.
+    let skills: Vec<_> = pack_skills(&checkout, &detect(&checkout, &base))
+        .into_iter()
+        .filter(|(name, _)| before.skills.contains(name))
+        .collect();
     relink(paths, &checkout, &after.skills, &skills).map(drop)
 }
 
@@ -1696,6 +1734,38 @@ mod tests {
         assert!(load(&paths).is_empty());
         assert!(!paths.checkout("pack").exists());
         assert!(std::fs::symlink_metadata(paths.skills.join("how")).is_err());
+    }
+
+    /// Live: an earlier Zeron's partial clone becomes a full one, with no
+    /// object left to fetch lazily.
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn live_partial_clones_become_full() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkout = temp.path().join("pack");
+        run(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                "--filter=blob:none",
+                "--no-checkout",
+                "https://github.com/michael-denyer/pstack-claude",
+                checkout.to_str().unwrap(),
+            ],
+        );
+        ensure_full_clone(&checkout).await.unwrap();
+        assert!(git(Some(&checkout), &["config", "--get", "remote.origin.partialclonefilter"]).await.is_err());
+        assert!(git(Some(&checkout), &["config", "--get", "remote.origin.promisor"]).await.is_err());
+        let missing = git(
+            Some(&checkout),
+            &["rev-list", "--objects", "--all", "--missing=print"],
+        )
+        .await
+        .unwrap();
+        assert!(!missing.lines().any(|line| line.starts_with('?')));
+        // Already full: nothing to do.
+        ensure_full_clone(&checkout).await.unwrap();
     }
 
     /// Live: `cargo test -p zeron-engine skill_packs::tests::live -- --ignored`.

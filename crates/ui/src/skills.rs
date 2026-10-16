@@ -123,6 +123,9 @@ pub struct SkillsPage {
     checked_packs: bool,
     /// A pack install in flight, held apart from the dialog that started it.
     pack_install: Option<Task<()>>,
+    /// Each pending auto-update toggle's value from before it, restored if
+    /// the engine refuses it.
+    toggle_previous: HashMap<String, bool>,
     /// Library replies are numbered when requested; one older than the
     /// library on screen is dropped, so a slow refresh can't undo a change.
     library_sent: u64,
@@ -193,6 +196,7 @@ impl SkillsPage {
             add_pack: None,
             checked_packs: false,
             pack_install: None,
+            toggle_previous: HashMap::new(),
             library_sent: 0,
             library_shown: 0,
             _search_events: search_events,

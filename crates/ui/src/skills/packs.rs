@@ -245,6 +245,7 @@ impl SkillsPage {
                 let label = page.pack_busy.remove(&name).map(|(busy, _)| busy);
                 match result {
                     Ok(library) => {
+                        page.toggle_previous.remove(&name);
                         let pack = library.packs.iter().find(|pack| pack.name == name).cloned();
                         match (label, pack) {
                             (Some(PackBusy::Updating), Some(pack)) => crate::toast::success(
@@ -268,8 +269,10 @@ impl SkillsPage {
                     Err(error) => {
                         // A toggle that didn't stick goes back to what the
                         // engine still has, whether or not a reload succeeds.
-                        if label == Some(PackBusy::Toggling) {
-                            page.flip_auto_update(&name);
+                        if label == Some(PackBusy::Toggling)
+                            && let Some(previous) = page.toggle_previous.remove(&name)
+                        {
+                            page.show_auto_update(&name, previous);
                         }
                         crate::toast::error(cx, error)
                     }
@@ -288,12 +291,12 @@ impl SkillsPage {
         sent
     }
 
-    /// Flip a pack's shown auto-update setting (optimistically, or back).
-    fn flip_auto_update(&mut self, name: &str) {
+    /// Show `enabled` as a pack's auto-update setting.
+    fn show_auto_update(&mut self, name: &str, enabled: bool) {
         if let crate::popover::Loadable::Ready(library) = &mut self.library
             && let Some(pack) = library.packs.iter_mut().find(|pack| pack.name == name)
         {
-            pack.auto_update = !pack.auto_update;
+            pack.auto_update = enabled;
         }
     }
 
@@ -764,9 +767,13 @@ impl SkillsPage {
                             let name = name.clone();
                             move |page, _, _, cx| {
                                 cx.stop_propagation();
-                                // Flip it now; the engine's reply settles it,
-                                // and an unsent request undoes it at once.
-                                page.flip_auto_update(&name);
+                                // Show it now; the engine's reply settles it.
+                                // A failure restores the value from before
+                                // (not an inversion of whatever a refresh
+                                // has shown since), and so does an unsent
+                                // request, at once.
+                                page.toggle_previous.insert(name.clone(), auto);
+                                page.show_auto_update(&name, !auto);
                                 let sent = page.pack_action(
                                     name.clone(),
                                     PackBusy::Toggling,
@@ -775,7 +782,8 @@ impl SkillsPage {
                                     cx,
                                 );
                                 if !sent {
-                                    page.flip_auto_update(&name);
+                                    page.toggle_previous.remove(&name);
+                                    page.show_auto_update(&name, auto);
                                     crate::toast::error(cx, "Zeron's engine isn't connected.");
                                 }
                             }
