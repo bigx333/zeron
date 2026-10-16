@@ -9,7 +9,9 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -39,6 +41,8 @@ import uniffi.zeron_core.QueueEditAction
 import uniffi.zeron_core.QueueEditLease
 import uniffi.zeron_core.QueueEditStart
 import java.util.UUID
+import kotlin.math.roundToInt
+import sh.zeron.android.voice.warningColor
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import androidx.compose.material3.AssistChip
@@ -46,8 +50,11 @@ import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuGroup
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenuPopup
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -67,7 +74,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -376,17 +386,62 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?,
             ContextChip(it, leading = { ZIcon(ZIcons.Branch, null, Modifier.size(16.dp)) }, onClick = {})
         }
     }
-    val tokens = c.contextUsage?.tokens
+    // Shown whenever the harness reports a window, like the desktop footer.
     val window = c.contextUsage?.window
-    if (tokens != null && window != null && window > 0u) {
-        val fraction = tokens.toDouble() / window.toDouble()
-        if (fraction >= 0.5) {
-            ContextChip(
-                "${(fraction * 100).toInt()}% context",
-                leading = { ZIcon(if (fraction >= 0.85) ZIcons.Warning else ZIcons.Context, null, Modifier.size(16.dp)) },
-                onClick = {},
-                tint = if (fraction >= 0.85) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    if (window != null && window > 0u) ContextMeter(c.contextUsage?.tokens, window)}
+
+/**
+ * The context window as the desktop footer shows it: a 16dp ring and the
+ * percent, no pill. Tapping it opens the token counts.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun ContextMeter(tokens: ULong?, window: ULong) {
+    val fraction = (tokens ?: 0uL).toDouble() / window.toDouble()
+    val color = when {
+        tokens == null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+        fraction >= 0.9 -> MaterialTheme.colorScheme.error
+        fraction >= 0.75 -> warningColor()
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val track = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f)
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            Modifier.clip(RoundedCornerShape(50)).clickable { open = true }.heightIn(min = 34.dp).padding(horizontal = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Canvas(Modifier.size(16.dp)) {
+                val r = 6.dp.toPx()
+                val stroke = Stroke(1.8.dp.toPx())
+                drawCircle(track, radius = r, style = stroke)
+                drawArc(
+                    color,
+                    startAngle = -90f,
+                    sweepAngle = 360f * fraction.coerceIn(0.0, 1.0).toFloat(),
+                    useCenter = false,
+                    topLeft = Offset(center.x - r, center.y - r),
+                    size = Size(2 * r, 2 * r),
+                    style = stroke,
+                )
+            }
+            Text(if (tokens == null) "—" else "${(fraction * 100).roundToInt()}%", style = MaterialTheme.typography.labelLarge, color = color)
+        }
+        DropdownMenuPopup(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuGroup(shapes = MenuDefaults.groupShape(0, 1)) {
+                MenuDefaults.Label { Text("Context window", style = MaterialTheme.typography.labelMedium) }
+                Text(
+                    if (tokens == null) {
+                        "%,d token capacity\nWaiting for context usage".format(window.toLong())
+                    } else {
+                        "%,d / %,d tokens\n%,d tokens remaining".format(tokens.toLong(), window.toLong(), (window - minOf(tokens, window)).toLong())
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                )
+            }
         }
     }
 }
