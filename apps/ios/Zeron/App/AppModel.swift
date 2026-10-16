@@ -37,7 +37,7 @@ final class AppModel {
     }
 
     /// T3 Mode: the front page becomes an inbox (attention first) with
-    /// Working / Snoozed / Settled shelves. Local to this phone; the demo
+    /// Working / Snoozed shelves. Local to this phone; the demo
     /// keeps it in memory (seeded by `-t3`) so runs never leak into each other.
     var t3Mode: Bool {
         get { Self.persistsNewSession ? UserDefaults.standard.bool(forKey: "t3Mode") : volatileT3Mode }

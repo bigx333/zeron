@@ -246,7 +246,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         s.appendSections(["Sessions"])
         s.appendItems([
             Row(id: "groupByProject", title: "Group by Project", subtitle: "Sessions outside your sections, under their project", symbol: "square.stack.3d.up", accessory: .toggle(app.groupByProject)),
-            Row(id: "t3Mode", title: "T3 Mode", subtitle: "An inbox first; Working, Snoozed and Settled shelves below", symbol: "tray.full", accessory: .toggle(app.t3Mode)),
+            Row(id: "t3Mode", title: "T3 Mode", subtitle: "An inbox first; Working and Snoozed shelves below", symbol: "tray.full", accessory: .toggle(app.t3Mode)),
             Row(id: "archived", title: app.t3Mode ? "Settled Sessions" : "Archived Sessions", symbol: app.t3Mode ? "checkmark.circle" : "archivebox"),
         ])
         s.appendSections([" "])

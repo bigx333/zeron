@@ -177,7 +177,7 @@ fun SettingsScreen(
                     shapes = segmentedShapes(0, 3),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Inbox) },
-                    supportingContent = { Text("Attention-first inbox with Working, Snoozed and Settled shelves") },
+                    supportingContent = { Text("Attention-first inbox with Working and Snoozed shelves") },
                     trailingContent = {
                         Switch(sidebarMode.isT3, { model.setSidebarMode(if (it) SidebarMode.T3 else SidebarMode.Default) })
                     },

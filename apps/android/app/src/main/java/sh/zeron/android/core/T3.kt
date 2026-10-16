@@ -13,8 +13,9 @@ import uniffi.zeron_core.WorkspaceSnapshot
 
 /**
  * How the Sessions page is laid out, kept on this device (the desktop's
- * Default / T3 Mode toggle). T3 is an attention-first inbox with Working,
- * Snoozed and Settled shelves; Settled is the archive under another name.
+ * Default / T3 Mode toggle). T3 is an attention-first inbox with Working
+ * and Snoozed shelves; Settled is the archive under another name, kept off
+ * the page like Archived.
  */
 enum class SidebarMode {
     Default,
@@ -99,7 +100,6 @@ fun snoozeUntil(at: ZonedDateTime, now: ZonedDateTime, label: String): SnoozeOpt
 enum class Shelf(val id: String, val title: String) {
     Working("t3.working", "Working"),
     Snoozed("t3.snoozed", "Snoozed"),
-    Settled("t3.settled", "Settled"),
 }
 
 /** Which shelves are open, from the stored set (null before the user ever opened one): all start collapsed. */

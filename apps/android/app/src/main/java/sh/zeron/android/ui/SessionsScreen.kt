@@ -176,9 +176,6 @@ private fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
     return rows.count { it.indicator == ChatIndicator.WORKING } to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
 }
 
-/** Settled rows shown on the shelf before "See all". */
-private const val SETTLED_PEEK = 20
-
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SessionsScreen(
@@ -382,9 +379,6 @@ fun SessionsScreen(
                 if (mode.isT3 && filter == Filter.All) {
                     shelf(Shelf.Working, front.working, front.working.size, openShelves, actions) { model.setShelfOpen(Shelf.Working, it) }
                     shelf(Shelf.Snoozed, front.snoozed, front.snoozed.size, openShelves, actions) { model.setShelfOpen(Shelf.Snoozed, it) }
-                    shelf(Shelf.Settled, ws.archived.take(SETTLED_PEEK), ws.archived.size, openShelves, actions, onSeeAll = onArchived) {
-                        model.setShelfOpen(Shelf.Settled, it)
-                    }
                 }
             }
         }
@@ -458,14 +452,13 @@ class RowActions(
 fun LazyItemScope.itemMotion(reducedMotion: Boolean): Modifier =
     if (reducedMotion) Modifier.animateItem(fadeInSpec = null, placementSpec = null, fadeOutSpec = null) else Modifier.animateItem()
 
-/** A T3 shelf: a folding bar, its rows when open, and "See all" for a long Settled. */
+/** A T3 shelf: a folding bar and its rows when open. */
 private fun LazyListScope.shelf(
     shelf: Shelf,
     rows: List<SessionRow>,
     total: Int,
     open: Set<String>,
     actions: RowActions,
-    onSeeAll: (() -> Unit)? = null,
     setOpen: (Boolean) -> Unit,
 ) {
     val isOpen = shelf.id in open
@@ -476,13 +469,6 @@ private fun LazyListScope.shelf(
     itemsIndexed(rows, key = { _, r -> "${shelf.id}/${r.id}" }) { i, row ->
         Box(itemMotion(actions.reducedMotion).padding(horizontal = 16.dp).padding(bottom = ListItemDefaults.SegmentedGap)) {
             SwipeableSessionRow(row, i, rows.size, actions)
-        }
-    }
-    if (onSeeAll != null && total > rows.size) {
-        item("shelf-${shelf.id}-all") {
-            Box(itemMotion(actions.reducedMotion).fillMaxWidth().padding(top = 4.dp), contentAlignment = Alignment.Center) {
-                TextButton(onClick = onSeeAll) { Text("See all $total") }
-            }
         }
     }
 }
