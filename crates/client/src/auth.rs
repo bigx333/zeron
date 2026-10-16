@@ -472,7 +472,10 @@ mod tests {
         assert_eq!(parse_auth_callback("zeron://callback"), None);
     }
 
-    /// A raw HTTP/1.1 responder: counts requests, answers each with `reply`.
+    /// A raw HTTP/1.1 responder: counts `POST /auth/refresh` requests, answers
+    /// every connection with `reply`. Only refreshes count — the ephemeral port
+    /// is reachable by anything on the host (local tools probe listening ports
+    /// with `HEAD /`), so counting raw connections over-reports.
     async fn serve_http(
         status: u16,
         body: &'static str,
@@ -490,8 +493,10 @@ mod tests {
                 let counter = counter.clone();
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 8192];
-                    let _ = socket.read(&mut buf).await;
-                    counter.fetch_add(1, Ordering::SeqCst);
+                    let read = socket.read(&mut buf).await.unwrap_or(0);
+                    if buf[..read].starts_with(b"POST /auth/refresh ") {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
                     // Slow enough that concurrent callers overlap.
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     let response = format!(
@@ -505,11 +510,24 @@ mod tests {
         (url, hits)
     }
 
-    struct Collect(Mutex<Vec<ClientEvent>>);
+    struct Collect(Mutex<Vec<ClientEvent>>, tokio::sync::Notify);
 
     impl crate::events::ClientListener for Collect {
         fn on_event(&self, event: ClientEvent) {
             lock(&self.0).push(event);
+            self.1.notify_one();
+        }
+    }
+
+    impl Collect {
+        /// Wait until a delivered event matches (the pump delivers off-task).
+        async fn wait_for(&self, matches: impl Fn(&ClientEvent) -> bool) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            while !lock(&self.0).iter().any(&matches) {
+                tokio::time::timeout_at(deadline, self.1.notified())
+                    .await
+                    .expect("event never delivered");
+            }
         }
     }
 
@@ -519,7 +537,7 @@ mod tests {
     }
 
     fn provider(edge: &str) -> (TokenProvider, Arc<Collect>) {
-        let collect = Arc::new(Collect(Mutex::new(Vec::new())));
+        let collect = Arc::new(Collect(Mutex::new(Vec::new()), tokio::sync::Notify::new()));
         let events = EventPump::new(collect.clone());
         events.start(tokio_util::sync::CancellationToken::new());
         let credentials = crate::config::Credentials::WorkOs {
@@ -548,11 +566,9 @@ mod tests {
         }
         // The fresh token has no parseable exp → treated valid: one refresh.
         assert_eq!(hits.load(Ordering::SeqCst), 1, "single-flight refresh");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(lock(&events.0).iter().any(|e| matches!(
-            e,
-            ClientEvent::AuthRefreshed(t) if t.refresh_token == "r2"
-        )));
+        events
+            .wait_for(|e| matches!(e, ClientEvent::AuthRefreshed(t) if t.refresh_token == "r2"))
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
