@@ -16,7 +16,7 @@ pub(super) fn compact_list_height(rows: usize) -> f32 {
     };
     rows * (COMPACT_ROW_HEIGHT + popover::MENU_GAP) + 2.0 * popover::CARD_INSET
 }
-// The effort track (see `effort_slider`): a 44px pill with the thumb inset
+// The effort track (see `effort_slider`): a 28px pill with the thumb inset
 // in it. Stops and pointer input share the thumb's centre inset.
 const SLIDER_HEIGHT: f32 = crate::effort_slider::TRACK_HEIGHT;
 /// The beat between the two knocks of crossing into the top effort tiers.
@@ -30,8 +30,8 @@ const HEADER_HEIGHT: f32 = 36.0;
 /// the leading side.
 const FAST_BUTTON_WIDTH: f32 = 32.0;
 /// The effort's own header: its icon and level, and reset at the far end.
-const EFFORT_HEADER_HEIGHT: f32 = 28.0;
-const RESET_BUTTON_SIZE: f32 = 28.0;
+const EFFORT_HEADER_HEIGHT: f32 = 24.0;
+const RESET_BUTTON_SIZE: f32 = 24.0;
 /// The header inside the card inset, then the slider block and the space
 /// above the option rows.
 fn header_block() -> f32 {
@@ -1302,7 +1302,7 @@ impl Pickers {
                     }))
                 })
                 .child(
-                    crate::icons::icon(crate::icons::RESTART)
+                    crate::icons::icon(crate::icons::RESET)
                         .size(px(14.0))
                         .text_color(motion::mix(theme.text_muted, theme.text, hover)),
                 )
@@ -1319,16 +1319,17 @@ impl Pickers {
             .child(
                 crate::icons::icon(crate::icons::TUNING)
                     .flex_none()
-                    .size(px(15.0))
+                    .size(px(13.0))
                     .text_color(tier),
             )
             .child(
+                // Secondary to the model's name above it.
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(crate::typography::ui_rems(14.0))
-                    .line_height(px(17.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_size(crate::typography::ui_rems(12.5))
+                    .line_height(px(15.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(tier)
                     .child(crate::roll_text::roll_text(
                         format!("compact-effort-title-{}", cx.entity_id()),

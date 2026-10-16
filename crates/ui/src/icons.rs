@@ -137,6 +137,9 @@ icon_assets![
     (ARCHIVE_UP_MINIMALISTIC, "archive-up-minimalistic"),
     (REFRESH, "refresh"),
     (RESTART, "restart"),
+    // Back to a default: an anticlockwise arc whose arrow points left into
+    // its gap at the top (↺), which reads as reset at small sizes.
+    (RESET, "reset"),
     (ADD_CIRCLE, "add-circle"),
     (TUNING, "tuning"),
     (EYE, "eye"),
@@ -440,6 +443,7 @@ mod tests {
             GLOBAL,
             COPY,
             REFRESH,
+            RESET,
             ALT_ARROW_LEFT,
             ALT_ARROW_DOWN,
             ARROW_UP_RIGHT,

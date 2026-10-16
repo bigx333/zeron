@@ -19,10 +19,10 @@ use crate::motion::{self, MotionSpec};
 use crate::theme::Theme;
 
 /// The track's height; the thumb is inset [`THUMB_INSET`] inside it.
-pub(crate) const TRACK_HEIGHT: f32 = 44.0;
-const THUMB_INSET: f32 = 4.0;
+pub(crate) const TRACK_HEIGHT: f32 = 28.0;
+const THUMB_INSET: f32 = 3.0;
 /// The dots marking steps the fill has not reached.
-const DOT_RADIUS: f32 = 2.5;
+const DOT_RADIUS: f32 = 2.0;
 /// Effort as heat: calm sky at the low end, through blue, indigo and
 /// violet, to fuchsia at the top.
 const HEAT: [(f32, u32); 5] = [
@@ -42,15 +42,15 @@ const SHEEN_WIDTH: f32 = 2.2;
 const SPARK_COUNT: usize = 44;
 const SPARK_MIN: usize = 8;
 /// The longest streak behind a spark, at the top step, before its speed.
-const STREAK_LENGTH: f32 = 14.0;
+const STREAK_LENGTH: f32 = 10.0;
 /// Sparks fade in over this far inside the fill's rounded start.
 const SPARK_EDGE_FADE: f32 = 6.0;
 /// The glow's rings around the fill.
 const GLOW_RINGS: usize = 5;
-const GLOW_RING_STEP: f32 = 2.5;
+const GLOW_RING_STEP: f32 = 2.0;
 /// The top tiers' halo: how far it travels out from the thumb, and its stroke.
-const HALO_TRAVEL: f32 = 10.0;
-const HALO_STROKE: f32 = 2.0;
+const HALO_TRAVEL: f32 = 7.0;
+const HALO_STROKE: f32 = 1.5;
 /// The top tiers fade in and out.
 pub(crate) const TOP_FADE: MotionSpec = MotionSpec::new(500, motion::EASE_TAILWIND);
 /// The thumb's spring: Compose's `StiffnessMediumLow` with a 0.75 damping
@@ -196,7 +196,7 @@ fn sparks() -> &'static [Spark] {
             .map(|_| Spark {
                 x: next(),
                 y: 0.18 + 0.64 * next(),
-                radius: 0.8 + 1.4 * next(),
+                radius: 0.6 + 1.0 * next(),
                 speed: 0.5 + next(),
                 phase: next(),
                 twinkle: 1.0 + 2.0 * next(),
@@ -522,7 +522,7 @@ pub(crate) fn paint(window: &mut Window, bounds: Bounds<Pixels>, theme: &Theme, 
         drops.push(BoxShadow {
             color: theme.accent.opacity(0.35 * track.fast_halo),
             offset: point(px(0.0), px(1.0)),
-            blur_radius: px(10.0),
+            blur_radius: px(6.0),
             spread_radius: px(0.0),
             inset: false,
         });
@@ -531,7 +531,7 @@ pub(crate) fn paint(window: &mut Window, bounds: Bounds<Pixels>, theme: &Theme, 
         drops.push(BoxShadow {
             color: gpui::black().opacity(0.12 * track.press),
             offset: point(px(0.0), px(2.0 * track.press)),
-            blur_radius: px(8.0),
+            blur_radius: px(5.0),
             spread_radius: px(0.0),
             inset: false,
         });
@@ -746,7 +746,7 @@ mod tests {
         for spark in all {
             assert!((0.0..1.0).contains(&spark.x));
             assert!((0.18..=0.82).contains(&spark.y));
-            assert!((0.8..=2.2).contains(&spark.radius));
+            assert!((0.6..=1.6).contains(&spark.radius));
             assert!((0.5..=1.5).contains(&spark.speed));
             assert!((1.0..=3.0).contains(&spark.twinkle));
         }
@@ -768,8 +768,10 @@ mod tests {
         assert_eq!(strip_edges(&[30.0], 4.0 * r, r), [0.0, 4.0 * r]);
         // The capsule pinches at the top and bottom of its rounded ends.
         assert_eq!(capsule_span(r, r, 120.0), (0.0, 120.0));
+        // 2pt from the top, a rounded end is inset by its chord's sagitta.
         let (left, right) = capsule_span(2.0, r, 120.0);
-        assert!(left > 8.0 && right < 112.0);
+        let inset = r - (r * r - (r - 2.0).powi(2)).sqrt();
+        assert!((left - inset).abs() < 0.5 && (120.0 - right - inset).abs() < 0.5);
     }
 
     #[test]
