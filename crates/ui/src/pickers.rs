@@ -5388,7 +5388,7 @@ impl Pickers {
                 == Some(row.model.id.as_str());
         let is_active = ix == self.active;
         let is_fav = self.defaults.is_favorite(row.harness, &row.model.id);
-        let (icon_path, tint) = harness_brand_icon(row.harness);
+        let (icon_path, tint) = model_brand_icon(row.harness, &row.model.id);
         let label: SharedString = row.model.label.clone().into();
         let harness_name = row.harness_name.clone();
         let harness = row.harness;
@@ -6737,24 +6737,33 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
 }
 
 pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {
-    match harness {
-        HarnessId::ClaudeCode | HarnessId::Mock => (
-            crate::icons::CLAUDE_MARK,
-            Some(crate::icons::claude_brand()),
-        ),
-        HarnessId::Codex => (crate::icons::OPENAI_MARK, None),
-        HarnessId::Cursor => (crate::icons::CURSOR_MARK, None),
-        // Cognition's mark (the Devin product icon), monochrome.
-        HarnessId::Devin => (crate::icons::DEVIN_MARK, None),
-        // Monochrome mark, tinted by the surface like OpenAI's.
-        HarnessId::Grok => (crate::icons::GROK_MARK, None),
+    let mark = match harness {
+        HarnessId::ClaudeCode | HarnessId::Mock => crate::icons::CLAUDE_MARK,
+        HarnessId::Codex => crate::icons::OPENAI_MARK,
+        HarnessId::Cursor => crate::icons::CURSOR_MARK,
+        // Cognition's mark (the Devin product icon).
+        HarnessId::Devin => crate::icons::DEVIN_MARK,
+        HarnessId::Grok => crate::icons::GROK_MARK,
         // Nous Research's mark (the Hermes product icon), monochrome.
-        HarnessId::Hermes => (crate::icons::HERMES_MARK, None),
-        HarnessId::Pi => (crate::icons::PI_MARK, None),
+        HarnessId::Hermes => crate::icons::HERMES_MARK,
+        HarnessId::Pi => crate::icons::PI_MARK,
         // The pixel-"o" from opencode's wordmark (their favicon), monochrome.
-        HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
-        HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
-        HarnessId::Muse => (crate::icons::MUSE_MARK, Some(crate::icons::muse_brand())),
+        HarnessId::Opencode => crate::icons::OPENCODE_MARK,
+        HarnessId::Antigravity => crate::icons::ANTIGRAVITY_MARK,
+        HarnessId::Muse => crate::icons::MUSE_MARK,
+    };
+    (mark, crate::icons::mark_brand(mark))
+}
+
+/// A model's mark: its vendor's (a Gemini model under opencode wears
+/// Gemini's), else its harness's.
+pub(crate) fn model_brand_icon(
+    harness: HarnessId,
+    model_id: &str,
+) -> (&'static str, Option<gpui::Hsla>) {
+    match crate::icons::model_vendor_mark(model_id) {
+        Some(mark) => (mark, crate::icons::mark_brand(mark)),
+        None => harness_brand_icon(harness),
     }
 }
 
@@ -7067,13 +7076,14 @@ impl Render for Pickers {
             None => self.effective_harness(cx),
         };
         let harness_icon: (&'static str, Option<gpui::Hsla>) = match chip_harness {
-            Some(harness) => harness_brand_icon(harness),
+            // The picked model's vendor (Gemini under opencode), else the harness.
+            Some(harness) => match self.effective_model_id(cx) {
+                Some(model) => model_brand_icon(harness, model),
+                None => harness_brand_icon(harness),
+            },
             None if self.title.is_some() => (crate::icons::CHAT_ROUND_LINE, Some(theme.text_muted)),
             None if no_agents => (crate::icons::TERMINAL, Some(theme.text_muted)),
-            None => (
-                crate::icons::CLAUDE_MARK,
-                Some(crate::icons::claude_brand()),
-            ),
+            None => harness_brand_icon(HarnessId::ClaudeCode),
         };
         // The chip names the model and its effort only; the other options
         // (context, fast mode, ...) live in the popover. The effort always
