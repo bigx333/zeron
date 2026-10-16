@@ -44,6 +44,7 @@ import androidx.compose.material.icons.outlined.Schedule
 import sh.zeron.android.design.ModelMark
 import sh.zeron.android.transcript.TranscriptState
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.focus.FocusRequester
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -295,11 +296,13 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
     var models by remember { mutableStateOf<List<ModelInfo>?>(null) }
     var menu by remember { mutableStateOf<String?>(null) }
 
+    // Loaded up front: whether the effort pill shows depends on the model's levels.
+    LaunchedEffect(c.host.deviceId, harness) {
+        models = runCatching { client.listModels(c.host.deviceId, harness) }.getOrNull() ?: fallbackModels(harness)
+    }
+
     fun open(which: String) {
         menu = which
-        if (models == null) scope.launch {
-            models = runCatching { client.listModels(c.host.deviceId, harness) }.getOrNull() ?: fallbackModels(harness)
-        }
     }
 
     fun setConfig(change: (ChatConfig) -> ChatConfig) {
@@ -315,9 +318,13 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
             }))
         }
     }
-    row?.reasoning?.takeIf { it.isNotEmpty() }?.let { level ->
+    // Shown whenever the model has an effort ladder, not only once a level was
+    // set: a session on the model's default still needs a way to change it.
+    val model = models?.let { list -> list.firstOrNull { it.id == row?.model } ?: list.firstOrNull() }
+    val levels = model?.reasoningLevels.orEmpty()
+    val level = row?.reasoning?.takeIf { it.isNotEmpty() } ?: model?.defaultReasoning ?: levels.firstOrNull()
+    if (level != null) {
         ContextChip(reasoningLabel(level), leading = { ZIcon(ZIcons.Effort, null, Modifier.size(16.dp)) }, onClick = { open("effort") }) {
-            val levels = models?.let { list -> (list.firstOrNull { it.id == row.model } ?: list.firstOrNull())?.reasoningLevels }.orEmpty()
             ChoiceMenu(menu == "effort", { menu = null }, listOf(MenuSection("Reasoning effort", levels.map { l ->
                 MenuChoice(reasoningLabel(l), l == level) { setConfig { it.copy(reasoning = l) } }
             })))
