@@ -691,33 +691,33 @@ fn wizard_escape_dismisses(page: usize, page_has_pick: bool, input_empty: bool) 
     page == 0 && !page_has_pick && input_empty
 }
 
-/// Find the unresolved input request the panel should serve, if any: an
-/// unresolved input part on the LAST assistant entry — regardless of the
-/// entry's run status. The question stays answerable until the user actually
-/// answers it (user requirement): a run that died under its question (engine
-/// restart reaping it) leaves an aborted entry whose answer the engine
-/// delivers as a resumed turn (`RespondInput`'s dead-run fallback). A newer
-/// assistant entry supersedes an unanswered question. Assistant-entry-scoped,
-/// not last-entry: a steer prompt sent while the agent waits appends a USER
-/// entry after the streaming assistant entry, and a last-entry-only read made
-/// the QuestionPanel vanish exactly when the user typed (earlier forensics;
-/// matches the original composer.tsx, which reads the live-assistant fold —
-/// rebuilt from replay even after the run died).
+/// Find an unanswered question for the panel. Blocking questions belong to
+/// the latest assistant entry, even if its run died; the engine can deliver
+/// their answers as a resumed turn. Async questions stay answerable across
+/// later assistant entries and turn completion. Trailing user entries never
+/// hide a question when the user types or steers the agent.
 pub fn pending_input_request(
     transcript: &[SessionMessageEntry],
 ) -> Option<(String, Vec<UserInputQuestion>)> {
+    let latest = transcript
+        .iter()
+        .rev()
+        .find(|entry| entry.role == MessageRole::Assistant)?;
     transcript
         .iter()
         .rev()
-        .find(|entry| entry.role == MessageRole::Assistant)
-        .and_then(|entry| {
+        .filter(|entry| entry.role == MessageRole::Assistant)
+        .find_map(|entry| {
             entry.parts.iter().find_map(|part| match part {
                 MessagePart::Input {
                     request_id,
                     questions,
                     resolved: false,
+                    non_blocking,
                     ..
-                } => Some((request_id.clone(), questions.clone())),
+                } if *non_blocking || entry.id == latest.id => {
+                    Some((request_id.clone(), questions.clone()))
+                }
                 _ => None,
             })
         })
@@ -16838,6 +16838,7 @@ mod tests {
                     questions: vec![q],
                     resolved,
                     answers: None,
+                    non_blocking: false,
                 }],
                 created_at: 0,
                 device_id: "device".into(),
@@ -16913,6 +16914,7 @@ mod tests {
                     questions: vec![question("q", &["a", "b"], false)],
                     resolved: false,
                     answers: None,
+                    non_blocking: false,
                 }],
                 created_at: 0,
                 device_id: "device".into(),
@@ -16943,6 +16945,7 @@ mod tests {
             questions: vec![question("q", &["a"], false)],
             resolved: false,
             answers: None,
+            non_blocking: false,
         };
         let entry = |status: Option<MessageStatus>, parts: Vec<MessagePart>| SessionMessageEntry {
             id: "m".into(),
@@ -16993,6 +16996,19 @@ mod tests {
             },
         ];
         assert!(pending_input_request(&t).is_none());
+        // Async prompts survive later assistant entries and turn completion.
+        let mut async_transcript = t.clone();
+        if let MessagePart::Input { non_blocking, .. } = &mut async_transcript[0].parts[0] {
+            *non_blocking = true;
+        }
+        assert_eq!(
+            pending_input_request(&async_transcript).map(|(id, _)| id),
+            Some("r1".into())
+        );
+        if let MessagePart::Input { resolved, .. } = &mut async_transcript[0].parts[0] {
+            *resolved = true;
+        }
+        assert!(pending_input_request(&async_transcript).is_none());
         // Resolved part → no panel.
         let resolved = MessagePart::Input {
             id: "in-r1".into(),
@@ -17000,6 +17016,7 @@ mod tests {
             questions: vec![],
             resolved: true,
             answers: None,
+            non_blocking: false,
         };
         let t = vec![entry(
             Some(MessageStatus::Streaming),

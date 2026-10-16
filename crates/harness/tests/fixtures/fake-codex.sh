@@ -247,6 +247,18 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
   ;;
 
+*scenario:async-input*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"ask-1","type":"agentMessage","text":"","questions":null}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"ask-1","delta":"A quick question."}}'
+  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"id":"ask-1","type":"agentMessage","text":"A quick question.","questions":[{"title":"Which improvement?","options":["Fix a bug","Improve usability"]},{"title":"Any constraints?"}]}}}'
+  # Replayed completions must not ask twice, even across text boundaries.
+  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"id":"ask-1","type":"agentMessage","text":"A quick question.","questions":[{"title":"Which improvement?","options":["Fix a bug","Improve usability"]},{"title":"Any constraints?"}]}}}'
+  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"id":"ask-2","type":"agentMessage","text":"","questions":[{"title":"Anything else?","options":null}]}}}'
+  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"id":"work-1","type":"agentMessage","text":"Independent work continues.","questions":[]}}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
 *scenario:publication*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"publication-turn\"}}}"
   emit '{"method":"item/agentMessage/delta","params":{"itemId":"publication-answer","delta":"Publication turn completed"}}'

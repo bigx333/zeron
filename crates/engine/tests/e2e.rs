@@ -1755,6 +1755,7 @@ async fn closing_a_dead_runs_question_records_it_without_a_new_turn() {
                 }],
                 resolved: false,
                 answers: None,
+                non_blocking: false,
             }],
             created_at: 1,
             device_id: core.device_id.clone(),
@@ -1792,6 +1793,245 @@ async fn closing_a_dead_runs_question_records_it_without_a_new_turn() {
     assert_eq!(entries(&core).len(), 1);
     core.shutdown().await;
 }
+
+#[tokio::test]
+async fn async_input_answers_steer_live_and_completed_turns_without_waiting_status() {
+    struct AsyncAskingHarness {
+        settle_first: bool,
+        prompts: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    #[async_trait]
+    impl Harness for AsyncAskingHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Async asking"
+        }
+        fn supports_steering(&self) -> bool {
+            true
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::StepBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            request: RunRequest,
+            mut controls: RunControls,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            self.prompts.lock().unwrap().push(request.prompt);
+            let prompts = self.prompts.clone();
+            let settle_first = self.settle_first;
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                tx.send(Ok(mock_script()[0].clone())).await.unwrap();
+                tx.send(Ok(AgentEvent::AsyncInputRequested {
+                    request_id: "async-question".into(),
+                    questions: vec![zeron_proto::UserInputQuestion {
+                        id: "q1".into(),
+                        header: "Pick".into(),
+                        question: "Which improvement?".into(),
+                        options: vec!["Fix a bug".into(), "Improve usability".into()],
+                        multi_select: false,
+                        prefill: None,
+                        multiline: false,
+                    }],
+                }))
+                .await
+                .unwrap();
+                tx.send(Ok(AgentEvent::TextDelta {
+                    text: "Independent work".into(),
+                }))
+                .await
+                .unwrap();
+                if settle_first {
+                    tx.send(Ok(done(DoneStatus::Completed))).await.unwrap();
+                }
+                let Some(message) = controls.steering.recv().await else {
+                    return;
+                };
+                prompts.lock().unwrap().push(message.prompt);
+                tx.send(Ok(AgentEvent::Steered {
+                    assistant_message_id: None,
+                    next_assistant_message_id: Some("answer-entry".into()),
+                }))
+                .await
+                .unwrap();
+                tx.send(Ok(AgentEvent::TextDelta {
+                    text: "Answer accepted".into(),
+                }))
+                .await
+                .unwrap();
+                tx.send(Ok(done(DoneStatus::Completed))).await.unwrap();
+                controls.interrupt.cancelled().await;
+            });
+            Ok(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            })
+            .boxed())
+        }
+    }
+    // (settle_first, close): answered mid-run, answered after the turn
+    // settled, and closed unanswered mid-run.
+    for (settle_first, close) in [(false, false), (true, false), (false, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let core = assemble(
+            dir.path(),
+            Arc::new(AsyncAskingHarness {
+                settle_first,
+                prompts: prompts.clone(),
+            }),
+        );
+        let handle = core.doc_host.open(CHAT).unwrap();
+        queue_as_viewer(
+            handle.doc(),
+            "ask-async",
+            SessionCommandPayload::Run {
+                request: run_request("ask and continue"),
+                message_id: "user-async".into(),
+            },
+        );
+        wait_for(
+            || {
+                entries_now(&core).iter().any(|entry| {
+                    entry.parts.iter().any(|part| {
+                        matches!(
+                            part,
+                            MessagePart::Input {
+                                non_blocking: true,
+                                resolved: false,
+                                ..
+                            }
+                        )
+                    }) && entry.parts.iter().any(|part| {
+                        matches!(part,
+                            MessagePart::Text { text, .. } if text == "Independent work"
+                        )
+                    })
+                })
+            },
+            "async question and independent output",
+        )
+        .await;
+        let expected = if settle_first {
+            SessionStatus::Idle
+        } else {
+            SessionStatus::Working
+        };
+        wait_for(
+            || core.sessions.session_status(CHAT).map(|s| s.status) == Some(expected),
+            "async prompt preserves execution status",
+        )
+        .await;
+        let picked = if close {
+            vec![]
+        } else {
+            vec![zeron_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["Improve usability".into()],
+            }]
+        };
+        let answer = SessionCommandPayload::RespondInput {
+            request_id: "async-question".into(),
+            answers: picked.clone(),
+        };
+        queue_as_viewer(handle.doc(), "answer-async", answer.clone());
+        wait_for(
+            || {
+                command_status(&core, "answer-async").map(|s| s.0)
+                    == Some(SessionCommandStatus::Applied)
+            },
+            "async answer command applied",
+        )
+        .await;
+        if close {
+            // Closing records `answers: []` and delivers nothing: the
+            // agent keeps working on the turn it was already running.
+            wait_for(
+                || {
+                    entries_now(&core).iter().flat_map(|e| &e.parts).any(|part| {
+                        matches!(part,
+                            MessagePart::Input { non_blocking: true, resolved: true, answers: Some(a), .. }
+                                if a.is_empty()
+                        )
+                    })
+                },
+                "async question closed unanswered",
+            )
+            .await;
+            assert_eq!(
+                core.sessions.session_status(CHAT).map(|s| s.status),
+                Some(SessionStatus::Working)
+            );
+            assert_eq!(*prompts.lock().unwrap(), ["ask and continue"]);
+            core.shutdown().await;
+            continue;
+        }
+        wait_for(
+            || {
+                entries_now(&core).iter().any(|entry| {
+                    entry.status == Some(MessageStatus::Complete) && entry.parts.iter().any(|part| {
+                matches!(part, MessagePart::Text { text, .. } if text == "Answer accepted")
+            })
+                })
+            },
+            "answer delivered to the existing conversation",
+        )
+        .await;
+        assert!(
+            entries_now(&core)
+                .iter()
+                .flat_map(|e| &e.parts)
+                .any(|part| matches!(
+                    part,
+                    MessagePart::Input {
+                        non_blocking: true,
+                        resolved: true,
+                        answers: Some(a),
+                        ..
+                    } if *a == picked
+                ))
+        );
+        assert!(
+            !entries_now(&core)
+                .iter()
+                .flat_map(|e| &e.parts)
+                .any(|part| matches!(
+                    part,
+                    MessagePart::Input {
+                        resolved: false,
+                        ..
+                    }
+                ))
+        );
+        assert_eq!(
+            *prompts.lock().unwrap(),
+            [
+                "ask and continue",
+                "Answering your earlier question:\nWhich improvement? — Improve usability",
+            ]
+        );
+        queue_as_viewer(handle.doc(), "duplicate-async", answer);
+        wait_for(
+            || {
+                command_status(&core, "duplicate-async").map(|s| s.0)
+                    == Some(SessionCommandStatus::Rejected)
+            },
+            "duplicate async answer rejected",
+        )
+        .await;
+        assert_eq!(prompts.lock().unwrap().len(), 2);
+        core.shutdown().await;
+    }
+}
+
 
 #[tokio::test]
 async fn respond_input_resolves_pending_question() {

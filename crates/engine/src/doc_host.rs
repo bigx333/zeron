@@ -5727,27 +5727,31 @@ impl DocHost {
                     return Ok((SessionCommandStatus::Applied, None));
                 }
                 // No live resolver. Only a request id the doc shows as an
-                // OPEN question on a SETTLED entry gets the orphan fallback:
-                // a mismatched or already-resolved id is a stale/buggy answer
-                // and must still reject, and a still-streaming entry's
-                // question belongs to the live run (a just-consumed resolver
-                // racing a second answer must not spawn a duplicate turn).
+                // OPEN question gets the fallback: a mismatched or
+                // already-resolved id is a stale/buggy answer and must still
+                // reject. A blocking question must also be on a SETTLED
+                // entry — a still-streaming one belongs to the live run (a
+                // just-consumed resolver racing a second answer must not
+                // spawn a duplicate turn). Async questions have no resolver
+                // and are answerable while the agent works.
                 let questions = handle.doc.read_entries().ok().and_then(|entries| {
-                    entries
-                        .iter()
-                        .rev()
-                        .filter(|e| e.status != Some(MessageStatus::Streaming))
-                        .find_map(|e| {
-                            e.parts.iter().find_map(|p| match p {
-                                MessagePart::Input {
-                                    request_id: rid,
-                                    questions,
-                                    resolved: false,
-                                    ..
-                                } if rid == request_id => Some(questions.clone()),
-                                _ => None,
-                            })
+                    entries.iter().rev().find_map(|e| {
+                        e.parts.iter().find_map(|p| match p {
+                            MessagePart::Input {
+                                request_id: rid,
+                                questions,
+                                resolved: false,
+                                non_blocking,
+                                ..
+                            } if rid == request_id
+                                && (*non_blocking
+                                    || e.status != Some(MessageStatus::Streaming)) =>
+                            {
+                                Some(questions.clone())
+                            }
+                            _ => None,
                         })
+                    })
                 });
                 let Some(questions) = questions else {
                     return Ok((
@@ -5755,17 +5759,28 @@ impl DocHost {
                         Some("no pending input request".into()),
                     ));
                 };
+                // An async question can sit in a live run's fold, whose next
+                // write would reopen a part stamped only in the doc: tell the
+                // run as well.
+                let resolved = zeron_proto::AgentEvent::InputResolved {
+                    request_id: request_id.clone(),
+                    answers: Some(answers.clone()),
+                };
                 // Closed without an answer: there is nothing to deliver, and
                 // a resumed turn would only say so. Record it and stop.
                 if answers.is_empty() {
                     handle.doc.resolve_input(request_id, answers)?;
+                    sessions.inject_event(chat_id, resolved);
                     return Ok((
                         SessionCommandStatus::Applied,
                         Some("closed unanswered".into()),
                     ));
                 }
-                // The run died under the question (engine restart, crash).
-                // The question is still open in the doc and the command is
+                // Async questions are answered by an ordinary message, and the
+                // run may still be working: dispatch steers it, or resumes the
+                // conversation in a new turn. A blocking question lands here
+                // when the run died under it (engine restart, crash): the
+                // question is still open in the doc and the command is
                 // durable, so honor it anyway — stamp the part resolved and
                 // deliver the answers as the next (resumed) turn, the same
                 // fallback a dead-run steer takes. The question UI stays up
@@ -5787,6 +5802,7 @@ impl DocHost {
                     tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                         "orphaned input resolve failed");
                 }
+                sessions.inject_event(chat_id, resolved);
                 let harness = self.harness_for_request(chat_id, &request);
                 self.dispatch_with_source_context(sessions, chat_id, harness, request, None)
                     .await?;

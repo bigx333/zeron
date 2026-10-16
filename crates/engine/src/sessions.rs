@@ -2943,6 +2943,7 @@ fn turn_tail(events: impl Iterator<Item = AgentEvent>, closed: bool) -> TurnTail
             | AgentEvent::ToolResult { .. }
             | AgentEvent::GeneratedImage { .. }
             | AgentEvent::Visual { .. }
+            | AgentEvent::AsyncInputRequested { .. }
             | AgentEvent::AssistantMessageCompleted { .. }
             | AgentEvent::Steered { .. } => tail.reached_provider = true,
             _ => {}
@@ -4154,7 +4155,7 @@ async fn drive_run(
                         MessagePart::Tool { id, resolved: false, .. } => {
                             id != zeron_proto::LIVE_PLAN_TOOL_ID
                         }
-                        MessagePart::Input { resolved: false, .. } => true,
+                        MessagePart::Input { resolved: false, non_blocking: false, .. } => true,
                         _ => false,
                     }) =>
                 {
@@ -4402,7 +4403,7 @@ async fn drive_run(
         // push the quiesce watchdog's window out.
         inner.touch_session(&chat_id);
         last_stream_activity = tokio::time::Instant::now();
-        // The engine's input bridge is the sole authority on input requests:
+        // The engine's input bridge owns blocking input requests:
         // it mints the id and parks the resolver BEFORE emitting the event,
         // so a legitimate id is always pending here. A harness emitting its
         // own copy (a different id no resolver knows) would fold an
@@ -4442,6 +4443,17 @@ async fn drive_run(
                     .await;
             }
             continue;
+        }
+        if let AgentEvent::InputResolved {
+            request_id,
+            answers: Some(answers),
+        } = &event
+        {
+            // Async questions may belong to an earlier, finalized segment.
+            // Resolve that durable part as well as the live fold.
+            if let Err(err) = doc.resolve_input(request_id, answers) {
+                tracing::warn!(%chat_id, %request_id, error = %err, "input resolve failed");
+            }
         }
         // Capacity/occupancy can settle after Done; updating it must not reopen a turn.
         if let AgentEvent::ContextUsage { tokens, window } = &event {
@@ -4769,7 +4781,14 @@ async fn drive_run(
                 inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
             }
             AgentEvent::InputResolved { .. } => {
-                inner.set_status(&chat_id, SessionStatus::Working, false);
+                // Resolving an async question must not clear the wait on a
+                // blocking one still pending.
+                let waiting = lock(&inner.runs)
+                    .get(&chat_id)
+                    .is_some_and(|h| !lock(&h.pending_inputs).is_empty());
+                if !waiting {
+                    inner.set_status(&chat_id, SessionStatus::Working, false);
+                }
             }
             _ => {}
         }
@@ -4790,7 +4809,7 @@ async fn drive_run(
         }
 
         if let AgentEvent::Done { status, .. } = &event {
-            // A question still pending at turn end can never be legitimately
+            // A blocking question pending at turn end cannot be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks
             // the session into Working with no turn behind it — stranded
@@ -4810,12 +4829,16 @@ async fn drive_run(
                 DoneStatus::Completed | DoneStatus::Errored => MessageStatus::Complete,
             };
             // No dangling chips: a run that ends for ANY reason (completed,
-            // errored, interrupted) terminally resolves its input parts — an
-            // unresolved question must not outlive the run that asked it
+            // errored, interrupted) terminally resolves its blocking input
+            // parts — such a question must not outlive the run that asked it
             // (its resolver died with the run; an answer could never land).
+            // Async questions are answered by a later message and stay open.
             for part in folded.iter_mut() {
                 if let MessagePart::Input {
-                    resolved, answers, ..
+                    resolved,
+                    answers,
+                    non_blocking: false,
+                    ..
                 } = part
                 {
                     if !*resolved {

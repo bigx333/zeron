@@ -215,6 +215,11 @@ pub enum MessagePart {
         /// written before answers were recorded (old readers ignore it).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answers: Option<Vec<UserInputAnswer>>,
+        /// Answered through a later user message instead of a live resolver,
+        /// so it stays open across turn boundaries. Closing it unanswered
+        /// records `answers: []` like any other question.
+        #[serde(default)]
+        non_blocking: bool,
     },
     Error {
         id: String,
@@ -325,8 +330,8 @@ impl MessagePart {
 ///   (a tool call in between breaks the text block).
 /// - `ToolCall` appends, or refreshes in place when the id already exists (SDK retry idempotence).
 /// - `ToolResult` marks the matching tool part resolved / errored in place.
-/// - `InputRequested` appends an input part; `InputResolved` marks it resolved and records the
-///   answers it carries.
+/// - `InputRequested` appends an input part (`AsyncInputRequested` sets `non_blocking`);
+///   `InputResolved` marks either kind resolved and records the answers it carries.
 /// - `Error` and `Done{error}` become visible error parts.
 pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
     match event {
@@ -455,6 +460,10 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         AgentEvent::InputRequested {
             request_id,
             questions,
+        }
+        | AgentEvent::AsyncInputRequested {
+            request_id,
+            questions,
         } => {
             let id = format!("in-{request_id}");
             if !out.iter().any(|p| p.id() == id) {
@@ -464,6 +473,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     questions: questions.clone(),
                     resolved: false,
                     answers: None,
+                    non_blocking: matches!(event, AgentEvent::AsyncInputRequested { .. }),
                 });
             }
         }
@@ -874,6 +884,7 @@ mod tests {
             questions: vec![],
             resolved: true,
             answers: None,
+            non_blocking: false,
         };
         assert!(parts[0].byte_len() > bare.byte_len());
     }

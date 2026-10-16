@@ -13166,6 +13166,7 @@ mod tests {
                 }],
                 resolved,
                 answers,
+                non_blocking: false,
             }],
             created_at: 1,
             device_id: "dev".into(),

@@ -216,7 +216,7 @@ fn question_chip_reads_what_was_answered() {
             entries: vec![Arc::new(SessionMessageEntry {
                 id: "a".into(),
                 role: MessageRole::Assistant,
-                parts: vec![MessagePart::Input { id: "r1".into(), request_id: "r1".into(), questions, resolved, answers }],
+                parts: vec![MessagePart::Input { id: "r1".into(), request_id: "r1".into(), questions, resolved, answers, non_blocking: false }],
                 created_at: 0,
                 device_id: String::new(),
                 status: Some(MessageStatus::Complete),
