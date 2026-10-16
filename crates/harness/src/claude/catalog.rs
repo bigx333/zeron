@@ -131,6 +131,10 @@ const LEGACY: &[&str] = &[
     "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
 ];
 
 /// Whether `id` is an older generation, with or without the `[1m]`
@@ -388,16 +392,30 @@ pub fn static_models() -> Vec<Model> {
             vec![toggle("fastMode", "Fast Mode")],
         ),
         model(
+            "claude-sonnet-5-5",
+            "Sonnet 5.5",
+            "Efficient for routine tasks",
+            FULL_LADDER,
+            vec![],
+        ),
+        model(
             "claude-sonnet-5",
             "Sonnet 5",
-            "Balanced speed and intelligence",
+            "Previous generation Sonnet",
             XHIGH_LADDER,
             vec![context_window()],
         ),
         model(
+            "claude-haiku-5-5",
+            "Haiku 5.5",
+            "Fastest for quick answers",
+            FULL_LADDER,
+            vec![],
+        ),
+        model(
             "claude-haiku-4-5",
             "Haiku 4.5",
-            "Fastest model for everyday tasks",
+            "Previous generation Haiku",
             &[],
             vec![toggle("thinking", "Thinking")],
         ),
@@ -421,7 +439,9 @@ mod tests {
                 "claude-fable-5",
                 "claude-opus-5",
                 "claude-opus-4-8",
-                "claude-opus-4-7"
+                "claude-opus-4-7",
+                "claude-sonnet-5",
+                "claude-haiku-4-5"
             ]
         );
         assert!(is_legacy("claude-opus-4-8[1m]"));
