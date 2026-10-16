@@ -1523,8 +1523,10 @@ fn flush_paragraph(out: &mut Vec<Block>, acc: &mut Vec<InlineRun>, after_math: b
         trim_runs_start(acc);
     }
     if !acc.is_empty() {
+        // Same pipeline as `parse_inline_container`: tight list items arrive
+        // as bare inline events, so this is their only autolink pass.
         out.push(Block::Paragraph {
-            runs: merge_runs(std::mem::take(acc)),
+            runs: autolink_runs(merge_runs(std::mem::take(acc))),
         });
     }
 }
@@ -1858,7 +1860,7 @@ fn not_math(tex: &str, next: Option<u8>) -> bool {
         || (tex.ends_with('+') && !script_sign)
 }
 
-/// Promote bare `http(s)://` URLs into link runs — GFM's autolink extension,
+/// Promote bare `http(s)://` and `www.` URLs into link runs — GFM's autolink extension,
 /// which pulldown-cmark has no option for (agents paste naked PR/issue URLs
 /// constantly; user report: the link isn't clickable). Runs already inside a
 /// link, code span or formula pass through untouched. Idempotent, so nested containers
@@ -1885,47 +1887,50 @@ fn push_text_autolinked(runs: &mut Vec<InlineRun>, text: &str, style: &InlineSty
         }
     };
     let mut rest = text;
-    while let Some(at) = find_url_start(rest) {
+    while let Some((at, prefix)) = find_url_start(rest) {
         let from = &rest[at..];
-        let scheme = if from.starts_with("https://") {
-            "https://".len()
-        } else {
-            "http://".len()
-        };
         let len = bare_url_len(from);
-        if len <= scheme {
-            // A scheme with nothing after it stays text (don't re-find it).
-            push(runs, &rest[..at + scheme], style.clone());
-            rest = &from[scheme..];
+        if len <= prefix.len() {
+            // A prefix with nothing after it stays text (don't re-find it).
+            push(runs, &rest[..at + prefix.len()], style.clone());
+            rest = &from[prefix.len()..];
             continue;
         }
         push(runs, &rest[..at], style.clone());
         let mut linked = style.clone();
-        linked.link = Some(from[..len].to_string());
+        // GFM's `www.` form carries no scheme; the link opens over http.
+        let href = if prefix == "www." { "http://" } else { "" };
+        linked.link = Some(format!("{href}{}", &from[..len]));
         push(runs, &from[..len], linked);
         rest = &from[len..];
     }
     push(runs, rest, style.clone());
 }
 
-/// First viable `http(s)://` occurrence: not glued to a preceding
-/// alphanumeric (`foohttps://…` stays text, per GFM's boundary rule).
-fn find_url_start(text: &str) -> Option<usize> {
-    let mut from = 0;
-    while let Some(rel) = text[from..].find("http") {
-        let at = from + rel;
-        let after = &text[at..];
-        let is_scheme = after.starts_with("http://") || after.starts_with("https://");
-        let boundary = text[..at]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !c.is_alphanumeric());
-        if is_scheme && boundary {
-            return Some(at);
+/// First viable bare-URL start and its prefix (`http://`, `https://` or
+/// `www.`). Schemes must not be glued to a preceding alphanumeric
+/// (`foohttps://…` stays text); `www.` follows GFM's stricter rule — line
+/// start, whitespace, or `*_~(` before it, and a domain character after.
+fn find_url_start(text: &str) -> Option<(usize, &'static str)> {
+    text.char_indices().find_map(|(at, c)| {
+        if !matches!(c, 'h' | 'w') {
+            return None;
         }
-        from = at + "http".len();
-    }
-    None
+        let before = text[..at].chars().next_back();
+        let after = &text[at..];
+        if let Some(scheme) = ["https://", "http://"]
+            .into_iter()
+            .find(|s| after.starts_with(s))
+        {
+            return before
+                .is_none_or(|c| !c.is_alphanumeric())
+                .then_some((at, scheme));
+        }
+        let www = after.starts_with("www.")
+            && after[4..].starts_with(|c: char| c.is_alphanumeric())
+            && before.is_none_or(|c| c.is_whitespace() || matches!(c, '*' | '_' | '~' | '('));
+        www.then_some((at, "www."))
+    })
 }
 
 /// Byte length of the bare URL at the start of `text`: run to whitespace (or
@@ -2668,6 +2673,132 @@ mod tests {
         let link = runs.iter().find(|r| r.style.link.is_some()).unwrap();
         assert!(link.style.bold);
         assert_eq!(link.style.link.as_deref(), Some("https://x.dev"));
+    }
+
+    /// GFM's extended `www.` autolink: shown as written, opened over http,
+    /// only at a word start and never with nothing after the dot.
+    #[test]
+    fn www_urls_autolink() {
+        assert_eq!(
+            only_link("see www.example.com/docs.\n"),
+            Some((
+                "www.example.com/docs".into(),
+                "http://www.example.com/docs".into()
+            ))
+        );
+        assert_eq!(
+            only_link("(www.x.dev)\n").map(|l| l.1),
+            Some("http://www.x.dev".into())
+        );
+        assert_eq!(only_link("a.www.x.dev or ab/www.x.dev\n"), None);
+        assert_eq!(only_link("the www. prefix alone\n"), None);
+        assert_eq!(only_link("`www.x.dev`\n"), None);
+        // Inside an http URL it is part of that URL, not a second link.
+        assert_eq!(
+            only_link("https://www.x.dev/a\n"),
+            Some(("https://www.x.dev/a".into(), "https://www.x.dev/a".into()))
+        );
+    }
+
+    /// The links a parsed list item carries: (text, url).
+    fn list_item_links(source: &str) -> Vec<(String, String)> {
+        let tree = parse_full(source);
+        let Block::List { items, .. } = &tree.blocks[0].block else {
+            panic!("expected a list: {:?}", tree.blocks[0].block)
+        };
+        items
+            .iter()
+            .flatten()
+            .flat_map(|block| match block {
+                Block::Paragraph { runs } => runs.clone(),
+                _ => Vec::new(),
+            })
+            .filter_map(|r| Some((r.text.clone(), r.style.link.clone()?)))
+            .collect()
+    }
+
+    /// User report: a reply's "- Label: http://host:port/file.png" list lines
+    /// rendered as plain text. IP hosts with ports link like any other URL.
+    #[test]
+    fn bare_urls_autolink_in_list_items() {
+        let url = "http://100.65.136.8:8787/vendors.png";
+        assert_eq!(
+            list_item_links(&format!("- Top of the list: {url}\n- Bottom: {url}.\n")),
+            vec![(url.into(), url.into()), (url.into(), url.into())]
+        );
+        // Trailing `)`, `:`, `,` stay text; nested and task items link too.
+        assert_eq!(
+            list_item_links(
+                "- (see https://x.dev/a)\n- https://x.dev/b:\n- [ ] https://x.dev/c, ok\n"
+            )
+            .into_iter()
+            .map(|l| l.1)
+            .collect::<Vec<_>>(),
+            ["https://x.dev/a", "https://x.dev/b", "https://x.dev/c"]
+        );
+        let tree = parse_full("> - outer\n>   - inner https://x.dev/n\n");
+        let mut links = Vec::new();
+        collect_links(&tree.blocks[0].block, &mut links);
+        assert_eq!(links, ["https://x.dev/n"]);
+    }
+
+    /// Code (inline spans in tight items, fenced and indented blocks) and
+    /// real markdown links never pick up an autolink.
+    #[test]
+    fn autolink_skips_code_and_links_in_list_items() {
+        assert_eq!(list_item_links("- run `curl https://x.dev/a`\n"), []);
+        assert_eq!(
+            list_item_links("- [shown](https://real.dev) https://x.dev/b\n"),
+            [
+                ("shown".into(), "https://real.dev".into()),
+                ("https://x.dev/b".into(), "https://x.dev/b".into())
+            ]
+        );
+        for src in ["```\nhttps://x.dev/a\n```\n", "    https://x.dev/a\n"] {
+            let mut links = Vec::new();
+            collect_links(&parse_full(src).blocks[0].block, &mut links);
+            assert_eq!(links, Vec::<String>::new(), "{src:?}");
+        }
+    }
+
+    /// Streaming: a URL growing chunk by chunk links in the display tree at
+    /// every step, settling on the full URL with sentence punctuation shed.
+    #[test]
+    fn autolink_while_streaming_list_items() {
+        let src = "Screenshots:\n- Top: http://100.65.136.8:8787/vendors.png.\n- Bottom: `http://x.dev/code`\n";
+        let mut parser = IncrementalParser::new();
+        let mut last = Vec::new();
+        for (at, _) in src.char_indices().skip(1) {
+            parser.append(&src[parser.source().len()..at]);
+            let tree = parser.display_tree();
+            last.clear();
+            for top in &tree.blocks {
+                collect_links(&top.block, &mut last);
+            }
+            assert!(
+                last.iter().all(|l| !l.contains("x.dev/code")),
+                "code span linked mid-stream: {last:?}"
+            );
+        }
+        parser.append(&src[parser.source().len()..]);
+        assert_eq!(parser.tree(), &parse_full(src));
+        last.clear();
+        for top in &parser.tree().blocks {
+            collect_links(&top.block, &mut last);
+        }
+        assert_eq!(last, ["http://100.65.136.8:8787/vendors.png"]);
+    }
+
+    /// Every link destination in a block, depth-first.
+    fn collect_links(block: &Block, out: &mut Vec<String>) {
+        match block {
+            Block::Paragraph { runs } | Block::Heading { runs, .. } => {
+                out.extend(runs.iter().filter_map(|r| r.style.link.clone()));
+            }
+            Block::List { items, .. } => items.iter().flatten().for_each(|b| collect_links(b, out)),
+            Block::BlockQuote { children } => children.iter().for_each(|b| collect_links(b, out)),
+            _ => {}
+        }
     }
 
     /// Non-links stay text: glued schemes, bare schemes, code spans, and the
