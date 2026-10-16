@@ -9,10 +9,11 @@
 #              would happen, and change nothing
 # The previous install is kept at /tmp/Zeron Nova.old.app.
 #
-# The quit-swap-reopen always runs in a detached job (its own session,
-# reparented to launchd) that writes /tmp/zeron-nova-install.log, so it
-# survives Nova quitting even when this script runs from a chat inside
-# Nova. From a terminal, the script follows that log until the job ends.
+# The quit-swap-reopen always runs as a one-shot launchd agent in the
+# user's GUI session, writing /tmp/zeron-nova-install.log: nothing ties it
+# to Nova (not its process tree, session or coalition), so it survives
+# Nova quitting even when this script runs from a chat inside Nova. From a
+# terminal, the script follows that log until the job ends.
 
 set -euo pipefail
 
@@ -55,21 +56,40 @@ if [[ "${ZERON_NOVA_INSTALL_DETACHED:-}" != 1 ]]; then
   inside=0
   for pid in $(gui_pids); do is_ancestor "$pid" && inside=1; done
 
-  # Hand the swap to a job in its own session, reparented to launchd. The
-  # perl parent returns only once the child has called setsid and exec'd
-  # (the pipe closes on exec), so whatever tears down this script's process
-  # group afterwards (a chat's command runner, Nova quitting) can't reach it.
-  job="$(ZERON_NOVA_INSTALL_DETACHED=1 ZERON_NOVA_INSTALL_DRY="$dry" perl -MPOSIX -e '
-    pipe(my $r, my $w) or die "pipe: $!";
-    my $pid = fork // die "fork: $!";
-    if ($pid) { close $w; <$r>; print "$pid\n"; exit 0 }
-    close $r;
-    POSIX::setsid() or die "setsid: $!";
-    open STDIN, "<", "/dev/null";
-    open STDOUT, ">", "/dev/null";
-    open STDERR, ">", "/dev/null";
-    exec @ARGV or die "exec: $!";
-  ' "${BASH_SOURCE[0]}")"
+  # Hand the swap to launchd as a one-shot agent. A process merely
+  # reparented to launchd still died with Nova once (killed before logging
+  # anything), so the job must not start life under Nova at all.
+  label="sh.zeron.nova-install"
+  domain="gui/$(id -u)"
+  plist="/tmp/$label.plist"
+  launchctl bootout "$domain/$label" 2>/dev/null || true
+  cat >"$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>$ROOT/scripts/install-nova-macos.sh</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ZERON_NOVA_INSTALL_DETACHED</key><string>1</string>
+    <key>ZERON_NOVA_INSTALL_DRY</key><string>$dry</string>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+  <key>AbandonProcessGroup</key><true/>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>$LOG.launchd</string>
+</dict>
+</plist>
+PLIST
+  rm -f "$LOG"
+  launchctl bootstrap "$domain" "$plist"
+  for _ in $(seq 1 40); do [[ -s "$LOG" ]] && break; sleep 0.25; done
+  [[ -s "$LOG" ]] || { echo "the install job did not start (see $LOG.launchd)" >&2; exit 1; }
+  job="$(head -1 "$LOG" | sed -n 's/.* job \([0-9]*\) started.*/\1/p')"
 
   if [[ $inside == 1 ]]; then
     echo "running inside Zeron Nova; job $job will quit, update and reopen it (log: $LOG)"
@@ -85,12 +105,16 @@ fi
 exec >"$LOG" 2>&1
 echo "$(date '+%F %T') job $$ started: $SRC -> $DEST"
 trap 'echo "failed: line $LINENO (previous build: $BACKUP)"' ERR
+for signal in TERM HUP INT; do
+  # shellcheck disable=SC2064
+  trap "echo \"failed: killed by SIG$signal (previous build: $BACKUP)\"; exit 1" "$signal"
+done
 
 if [[ "${ZERON_NOVA_INSTALL_DRY:-0}" == 1 ]]; then
   echo "dry run: Nova running as pid(s): $(gui_pids | tr '\n' ' ')"
   # Outlive the caller and anything that cleans up after it.
   sleep 3
-  echo "dry run: job $$ still alive in session $(ps -o sess= -p $$ | tr -d ' '), parent $(ps -o ppid= -p $$ | tr -d ' ')"
+  echo "dry run: job $$ still alive, parent $(ps -o ppid= -p $$ | tr -d ' ') ($(ps -o comm= -p "$(ps -o ppid= -p $$ | tr -d ' ')"))"
   echo "done: dry run, nothing changed"
   exit 0
 fi
