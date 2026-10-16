@@ -68,6 +68,7 @@ mod roll_text;
 pub mod running_pill;
 pub mod settings;
 pub mod shell;
+pub mod skills;
 pub mod sound;
 pub mod state;
 pub(crate) mod surface_chrome;

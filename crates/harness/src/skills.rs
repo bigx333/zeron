@@ -53,6 +53,18 @@ pub(crate) async fn discover(harness: HarnessId, cwd: &Path) -> Result<Vec<Skill
 /// own dialect, so the agent loads them natively rather than only on selection.
 const ZERON_SKILLS: &str = ".zeron/skills";
 
+/// The home-directory Zeron skill folder every harness loads, whether or not
+/// it exists yet. The skill library installs into and removes from here.
+pub fn shared_root() -> PathBuf {
+    crate::executable::home_or_current_dir().join(ZERON_SKILLS)
+}
+
+/// The skill a `SKILL.md` describes, or `None` when it is unreadable,
+/// oversized, or has malformed frontmatter or an invalid name.
+pub fn read_manifest(path: &Path) -> Option<Skill> {
+    read_skill(path).ok().flatten()
+}
+
 /// The Claude plugin that carries Zeron's skills; they surface as `/zeron:<name>`.
 pub(crate) const CLAUDE_PLUGIN: &str = "zeron";
 
@@ -500,6 +512,54 @@ fn scan_root(
     Ok(())
 }
 
+/// A skill file's YAML frontmatter (`Null` when it has none) and the body
+/// after it; `None` when the frontmatter is unclosed or malformed.
+fn frontmatter(text: &str) -> Option<(serde_json::Value, &str)> {
+    let mut lines = text.split_inclusive('\n');
+    let Some(first) = lines.next().filter(|line| line.trim() == "---") else {
+        return Some((serde_json::Value::Null, text));
+    };
+    let mut yaml = String::new();
+    let mut offset = first.len();
+    for line in lines {
+        offset += line.len();
+        if line.trim() == "---" {
+            let body = text[offset..].trim_start_matches(['\n', '\r']);
+            return serde_yaml_ng::from_str::<serde_json::Value>(&yaml)
+                .ok()
+                .map(|value| (value, body));
+        }
+        yaml.push_str(line);
+    }
+    None
+}
+
+/// A `SKILL.md`'s frontmatter `description` and the Markdown body beneath it,
+/// for showing a skill without its YAML header.
+pub fn document(text: &str) -> (Option<String>, &str) {
+    match frontmatter(text) {
+        Some((metadata, body)) => (
+            metadata
+                .get("description")
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            body,
+        ),
+        None => (None, text),
+    }
+}
+
+/// The frontmatter `name` a `SKILL.md` declares, if any.
+pub fn declared_name(text: &str) -> Option<String> {
+    let (metadata, _) = frontmatter(text)?;
+    metadata
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 fn read_skill(path: &Path) -> Result<Option<Skill>, HarnessError> {
     use std::io::Read;
     // Keep regular-file symlinks working, but never open known devices/pipes.
@@ -529,27 +589,8 @@ fn read_skill(path: &Path) -> Result<Option<Skill>, HarnessError> {
     let Ok(text) = std::str::from_utf8(&bytes) else {
         return Ok(None);
     };
-    let mut lines = text.lines();
-    let metadata = if lines.next().is_some_and(|line| line.trim() == "---") {
-        let mut yaml = String::new();
-        let mut closed = false;
-        for line in lines {
-            if line.trim() == "---" {
-                closed = true;
-                break;
-            }
-            yaml.push_str(line);
-            yaml.push('\n');
-        }
-        if !closed {
-            return Ok(None);
-        }
-        match serde_yaml_ng::from_str::<serde_json::Value>(&yaml) {
-            Ok(value) => value,
-            Err(_) => return Ok(None),
-        }
-    } else {
-        serde_json::Value::Null
+    let Some((metadata, _)) = frontmatter(text) else {
+        return Ok(None);
     };
     let fallback = if path.file_name().is_some_and(|name| name == "SKILL.md") {
         path.parent().and_then(Path::file_name)
@@ -1282,5 +1323,23 @@ mod tests {
         .unwrap();
         assert_eq!(found.len(), 1);
         assert!(found.contains_key("plugin:review"));
+    }
+
+    #[test]
+    fn document_splits_frontmatter_from_the_body() {
+        assert_eq!(
+            document("---\nname: pdf\ndescription: '  Fill PDFs '\n---\n\n# PDF\n"),
+            (Some("Fill PDFs".into()), "# PDF\n")
+        );
+        assert_eq!(document("---\r\nname: a\r\n---\r\nBody"), (None, "Body"));
+        assert_eq!(document("# No header\n"), (None, "# No header\n"));
+        // Unclosed or malformed frontmatter is shown as written.
+        assert_eq!(document("---\nname: a\n"), (None, "---\nname: a\n"));
+        assert_eq!(
+            declared_name("---\nname: vercel-react\n---\n").as_deref(),
+            Some("vercel-react")
+        );
+        assert_eq!(declared_name("# none"), None);
+        assert_eq!(document("---\n: [\n---\nx"), (None, "---\n: [\n---\nx"));
     }
 }

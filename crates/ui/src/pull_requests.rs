@@ -3543,7 +3543,7 @@ pub(crate) fn relative_time(timestamp: DateTime<Utc>, now: DateTime<Utc>) -> Str
     format!("{amount} {unit}{} ago", if amount == 1 { "" } else { "s" })
 }
 
-fn compact_relative_time(timestamp: DateTime<Utc>, now: DateTime<Utc>) -> String {
+pub(crate) fn compact_relative_time(timestamp: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let seconds = now.signed_duration_since(timestamp).num_seconds().max(0);
     if seconds < 60 {
         "now".into()
@@ -3560,7 +3560,7 @@ fn compact_relative_time(timestamp: DateTime<Utc>, now: DateTime<Utc>) -> String
     }
 }
 
-fn format_compact_count(value: u64) -> String {
+pub(crate) fn format_compact_count(value: u64) -> String {
     if value < 1_000 {
         value.to_string()
     } else if value < 1_000_000 {

@@ -2037,6 +2037,119 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&skills)
             }
+            methods::LIST_SKILL_LIBRARY => crate::skill_library::list()
+                .await
+                .map_err(RpcError::Failed)
+                .and_then(|library| RpcReply::value(&library)),
+            methods::READ_LIBRARY_SKILL | methods::REMOVE_LIBRARY_SKILL => {
+                #[derive(Deserialize)]
+                struct Params {
+                    directory: String,
+                }
+                let p: Params = parse_params(params)?;
+                if method == methods::READ_LIBRARY_SKILL {
+                    let contents = crate::skill_library::contents(p.directory)
+                        .await
+                        .map_err(RpcError::Failed)?;
+                    RpcReply::value(&contents)
+                } else {
+                    let library = crate::skill_library::remove(p.directory)
+                        .await
+                        .map_err(RpcError::Failed)?;
+                    RpcReply::value(&library)
+                }
+            }
+            methods::SEARCH_SKILL_REGISTRY => {
+                #[derive(Deserialize)]
+                struct Params {
+                    #[serde(default)]
+                    query: String,
+                }
+                let p: Params = parse_params(params)?;
+                let results = crate::skill_library::search(p.query)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&results)
+            }
+            methods::PREVIEW_REGISTRY_SKILL | methods::INSTALL_REGISTRY_SKILL => {
+                #[derive(Deserialize)]
+                struct Params {
+                    id: String,
+                }
+                let p: Params = parse_params(params)?;
+                if method == methods::PREVIEW_REGISTRY_SKILL {
+                    let preview = crate::skill_library::preview(p.id)
+                        .await
+                        .map_err(RpcError::Failed)?;
+                    RpcReply::value(&preview)
+                } else {
+                    let skill = crate::skill_library::install(p.id)
+                        .await
+                        .map_err(RpcError::Failed)?;
+                    RpcReply::value(&skill)
+                }
+            }
+            methods::INSPECT_SKILL_PACK => {
+                #[derive(Deserialize)]
+                struct Params {
+                    source: String,
+                    #[serde(default)]
+                    subpath: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let inspection = crate::skill_packs::inspect(p.source, p.subpath)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&inspection)
+            }
+            methods::INSTALL_SKILL_PACK
+            | methods::CHECK_SKILL_PACK_UPDATES
+            | methods::UPDATE_SKILL_PACK
+            | methods::SET_SKILL_PACK_AUTO_UPDATE
+            | methods::REMOVE_SKILL_PACK => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    #[serde(default)]
+                    token: Option<String>,
+                    #[serde(default)]
+                    name: Option<String>,
+                    #[serde(default)]
+                    auto_update: Option<bool>,
+                    #[serde(default)]
+                    enabled: Option<bool>,
+                }
+                let p: Params = parse_params(params)?;
+                let missing = |field: &str| RpcError::Failed(format!("missing `{field}`"));
+                let result = match method {
+                    methods::INSTALL_SKILL_PACK => crate::skill_packs::install(
+                        p.token.ok_or_else(|| missing("token"))?,
+                        p.auto_update.unwrap_or(true),
+                    )
+                    .await
+                    .map(drop),
+                    methods::CHECK_SKILL_PACK_UPDATES => {
+                        crate::skill_packs::check_updates(p.name).await.map(drop)
+                    }
+                    methods::UPDATE_SKILL_PACK => {
+                        crate::skill_packs::update(p.name.ok_or_else(|| missing("name"))?)
+                            .await
+                            .map(drop)
+                    }
+                    methods::SET_SKILL_PACK_AUTO_UPDATE => crate::skill_packs::set_auto_update(
+                        p.name.ok_or_else(|| missing("name"))?,
+                        p.enabled.ok_or_else(|| missing("enabled"))?,
+                    )
+                    .await
+                    .map(drop),
+                    _ => crate::skill_packs::remove(p.name.ok_or_else(|| missing("name"))?).await,
+                };
+                result.map_err(RpcError::Failed)?;
+                let library = crate::skill_library::list()
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&library)
+            }
             methods::LIST_COMMANDS => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
