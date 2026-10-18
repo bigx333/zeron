@@ -560,7 +560,7 @@ impl SkillsPage {
                         })),
                 );
             if changes_open {
-                let options = self.markdown_options(&format!("pack-notes-{changes_key}"));
+                let options = self.markdown_options(&format!("pack-notes-{changes_key}"), cx);
                 notes = notes.child(crate::motion::fade_quick(
                     SharedString::from(format!("skills-pack-notes-body-{changes_key}")),
                     div()

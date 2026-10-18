@@ -1872,7 +1872,7 @@ impl SkillsPage {
                 .child("This skill's SKILL.md has no instructions beyond its header.")
                 .into_any_element(),
             Loadable::Ready(document) => {
-                let options = self.markdown_options(key);
+                let options = self.markdown_options(key, cx);
                 crate::motion::fade_quick(
                     SharedString::from(format!("skills-document-{key}")),
                     frame().child(crate::markdown::render::render_tree(
@@ -1908,7 +1908,7 @@ impl SkillsPage {
     }
 
     /// Markdown on this page: selectable, with copyable code blocks.
-    fn markdown_options(&self, key: &str) -> crate::markdown::render::RenderOptions {
+    fn markdown_options(&self, key: &str, cx: &gpui::App) -> crate::markdown::render::RenderOptions {
         crate::markdown::render::RenderOptions {
             tasks: None,
             media: None,
@@ -1919,6 +1919,7 @@ impl SkillsPage {
             link: None,
             workspace_root: None,
             code: None,
+            math: crate::settings::math_style(cx),
             copy: Some(crate::markdown::render::CopyUi {
                 handler: Rc::new(|_, code, _, cx| {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()))

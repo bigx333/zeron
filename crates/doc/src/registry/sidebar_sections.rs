@@ -178,7 +178,7 @@ impl RegistryDoc {
                 if fits && key.is_some() {
                     continue;
                 }
-                self.observe_sidebar_row(kind, id);
+                self.observe_row(kind, id);
                 let hlc = self.next_hlc();
                 let next = pin_order_key_between(lower.as_deref(), None, &hlc)
                     .map_err(|e| DocError::Schema(e.into()))?;
@@ -408,7 +408,7 @@ impl RegistryDoc {
             Move { id, after, before } => {
                 // A section deleted meanwhile has nowhere left to go.
                 if self.live_sidebar_section(id) {
-                    self.observe_sidebar_row(SECTIONS, id);
+                    self.observe_row(SECTIONS, id);
                     let sections = self
                         .ordered_sidebar_sections()
                         .into_iter()

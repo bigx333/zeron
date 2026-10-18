@@ -8635,19 +8635,29 @@ impl Shell {
                 // The buttons own their clicks; the gaps between them must
                 // not select the row either.
                 .when(t3_actions && actions_visible, |el| {
-                    el.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.dismiss_session_card(cx); cx.stop_propagation(); }))
+                    el.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.dismiss_session_card(cx);
+                            cx.stop_propagation();
+                        }),
+                    )
                 })
                 .when(corner_hovered && !t3_actions, |el| {
-                    el.on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.dismiss_session_card(cx); cx.stop_propagation(); }))
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                    el.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.dismiss_session_card(cx);
                             cx.stop_propagation();
-                            this.chat_hover_resync = true;
-                            this.set_chat_archived(archive_id.clone(), !archived, cx);
-                        }))
-                        // Above the pill: below it the chip would cover the next row.
-                        .tooltip(crate::settings::widgets::text_tooltip_above(
-                            archive_tooltip,
-                        ))
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.chat_hover_resync = true;
+                        this.set_chat_archived(archive_id.clone(), !archived, cx);
+                    }))
+                    // Above the pill: below it the chip would cover the next row.
+                    .tooltip(crate::settings::widgets::text_tooltip_above(archive_tooltip))
                 })
                 .child(corner_body)
                 .into_any_element()
@@ -9741,17 +9751,17 @@ impl Shell {
                                 this.cancel_sidebar_session_transfer(cx);
                             },
                         ))
-                    // A section reorder lands wherever it is released in the list.
-                    .on_drag_move::<SidebarSectionDrag>(cx.listener(
-                        |this, event: &gpui::DragMoveEvent<SidebarSectionDrag>, _, cx| {
-                            this.track_sidebar_section_drag(event.event.position, cx);
-                        },
-                    ))
-                    .on_drop::<SidebarSectionDrag>(cx.listener(
-                        |this, payload: &SidebarSectionDrag, _, cx| {
-                            this.finish_sidebar_section_drag(payload, cx);
-                        },
-                    ))
+                        // A section reorder lands wherever it is released in the list.
+                        .on_drag_move::<SidebarSectionDrag>(cx.listener(
+                            |this, event: &gpui::DragMoveEvent<SidebarSectionDrag>, _, cx| {
+                                this.track_sidebar_section_drag(event.event.position, cx);
+                            },
+                        ))
+                        .on_drop::<SidebarSectionDrag>(cx.listener(
+                            |this, payload: &SidebarSectionDrag, _, cx| {
+                                this.finish_sidebar_section_drag(payload, cx);
+                            },
+                        ))
                         .px(px(Theme::SPACE_SM))
                         .flex()
                         .flex_col()

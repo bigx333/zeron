@@ -49,6 +49,7 @@ async fn withdrawn_approvals_release_only_the_matching_input_and_send_no_reply()
             let (asked, mut questions) = mpsc::unbounded_channel();
             let (steer, steering) = mpsc::channel(4);
             let controls = RunControls {
+                account_pool: None,
                 realtime: None,
                 execution_lease: None,
                 request_input: Box::new(move |questions| {
