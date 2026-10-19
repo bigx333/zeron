@@ -267,6 +267,13 @@ impl WorkspaceDoc {
             )?,
             None => row.delete("sourceContext")?,
         }
+        match &chat.orchestration {
+            Some(state) => row.insert(
+                "orchestration",
+                LoroValue::from(serde_json::to_value(state)?),
+            )?,
+            None => row.delete("orchestration")?,
+        }
         match &chat.config {
             Some(config) => row.insert("config", LoroValue::from(serde_json::to_value(config)?))?,
             None => row.delete("config")?,
@@ -727,6 +734,18 @@ pub(crate) struct RawChat {
     room_gen: Option<u32>,
     #[serde(default)]
     parent_chat_id: Option<String>,
+    #[serde(default, deserialize_with = "lenient_orchestration")]
+    orchestration: Option<zeron_proto::ChatOrchestration>,
+}
+
+fn lenient_orchestration<'de, D>(
+    deserializer: D,
+) -> Result<Option<zeron_proto::ChatOrchestration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -769,6 +788,7 @@ impl From<RawChat> for Chat {
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
             parent_chat_id: raw.parent_chat_id,
+            orchestration: raw.orchestration,
         }
     }
 }
@@ -879,6 +899,7 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             parent_chat_id: Some("parent-chat".into()),
+            orchestration: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

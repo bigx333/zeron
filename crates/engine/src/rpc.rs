@@ -51,6 +51,7 @@
 //! whose checkout always lives on the routed target device.
 
 mod codex_dictation;
+mod orchestration;
 mod voice_chat;
 mod voice_remote;
 use async_trait::async_trait;
@@ -1549,6 +1550,15 @@ fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::FORK_SIDE_CHAT
+            | methods::DELEGATE_TASK
+            | methods::CHAT_CHECKPOINTS
+            | methods::CREATE_CHAT_CHECKPOINT
+            | methods::ROLLBACK_CHAT
+            | methods::TASK_STATUS
+            | methods::TASK_RESULT
+            | methods::TASK_CANCEL
+            | methods::MERGE_CHAT
+            | methods::CHAT_TRANSFERS
             | methods::NOTIFY_CONTROLLER
             | methods::LIST_HARNESSES
             | methods::INSTALL_HARNESS
@@ -1948,6 +1958,9 @@ impl RpcService for EngineRpc {
         if voice_remote::handles(method) {
             return self.voice_remote(method, params).await;
         }
+        if orchestration::handles(method) {
+            return self.orchestration_rpc(method, params).await;
+        }
         if codex_dictation::handles(method) {
             return self.codex_dictation(method, params).await;
         }
@@ -2222,6 +2235,10 @@ impl RpcService for EngineRpc {
                 struct ForkParams {
                     chat_id: String,
                     source_chat_id: String,
+                    #[serde(default)]
+                    source_message_id: Option<String>,
+                    #[serde(default)]
+                    config: Option<ChatConfig>,
                     /// Where the fork hangs in the tree. Defaults to the
                     /// source; a side chat's own fork button passes the
                     /// side chat's parent so the copy lists as a sibling.
@@ -2250,7 +2267,21 @@ impl RpcService for EngineRpc {
                     .chat(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?
                 {
-                    if existing.parent_chat_id.as_deref() == Some(parent_chat_id.as_str()) {
+                    if existing.parent_chat_id.as_deref() == Some(parent_chat_id.as_str())
+                        && existing
+                            .orchestration
+                            .as_ref()
+                            .and_then(|o| o.fork.as_ref())
+                            .is_some_and(|f| {
+                                f.source_chat_id == p.source_chat_id
+                                    && p.source_message_id
+                                        .as_ref()
+                                        .is_none_or(|id| id == &f.source_message_id)
+                            })
+                        && p.config
+                            .as_ref()
+                            .is_none_or(|config| existing.config.as_ref() == Some(config))
+                    {
                         return RpcReply::value(&existing);
                     }
                     return Err(RpcError::Failed("Chat id already exists".into()));
@@ -2265,17 +2296,47 @@ impl RpcService for EngineRpc {
                     .rposition(|entry| {
                         entry.role == zeron_doc::MessageRole::Assistant
                             && entry.status == Some(zeron_doc::MessageStatus::Complete)
+                            && p.source_message_id
+                                .as_ref()
+                                .is_none_or(|id| id == &entry.id)
                     })
                     .ok_or_else(|| {
                         RpcError::Failed(
                             "Wait for a completed response before starting a side chat".into(),
                         )
                     })?;
+                if let Some(config) = &p.config {
+                    let target = zeron_proto::TaskTarget {
+                        harness: Some(config.harness),
+                        model: config.model.clone(),
+                        reasoning: config.reasoning,
+                        sandbox: Some(config.sandbox),
+                        model_options: config.model_options.clone(),
+                    };
+                    if let Some(inherited) = &source.config {
+                        target
+                            .resolve(inherited)
+                            .map_err(|e| RpcError::Failed(e.into()))?;
+                    }
+                }
                 let mut chat = source.clone();
+                chat.orchestration = Some(zeron_proto::ChatOrchestration {
+                    task: None,
+                    fork: Some(zeron_proto::ForkLineage {
+                        source_chat_id: source.id.clone(),
+                        source_message_id: entries[boundary].id.clone(),
+                        created_at: crate::now_ms(),
+                        strategy: "portable_history".into(),
+                    }),
+                });
+                if let Some(config) = p.config {
+                    chat.config = Some(config);
+                }
                 chat.id = p.chat_id;
                 chat.parent_chat_id = Some(parent_chat_id);
                 chat.title = None; // First side-chat turn receives its own generated title.
                 chat.archived = false;
+                chat.snoozed_until = None;
                 chat.created_at = chrono::Utc::now();
                 chat.last_message_at = None;
                 chat.last_message_preview = None;

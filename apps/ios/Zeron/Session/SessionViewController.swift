@@ -50,8 +50,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         let syncVoice = { [weak self, weak voiceBar] in
             guard let self, let voiceBar else { return }
             self.composer.preferredDelivery = self.app.steerMode ? .steer : .queue
-            let items = voiceBar.visible ? [menu, voiceBar.item] : [menu]
-            if self.navigationItem.rightBarButtonItems?.count != items.count {
+            // Tasks and side chats sit a tap away from the start, so the
+            // first fork is discoverable and the way back up is always there.
+            let items = voiceBar.visible ? [menu, voiceBar.item, self.lanesItem] : [menu, self.lanesItem]
+            if self.navigationItem.rightBarButtonItems ?? [] != items {
                 self.navigationItem.setRightBarButtonItems(items, animated: self.view.window != nil)
             }
         }
@@ -192,6 +194,35 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private var voiceBar: VoiceBarItem?
     private var voiceToken: AnyObject?
     private var hostsToken: AnyObject?
+
+    private lazy var lanesItem: UIBarButtonItem = {
+        let item = UIBarButtonItem(image: UIImage(systemName: "square.stack.3d.up"), primaryAction: UIAction { [weak self] _ in self?.showLanes() })
+        item.accessibilityLabel = "Tasks and side chats"
+        return item
+    }()
+
+    /// The lanes sheet: this chat's tasks and side chats, and its parent.
+    private func showLanes() {
+        guard presentedViewController == nil else { return }
+        if composer.textView.isFirstResponder { composer.resignFirstResponder() }
+        present(TaskLanesController(app: app, chatId: chatId) { [weak self] id in self?.openRelated(id) }, animated: true)
+    }
+
+    /// Into a child, or back up to the parent: a chat already below this one
+    /// in the stack is popped to rather than pushed again, so back keeps
+    /// meaning "up" at every depth.
+    private func openRelated(_ id: String) {
+        guard let nav = navigationController else { return }
+        if let below = nav.viewControllers.last(where: { ($0 as? SessionViewController)?.chatId == id }), below !== self {
+            nav.popToViewController(below, animated: true)
+            return
+        }
+        guard let session = SessionViewController(app: app, chatId: id) else {
+            Toast.show("Couldn't open that chat. Try again.", in: view.window)
+            return
+        }
+        nav.pushViewController(session, animated: true)
+    }
 
     deinit {
         if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
@@ -556,6 +587,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             let t3 = self.app.t3Mode
             let archived = vm?.archived ?? false
             var items: [UIMenuElement] = [
+                UIAction(title: "Tasks and Side Chats", image: UIImage(systemName: "square.stack.3d.up")) { _ in self.showLanes() },
                 UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
             ]
             if t3, !archived {

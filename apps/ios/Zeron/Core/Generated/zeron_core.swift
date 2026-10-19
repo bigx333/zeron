@@ -1030,10 +1030,6 @@ public func FfiConverterTypeClientListener_lower(_ value: ClientListener) -> UIn
 
 
 
-/**
- * One signed-in account (or Demo mode). Create one per sign-in; call
- * `shutdown()` on sign-out.
- */
 public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func archiveSession(chatId: String) throws 
@@ -1045,6 +1041,10 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func assignSection(chatId: String, sectionId: String?) throws 
     
+    func cancelTask(parentChatId: String, taskId: String) async throws
+
+    func chatCheckpoints(chatId: String) async throws  -> [RunCheckpointView]
+
     /**
      * Side chats / subagent chats of `parent_id`, recency order.
      */
@@ -1062,6 +1062,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func connectivity()  -> Connectivity
     
+    func createChatCheckpoint(chatId: String) async throws  -> RunCheckpointView
+
     /**
      * Create (or find) the project for `path` on `device_id`. Returns its id.
      */
@@ -1096,6 +1098,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      * Devices that can run sessions (new-session / new-project pickers).
      */
     func executionDevices()  -> [DeviceView]
+
+    func forkSession(sourceChatId: String) async throws  -> String
     
     /**
      * Threads page: pinned, sections, recent.
@@ -1129,6 +1133,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func markSeen(chatId: String) 
     
+    func mergeChat(sourceChatId: String) async throws  -> String
+
     /**
      * Reorder a pin between neighbours (`None` at either end).
      */
@@ -1197,6 +1203,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func renameSession(chatId: String, title: String) throws 
     
+    func rollbackChat(chatId: String, checkpointId: String, clientRequestId: String?) async throws  -> String
+
     func search(query: String, limit: UInt32)  -> [SearchHit]
     
     /**
@@ -1312,10 +1320,6 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func startVoiceWithInputMode(hostDeviceId: String, voice: String?, inputMode: VoiceInputMode, media: VoiceMediaListener, listener: VoiceSessionListener)  -> VoiceCall
     
 }
-/**
- * One signed-in account (or Demo mode). Create one per sign-in; call
- * `shutdown()` on sign-out.
- */
 open class CoreClient: CoreClientProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
 
@@ -1414,6 +1418,38 @@ open func assignSection(chatId: String, sectionId: String?)throws   {try rustCal
     )
 }
 }
+
+open func cancelTask(parentChatId: String, taskId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_cancel_task(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(parentChatId),FfiConverterString.lower(taskId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+
+open func chatCheckpoints(chatId: String)async throws  -> [RunCheckpointView]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_chat_checkpoints(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeRunCheckpointView.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
     
     /**
      * Side chats / subagent chats of `parent_id`, recency order.
@@ -1468,6 +1504,22 @@ open func connectivity() -> Connectivity  {
 })
 }
     
+open func createChatCheckpoint(chatId: String)async throws  -> RunCheckpointView  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_create_chat_checkpoint(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeRunCheckpointView_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+
     /**
      * Create (or find) the project for `path` on `device_id`. Returns its id.
      */
@@ -1587,6 +1639,22 @@ open func executionDevices() -> [DeviceView]  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+
+open func forkSession(sourceChatId: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_fork_session(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(sourceChatId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -1714,6 +1782,22 @@ open func markSeen(chatId: String)  {try! rustCall() {
 }
 }
     
+open func mergeChat(sourceChatId: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_merge_chat(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(sourceChatId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+
     /**
      * Reorder a pin between neighbours (`None` at either end).
      */
@@ -1929,6 +2013,22 @@ open func renameSession(chatId: String, title: String)throws   {try rustCallWith
         FfiConverterString.lower(title),uniffiCallStatus
     )
 }
+}
+
+open func rollbackChat(chatId: String, checkpointId: String, clientRequestId: String?)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_rollback_chat(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterString.lower(checkpointId),FfiConverterOptionString.lower(clientRequestId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
 open func search(query: String, limit: UInt32) -> [SearchHit]  {
@@ -6629,6 +6729,115 @@ public func FfiConverterTypeDebugEntry_lower(_ value: DebugEntry) -> RustBuffer 
 }
 
 
+/**
+ * One session row, as every list renders it.
+ */
+public struct DelegatedTaskView: Equatable, Hashable {
+    public var id: String
+    public var parentChatId: String
+    public var status: String
+    public var statusLabel: String
+    public var terminal: Bool
+    public var stopping: Bool
+    public var cancelRequested: Bool
+    public var roleLabel: String?
+    public var isolationLabel: String
+    public var isolation: String
+    public var summary: String?
+    public var summaryTruncated: Bool
+    public var delivered: Bool
+    public var createdAtMs: Int64
+    public var updatedAtMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, parentChatId: String, status: String, statusLabel: String, terminal: Bool, stopping: Bool, cancelRequested: Bool, roleLabel: String?, isolationLabel: String, isolation: String, summary: String?, summaryTruncated: Bool, delivered: Bool, createdAtMs: Int64, updatedAtMs: Int64) {
+        self.id = id
+        self.parentChatId = parentChatId
+        self.status = status
+        self.statusLabel = statusLabel
+        self.terminal = terminal
+        self.stopping = stopping
+        self.cancelRequested = cancelRequested
+        self.roleLabel = roleLabel
+        self.isolationLabel = isolationLabel
+        self.isolation = isolation
+        self.summary = summary
+        self.summaryTruncated = summaryTruncated
+        self.delivered = delivered
+        self.createdAtMs = createdAtMs
+        self.updatedAtMs = updatedAtMs
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DelegatedTaskView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDelegatedTaskView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DelegatedTaskView {
+        return
+            try DelegatedTaskView(
+                id: FfiConverterString.read(from: &buf),
+                parentChatId: FfiConverterString.read(from: &buf),
+                status: FfiConverterString.read(from: &buf),
+                statusLabel: FfiConverterString.read(from: &buf),
+                terminal: FfiConverterBool.read(from: &buf),
+                stopping: FfiConverterBool.read(from: &buf),
+                cancelRequested: FfiConverterBool.read(from: &buf),
+                roleLabel: FfiConverterOptionString.read(from: &buf),
+                isolationLabel: FfiConverterString.read(from: &buf),
+                isolation: FfiConverterString.read(from: &buf),
+                summary: FfiConverterOptionString.read(from: &buf),
+                summaryTruncated: FfiConverterBool.read(from: &buf),
+                delivered: FfiConverterBool.read(from: &buf),
+                createdAtMs: FfiConverterInt64.read(from: &buf),
+                updatedAtMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DelegatedTaskView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.parentChatId, into: &buf)
+        FfiConverterString.write(value.status, into: &buf)
+        FfiConverterString.write(value.statusLabel, into: &buf)
+        FfiConverterBool.write(value.terminal, into: &buf)
+        FfiConverterBool.write(value.stopping, into: &buf)
+        FfiConverterBool.write(value.cancelRequested, into: &buf)
+        FfiConverterOptionString.write(value.roleLabel, into: &buf)
+        FfiConverterString.write(value.isolationLabel, into: &buf)
+        FfiConverterString.write(value.isolation, into: &buf)
+        FfiConverterOptionString.write(value.summary, into: &buf)
+        FfiConverterBool.write(value.summaryTruncated, into: &buf)
+        FfiConverterBool.write(value.delivered, into: &buf)
+        FfiConverterInt64.write(value.createdAtMs, into: &buf)
+        FfiConverterInt64.write(value.updatedAtMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDelegatedTaskView_lift(_ buf: RustBuffer) throws -> DelegatedTaskView {
+    return try FfiConverterTypeDelegatedTaskView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDelegatedTaskView_lower(_ value: DelegatedTaskView) -> RustBuffer {
+    return FfiConverterTypeDelegatedTaskView.lower(value)
+}
+
+
 public struct DemoOptions: Equatable, Hashable {
     public var fixture: DemoFixture
     /**
@@ -7094,6 +7303,68 @@ public func FfiConverterTypeFolderListing_lift(_ buf: RustBuffer) throws -> Fold
 #endif
 public func FfiConverterTypeFolderListing_lower(_ value: FolderListing) -> RustBuffer {
     return FfiConverterTypeFolderListing.lower(value)
+}
+
+
+public struct ForkLineageView: Equatable, Hashable {
+    public var sourceChatId: String
+    public var sourceMessageId: String
+    public var createdAtMs: Int64
+    public var strategy: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sourceChatId: String, sourceMessageId: String, createdAtMs: Int64, strategy: String) {
+        self.sourceChatId = sourceChatId
+        self.sourceMessageId = sourceMessageId
+        self.createdAtMs = createdAtMs
+        self.strategy = strategy
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ForkLineageView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeForkLineageView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ForkLineageView {
+        return
+            try ForkLineageView(
+                sourceChatId: FfiConverterString.read(from: &buf),
+                sourceMessageId: FfiConverterString.read(from: &buf),
+                createdAtMs: FfiConverterInt64.read(from: &buf),
+                strategy: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ForkLineageView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sourceChatId, into: &buf)
+        FfiConverterString.write(value.sourceMessageId, into: &buf)
+        FfiConverterInt64.write(value.createdAtMs, into: &buf)
+        FfiConverterString.write(value.strategy, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeForkLineageView_lift(_ buf: RustBuffer) throws -> ForkLineageView {
+    return try FfiConverterTypeForkLineageView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeForkLineageView_lower(_ value: ForkLineageView) -> RustBuffer {
+    return FfiConverterTypeForkLineageView.lower(value)
 }
 
 
@@ -9436,6 +9707,92 @@ public func FfiConverterTypeRowPlacement_lower(_ value: RowPlacement) -> RustBuf
 }
 
 
+public struct RunCheckpointView: Equatable, Hashable {
+    public var id: String
+    public var messageId: String?
+    public var title: String
+    public var createdAtMs: Int64
+    public var recovery: Bool
+    public var providerStrategy: String
+    public var filesAvailable: Bool
+    public var filesChanged: UInt32?
+    public var restorable: Bool
+    public var blockedReason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, messageId: String?, title: String, createdAtMs: Int64, recovery: Bool, providerStrategy: String, filesAvailable: Bool, filesChanged: UInt32?, restorable: Bool, blockedReason: String?) {
+        self.id = id
+        self.messageId = messageId
+        self.title = title
+        self.createdAtMs = createdAtMs
+        self.recovery = recovery
+        self.providerStrategy = providerStrategy
+        self.filesAvailable = filesAvailable
+        self.filesChanged = filesChanged
+        self.restorable = restorable
+        self.blockedReason = blockedReason
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension RunCheckpointView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRunCheckpointView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RunCheckpointView {
+        return
+            try RunCheckpointView(
+                id: FfiConverterString.read(from: &buf),
+                messageId: FfiConverterOptionString.read(from: &buf),
+                title: FfiConverterString.read(from: &buf),
+                createdAtMs: FfiConverterInt64.read(from: &buf),
+                recovery: FfiConverterBool.read(from: &buf),
+                providerStrategy: FfiConverterString.read(from: &buf),
+                filesAvailable: FfiConverterBool.read(from: &buf),
+                filesChanged: FfiConverterOptionUInt32.read(from: &buf),
+                restorable: FfiConverterBool.read(from: &buf),
+                blockedReason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RunCheckpointView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterOptionString.write(value.messageId, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterInt64.write(value.createdAtMs, into: &buf)
+        FfiConverterBool.write(value.recovery, into: &buf)
+        FfiConverterString.write(value.providerStrategy, into: &buf)
+        FfiConverterBool.write(value.filesAvailable, into: &buf)
+        FfiConverterOptionUInt32.write(value.filesChanged, into: &buf)
+        FfiConverterBool.write(value.restorable, into: &buf)
+        FfiConverterOptionString.write(value.blockedReason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunCheckpointView_lift(_ buf: RustBuffer) throws -> RunCheckpointView {
+    return try FfiConverterTypeRunCheckpointView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunCheckpointView_lower(_ value: RunCheckpointView) -> RustBuffer {
+    return FfiConverterTypeRunCheckpointView.lower(value)
+}
+
+
 /**
  * A horizontally scrolling viewport (code blocks, wide tables). Primitives
  * that reference it are positioned in its content coordinates, whose origin
@@ -9707,9 +10064,6 @@ public func FfiConverterTypeSendRequest_lower(_ value: SendRequest) -> RustBuffe
 }
 
 
-/**
- * One session row, as every list renders it.
- */
 public struct SessionRow: Equatable, Hashable {
     public var id: String
     /**
@@ -9776,6 +10130,8 @@ public struct SessionRow: Equatable, Hashable {
      */
     public var sendState: SendState?
     public var parentChatId: String?
+    public var task: DelegatedTaskView?
+    public var fork: ForkLineageView?
     /**
      * 2 = chat2; 1 = legacy (not dialable).
      */
@@ -9816,7 +10172,7 @@ public struct SessionRow: Equatable, Hashable {
          */snoozeLabel: String?, pinned: Bool, sectionId: String?, pullRequest: PullRequest?, 
         /**
          * Oldest unadopted send from this device (open sessions only).
-         */sendState: SendState?, parentChatId: String?, 
+         */sendState: SendState?, parentChatId: String?, task: DelegatedTaskView?, fork: ForkLineageView?,
         /**
          * 2 = chat2; 1 = legacy (not dialable).
          */roomGen: UInt32) {
@@ -9852,6 +10208,8 @@ public struct SessionRow: Equatable, Hashable {
         self.pullRequest = pullRequest
         self.sendState = sendState
         self.parentChatId = parentChatId
+        self.task = task
+        self.fork = fork
         self.roomGen = roomGen
     }
 
@@ -9903,6 +10261,8 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 pullRequest: FfiConverterOptionTypePullRequest.read(from: &buf), 
                 sendState: FfiConverterOptionTypeSendState.read(from: &buf), 
                 parentChatId: FfiConverterOptionString.read(from: &buf), 
+                task: FfiConverterOptionTypeDelegatedTaskView.read(from: &buf),
+                fork: FfiConverterOptionTypeForkLineageView.read(from: &buf),
                 roomGen: FfiConverterUInt32.read(from: &buf)
         )
     }
@@ -9940,6 +10300,8 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterOptionTypePullRequest.write(value.pullRequest, into: &buf)
         FfiConverterOptionTypeSendState.write(value.sendState, into: &buf)
         FfiConverterOptionString.write(value.parentChatId, into: &buf)
+        FfiConverterOptionTypeDelegatedTaskView.write(value.task, into: &buf)
+        FfiConverterOptionTypeForkLineageView.write(value.fork, into: &buf)
         FfiConverterUInt32.write(value.roomGen, into: &buf)
     }
 }
@@ -16259,6 +16621,54 @@ fileprivate struct FfiConverterOptionTypeContextUsage: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeDelegatedTaskView: FfiConverterRustBuffer {
+    typealias SwiftType = DelegatedTaskView?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeDelegatedTaskView.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeDelegatedTaskView.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeForkLineageView: FfiConverterRustBuffer {
+    typealias SwiftType = ForkLineageView?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeForkLineageView.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeForkLineageView.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFrameImage: FfiConverterRustBuffer {
     typealias SwiftType = FrameImage?
 
@@ -17292,6 +17702,31 @@ fileprivate struct FfiConverterSequenceTypeRowPlacement: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeRunCheckpointView: FfiConverterRustBuffer {
+    typealias SwiftType = [RunCheckpointView]
+
+    public static func write(_ value: [RunCheckpointView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRunCheckpointView.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RunCheckpointView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RunCheckpointView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeRunCheckpointView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeScroller: FfiConverterRustBuffer {
     typealias SwiftType = [Scroller]
 
@@ -18162,6 +18597,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_assign_section() != 63363) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_cancel_task() != 64036) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_chat_checkpoints() != 47115) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_child_sessions() != 10159) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18172,6 +18613,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_connectivity() != 51284) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_create_chat_checkpoint() != 6415) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_create_project() != 59427) {
@@ -18204,6 +18648,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_execution_devices() != 15578) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_fork_session() != 28080) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_front_page() != 3792) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18226,6 +18673,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_mark_seen() != 64234) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_merge_chat() != 22315) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_move_pin() != 26081) {
@@ -18280,6 +18730,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_rename_session() != 49666) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_rollback_chat() != 6219) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_search() != 33140) {

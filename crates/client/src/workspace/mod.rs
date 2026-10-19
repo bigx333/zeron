@@ -15,12 +15,12 @@ use std::sync::{Arc, Mutex, RwLock};
 use zeron_doc::{RegistryDoc, WorkspaceState};
 use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences};
 
-pub(crate) use view::{DeriveContext, device_online};
 pub use view::{
-    DeviceView, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
-    SearchField, SearchHit, SectionView, SessionRow, WorkspaceSnapshot, project_color_index,
-    relative_time_label,
+    DelegatedTaskView, DeviceView, ForkLineageView, FrontPage, PROJECT_COLOR_COUNT, ProjectRef,
+    ProjectView, PullRequestGroups, SearchField, SearchHit, SectionView, SessionRow,
+    WorkspaceSnapshot, project_color_index, relative_time_label,
 };
+pub(crate) use view::{DeriveContext, device_online};
 
 use crate::{lock, read, write};
 

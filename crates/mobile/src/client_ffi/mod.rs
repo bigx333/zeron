@@ -186,6 +186,30 @@ impl CoreClient {
             .collect()
     }
 
+    pub async fn chat_checkpoints(&self, chat_id: String) -> CoreResult<Vec<RunCheckpointView>> {
+        Ok(self
+            .client
+            .chat_checkpoints(&chat_id)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+    pub async fn create_chat_checkpoint(&self, chat_id: String) -> CoreResult<RunCheckpointView> {
+        Ok(self.client.create_chat_checkpoint(&chat_id).await?.into())
+    }
+    pub async fn rollback_chat(
+        &self,
+        chat_id: String,
+        checkpoint_id: String,
+        client_request_id: Option<String>,
+    ) -> CoreResult<String> {
+        self.client
+            .rollback_chat(&chat_id, &checkpoint_id, client_request_id.as_deref())
+            .await
+            .map_err(Into::into)
+    }
+
     pub fn project(&self, space_id: String) -> Option<ProjectView> {
         self.client.workspace().project(&space_id).map(Into::into)
     }
@@ -233,6 +257,21 @@ impl CoreClient {
     /// Side chats / subagent chats of `parent_id`, recency order.
     pub fn child_sessions(&self, parent_id: String) -> Vec<SessionRow> {
         rows(self.client.workspace().children(&parent_id))
+    }
+
+    pub async fn cancel_task(&self, parent_chat_id: String, task_id: String) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move { client.cancel_task(&parent_chat_id, &task_id).await }).await
+    }
+
+    pub async fn merge_chat(&self, source_chat_id: String) -> CoreResult<String> {
+        let client = self.client.clone();
+        on_runtime(async move { client.merge_chat(&source_chat_id).await }).await
+    }
+
+    pub async fn fork_session(&self, source_chat_id: String) -> CoreResult<String> {
+        let client = self.client.clone();
+        on_runtime(async move { client.fork_session(&source_chat_id).await }).await
     }
 
     pub fn session_config(&self, chat_id: String) -> Option<ChatConfig> {

@@ -139,6 +139,15 @@ impl ChatPersistence {
         }
     }
 
+    /// A durability boundary for a command or result that already committed.
+    /// Later streaming changes may remain dirty without invalidating this save.
+    pub(crate) fn flush_required(&self) -> bool {
+        self.dirty(true);
+        let required = self.generation.load(Ordering::Acquire);
+        self.flush_sync();
+        self.saved.load(Ordering::Acquire) >= required
+    }
+
     pub(crate) fn flush_sync(&self) {
         let flush = || {
             let _write = self.write.lock().unwrap_or_else(|e| e.into_inner());

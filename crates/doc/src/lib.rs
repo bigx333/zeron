@@ -10,10 +10,13 @@
 
 pub mod commands;
 pub mod constants;
+mod context_transfer;
+mod history;
 pub mod parts;
 pub mod queue;
 pub mod rebuild;
 pub mod registry;
+mod run_outcome;
 pub mod schema;
 pub mod transcript_delta;
 pub mod voice;

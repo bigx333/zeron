@@ -224,6 +224,19 @@ pub struct ModelContext {
 
 #[async_trait]
 pub trait Harness: Send + Sync {
+    fn supports_native_fork(&self) -> bool {
+        false
+    }
+    /// Create a new native session through the inclusive, completed boundary.
+    /// Must not mutate the source or start a model turn.
+    async fn fork_session(
+        &self,
+        _source: &zeron_proto::ProviderPoint,
+    ) -> Result<String, HarnessError> {
+        Err(HarnessError::Protocol(
+            "Native history forks are unavailable for this provider".into(),
+        ))
+    }
     fn id(&self) -> HarnessId;
     fn display_name(&self) -> &str;
     fn supports_steering(&self) -> bool;
@@ -336,6 +349,18 @@ pub trait Harness: Send + Sync {
         _controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         Err(HarnessError::Protocol("idle runtime unsupported".into()))
+    }
+
+    /// Run one (persistent) session; the stream ends with `AgentEvent::Done`.
+    /// A driver that falls back from a missing native session to a fresh one
+    /// can use this full portable context instead of the resume-only delta.
+    async fn run_with_resume_context(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        _fresh_context: Option<String>,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run(request, controls).await
     }
 
     /// Run one (persistent) session; the stream ends with `AgentEvent::Done`.

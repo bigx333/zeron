@@ -39,6 +39,8 @@ use crate::registry::{HarnessDescriptor, HarnessRegistry};
 use crate::run_journal::RunJournal;
 use crate::{EngineError, new_id, now_ms};
 
+mod orchestration_instructions;
+
 /// One journaled event: the durable seq plus the event, as broadcast to subscribers.
 #[derive(Debug, Clone)]
 pub struct JournaledEvent {
@@ -186,6 +188,9 @@ struct RunHandle {
     /// This runtime's provider session holds the fork's copied history (a
     /// side chat's bootstrap went out on its run or on one of its steers).
     fork_history_sent: Arc<std::sync::atomic::AtomicBool>,
+    /// Guidance goes out once per runtime, on its first normal prompt. A
+    /// slash-command/idle start leaves it pending for the first warm send.
+    orchestration_sent: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// The user stopped this runtime: it is being torn down and takes no
     /// more prompts. Flipped under the ledger lock, so every accepted steer
     /// is unambiguously before the stop (cancelled with it) or after it
@@ -212,6 +217,7 @@ struct RoutedSteer {
 }
 
 struct Inner {
+    history_gate: Arc<tokio::sync::RwLock<()>>,
     agent_accounts: OnceLock<crate::AgentAccounts>,
     voice: crate::voice::VoiceManager,
     device_id: String,
@@ -277,6 +283,7 @@ impl SessionsEngine {
         let (sessions_tx, _) = watch::channel(Vec::new());
         Self {
             inner: Arc::new(Inner {
+                history_gate: Arc::new(tokio::sync::RwLock::new(())),
                 voice: crate::voice::VoiceManager::default(),
                 device_id,
                 shutting_down: std::sync::atomic::AtomicBool::new(false),
@@ -383,6 +390,35 @@ impl SessionsEngine {
     /// Wire the turn-start listener (called once at engine assembly).
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
+    }
+
+    pub(crate) async fn history_mutation(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.inner.history_gate.clone().write_owned().await
+    }
+
+    pub(crate) fn restore_provider(
+        &self,
+        chat_id: &str,
+        point: Option<&zeron_proto::ProviderPoint>,
+    ) {
+        let (id, cwd) = point
+            .map(|p| (p.session_id.clone(), p.cwd.clone()))
+            .unwrap_or_default();
+        lock(&self.inner.harness_sessions).insert(
+            chat_id.to_owned(),
+            HarnessSessionRef {
+                session_id: id.clone(),
+                cwd: cwd.clone(),
+            },
+        );
+        lock(&self.inner.last_requests).remove(chat_id);
+        if let Some(session) = lock(&self.inner.statuses).get_mut(chat_id) {
+            session.last_completed_turn = None;
+        }
+        self.inner.set_status(chat_id, SessionStatus::Idle, false);
+        if let Some(ws) = self.inner.workspace() {
+            ws.set_chat_harness_session(chat_id, &id, &cwd);
+        }
     }
 
     fn note_turn_start(&self, chat_id: &str, cwd: &str) {
@@ -625,6 +661,7 @@ impl SessionsEngine {
         idle: bool,
     ) -> Result<String, EngineError> {
         // Project-less chats store a home-relative cwd (the creating device
+        let _history = self.inner.history_gate.read().await;
         // can't know the host's home); expand it here, on the host, where the
         // run spawns, creating a new chat's scratch folder.
         let scratch_root = self
@@ -659,10 +696,21 @@ impl SessionsEngine {
                 h.steer_tx.clone(),
                 h.routed_steers.clone(),
                 h.fork_history_sent.clone(),
+                h.orchestration_sent.clone(),
                 h.retiring.clone(),
             )
         });
-        if let Some((run_id, steerable, route, steer_tx, ledger, history_sent, retiring)) = routed {
+        if let Some((
+            run_id,
+            steerable,
+            route,
+            steer_tx,
+            ledger,
+            history_sent,
+            guidance_sent,
+            retiring,
+        )) = routed
+        {
             if idle {
                 // No prompt rides an idle start, so nothing could carry an
                 // in-place reconfiguration: only the runtime as is will do.
@@ -682,7 +730,7 @@ impl SessionsEngine {
                 let delivered = bootstrap.as_deref().unwrap_or(&request.prompt);
                 // Warm dispatch uses the same mailbox as explicit steering.
                 // Register acceptance before a fast boundary can retire it.
-                let message = SteerMessage {
+                let mut message = SteerMessage {
                     // OpenCode must see the canonical selection before it
                     // decodes the provider command: a project-scoped command
                     // can disappear between composer discovery and delivery.
@@ -714,6 +762,15 @@ impl SessionsEngine {
                                 after_stop: retiring.load(std::sync::atomic::Ordering::Acquire),
                                 request: Some(Box::new(request.clone())),
                             });
+                            if let Some(guidance) = orchestration_instructions::prepare(
+                                &message.prompt,
+                                harness_id,
+                                guidance_sent.as_deref(),
+                            ) && let Some(sent) = &guidance_sent
+                            {
+                                message.prompt = guidance;
+                                sent.store(true, std::sync::atomic::Ordering::Release);
+                            }
                             permit.send(message);
                         })
                         .is_some()
@@ -793,6 +850,13 @@ impl SessionsEngine {
         }
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
+        if handle.doc().run_checkpoints()?.is_empty()
+            && let Some(host) = self.inner.doc_host()
+        {
+            if let Err(error) = host.capture_run_checkpoint(chat_id, false, true).await {
+                tracing::warn!(chat = chat_id, %error, "initial checkpoint unavailable");
+            }
+        }
         let user_id = message_id.unwrap_or_else(new_id);
         if !idle {
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
@@ -807,7 +871,24 @@ impl SessionsEngine {
         // and starting the retry fresh silently dropped a good conversation.
         let mut resume_injected = false;
         if request.resume.is_none() {
-            request.resume = self.inner.resume_for(chat_id, &request.cwd);
+            let previous_harness = handle.doc().provider_harness().or_else(|| {
+                self.inner
+                    .journal
+                    .events_rev(chat_id)
+                    .ok()?
+                    .filter_map(Result::ok)
+                    .find_map(|(_, event)| match event {
+                        AgentEvent::SessionStarted { harness, .. } => Some(harness),
+                        _ => None,
+                    })
+            });
+            if let Some(known) = handle.doc().provider_session(harness_id, &request.cwd) {
+                request.resume = Some(known.point.session_id);
+            } else if !handle.doc().history_was_restored()
+                && previous_harness.is_none_or(|previous| previous == harness_id)
+            {
+                request.resume = self.inner.resume_for(chat_id, &request.cwd);
+            }
             resume_injected = request.resume.is_some();
         }
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
@@ -851,6 +932,13 @@ impl SessionsEngine {
         let turn = TurnControl::default();
         let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let fork_history_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let has_zeron_mcp = request.mcp.as_ref().map_or_else(
+            || self.inner.zeron_mcp(chat_id).is_some(),
+            |server| server.name == "zeron",
+        );
+        let send_guidance = has_zeron_mcp && !idle && !native_command(&request.prompt, harness_id);
+        let orchestration_sent =
+            has_zeron_mcp.then(|| Arc::new(std::sync::atomic::AtomicBool::new(send_guidance)));
         let (voice_handle, realtime, _voice_events) = zeron_harness::codex::realtime::channel();
         let voice_active = Arc::new(VoiceActivity::default());
         let controls = RunControls {
@@ -884,6 +972,7 @@ impl SessionsEngine {
                 pending_inputs,
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 fork_history_sent: fork_history_sent.clone(),
+                orchestration_sent,
                 retiring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
@@ -928,6 +1017,7 @@ impl SessionsEngine {
                 resume_injected,
                 startup_retry,
                 fork_history_sent,
+                send_guidance,
                 started,
             },
             turn,
@@ -954,6 +1044,23 @@ impl SessionsEngine {
             .map(|known| known.session_id.clone())
             .filter(|id| !id.is_empty());
         let handle = self.doc_handle(chat_id).ok()?;
+        let known = handle
+            .doc()
+            .provider_sessions()
+            .into_iter()
+            .find(|p| Some(p.point.session_id.as_str()) == session.as_deref());
+        let owed_fork = handle.doc().fork_history_session().as_deref() != session.as_deref()
+            && handle.doc().read_entries().ok()?.iter().any(|e| {
+                e.parts
+                    .iter()
+                    .any(|p| matches!(p, MessagePart::Fork { .. }))
+            });
+        // A warm runtime already has its in-flight turn; delta replay is a
+        // cold-reactivation operation. Only an unbootstrapped session or an
+        // owed frozen fork prefix can need history in the warm mailbox.
+        if known.as_ref().is_some_and(|p| p.context_ready) && !owed_fork {
+            return None;
+        }
         self.inner.fork_history_prompt(
             chat_id,
             handle.doc(),
@@ -982,6 +1089,7 @@ impl SessionsEngine {
         message_id: Option<String>,
         issued_at: i64,
     ) -> Result<SteerOutcome, EngineError> {
+        let _history = self.inner.history_gate.read().await;
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire))
@@ -992,10 +1100,13 @@ impl SessionsEngine {
                     h.steer_tx.clone(),
                     h.routed_steers.clone(),
                     h.fork_history_sent.clone(),
+                    h.orchestration_sent.clone(),
                     h.retiring.clone(),
                 )
             });
-        let Some((run_id, harness_id, steer_tx, ledger, history_sent, retiring)) = target else {
+        let Some((run_id, harness_id, steer_tx, ledger, history_sent, guidance_sent, retiring)) =
+            target
+        else {
             return Ok(SteerOutcome::NotSteerable);
         };
         zeron_proto::invocation::validate_harness_invocations(prompt, harness_id)
@@ -1010,7 +1121,7 @@ impl SessionsEngine {
             request.attachments = Vec::new();
             Box::new(request)
         });
-        let message = SteerMessage {
+        let mut message = SteerMessage {
             prompt: if harness_id == HarnessId::Opencode {
                 delivered.to_owned()
             } else {
@@ -1038,6 +1149,15 @@ impl SessionsEngine {
                 after_stop: retiring.load(std::sync::atomic::Ordering::Acquire),
                 request: sent_with,
             });
+            if let Some(guidance) = orchestration_instructions::prepare(
+                &message.prompt,
+                harness_id,
+                guidance_sent.as_deref(),
+            ) && let Some(sent) = &guidance_sent
+            {
+                message.prompt = guidance;
+                sent.store(true, std::sync::atomic::Ordering::Release);
+            }
             permit.send(message);
         });
         if accepted.is_none() {
@@ -1885,10 +2005,102 @@ enum ProviderSession<'a> {
 fn note_fork_history_session(doc: &SessionDoc, carried: bool, session_id: &str) {
     if carried && !session_id.is_empty() {
         let _ = doc.set_fork_history_session(session_id);
+        let _ = doc.mark_provider_context(session_id);
     }
 }
 
 impl Inner {
+    async fn resolve_native_fork(
+        &self,
+        chat_id: &str,
+        doc: &SessionDoc,
+        harness_id: HarnessId,
+        current: &str,
+        cwd: &str,
+    ) -> Option<String> {
+        if doc.history_was_restored()
+            || doc.provider_harness().is_some()
+            || doc.provider_session(harness_id, cwd).is_some()
+        {
+            return None;
+        }
+        let host = self.doc_host()?;
+        let ws = self.workspace()?;
+        let chat = ws.chat(chat_id).ok()??;
+        let lineage = chat.orchestration.as_ref()?.fork.as_ref()?;
+        let source = ws.chat(&lineage.source_chat_id).ok()??;
+        if source.device_id != chat.device_id {
+            return None;
+        }
+        let source_doc = host.open(&source.id).ok()?;
+        let checkpoint = source_doc
+            .doc()
+            .run_checkpoints()
+            .ok()?
+            .into_iter()
+            .find(|p| p.message_id.as_ref() == Some(&lineage.source_message_id))?;
+        if checkpoint.provider_strategy != "native" {
+            return None;
+        }
+        let point = checkpoint.provider_point?;
+        if point.harness != harness_id || point.turn_id.is_none() {
+            return None;
+        }
+        let harness = self.registry.resolve(harness_id).ok()?;
+        if !harness.supports_native_fork() {
+            return None;
+        }
+        let _lease = self.registry.execution_lease(harness_id).await;
+        let id = match harness.fork_session(&point).await {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(chat = chat_id, %error, "native fork unavailable; using visible-history transfer");
+                return None;
+            }
+        };
+        let boundary = doc
+            .read_entries()
+            .ok()?
+            .into_iter()
+            .filter(|e| e.id != current)
+            .last()
+            .map(|e| e.id);
+        doc.remember_provider(
+            zeron_proto::ProviderPoint {
+                session_id: id.clone(),
+                cwd: cwd.to_owned(),
+                ..point
+            },
+            boundary.as_deref(),
+        )
+        .ok()?;
+        doc.set_fork_history_session(&id).ok()?;
+        doc.mark_provider_context(&id).ok()?;
+        doc.record_context_transfer(zeron_proto::ContextTransfer {
+            id: crate::doc_host::orchestration::stable_id(chat_id, "native-fork"),
+            kind: "native_fork".into(),
+            source_chat_id: source.id,
+            source_message_id: Some(lineage.source_message_id.clone()),
+            target_harness: Some(harness_id),
+            created_at: now_ms(),
+            status: "consumed".into(),
+            content: String::new(),
+            truncated: false,
+        })
+        .ok()?;
+        let mut state = chat.orchestration.clone()?;
+        state.fork.as_mut()?.strategy = "native".into();
+        ws.set_chat_orchestration(chat_id, &state).ok()?;
+        let handle = host.open(chat_id).ok()?;
+        if let Some(persistence) = &handle.persistence {
+            if !persistence.flush_required() {
+                return None;
+            }
+        }
+        ws.persist_now().ok()?;
+        Some(id)
+    }
+
     /// `prompt` with the conversation a side chat's provider session lacks in
     /// front of it, or `None` when it lacks nothing. A fresh session gets the
     /// whole transcript (`current` excluded); a continued one only the fork's
@@ -1903,64 +2115,182 @@ impl Inner {
         current: Option<&str>,
         provider: ProviderSession<'_>,
     ) -> Option<String> {
-        if native_command(prompt, harness_id)
-            || !self
-                .workspace()
-                .and_then(|ws| ws.chat(chat_id).ok().flatten())
-                .is_some_and(|chat| chat.parent_chat_id.is_some())
-        {
+        self.fork_history_prompt_inner(chat_id, doc, harness_id, prompt, current, provider, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fork_history_prompt_inner(
+        &self,
+        chat_id: &str,
+        doc: &SessionDoc,
+        harness_id: HarnessId,
+        prompt: &str,
+        current: Option<&str>,
+        provider: ProviderSession<'_>,
+        record: bool,
+    ) -> Option<String> {
+        if native_command(prompt, harness_id) {
             return None;
         }
-        let entries: Vec<_> = doc
-            .read_entries()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|entry| Some(entry.id.as_str()) != current)
-            .collect();
-        let end = match provider {
-            ProviderSession::Fresh => entries.len(),
+        let chat = self
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten());
+        let is_side = chat
+            .as_ref()
+            .is_some_and(|chat| chat.parent_chat_id.is_some());
+        let continued = match provider {
+            ProviderSession::Continued(Some(id)) => doc
+                .provider_sessions()
+                .into_iter()
+                .find(|s| s.point.harness == harness_id && s.point.session_id == id),
+            _ => None,
+        };
+        if matches!(provider, ProviderSession::Continued(_)) && !is_side && continued.is_none() {
+            return None;
+        }
+        let mut entries = doc.read_entries().unwrap_or_default();
+        if let Some(index) = current.and_then(|id| entries.iter().position(|entry| entry.id == id))
+        {
+            // Sends accepted while startup was waiting may already be in the
+            // doc. Their mailbox delivery still owns them; never replay them
+            // as history ahead of the request currently starting.
+            entries.truncate(index);
+        }
+        let (start, end) = match provider {
+            ProviderSession::Fresh => (0, entries.len()),
             ProviderSession::Continued(session) => {
                 let delivered = doc.fork_history_session();
-                if session.is_some() && delivered.as_deref() == session {
-                    return None;
-                }
-                entries.iter().position(|entry| {
+                let seam = entries.iter().position(|entry| {
                     entry
                         .parts
                         .iter()
                         .any(|part| matches!(part, zeron_doc::MessagePart::Fork { .. }))
-                })?
+                });
+                if is_side && delivered.as_deref() != session && seam.is_some() {
+                    (0, seam.unwrap())
+                } else if let Some(known) = continued.as_ref()
+                    && !known.context_ready
+                    && delivered.as_deref() != session
+                {
+                    (0, entries.len())
+                } else if let Some(last) =
+                    continued.as_ref().and_then(|s| s.last_message_id.as_ref())
+                    && let Some(index) = entries.iter().position(|e| &e.id == last)
+                {
+                    (index + 1, entries.len())
+                } else {
+                    if session.is_some() && delivered.as_deref() == session {
+                        return None;
+                    }
+                    (
+                        0,
+                        entries.iter().position(|entry| {
+                            entry
+                                .parts
+                                .iter()
+                                .any(|part| matches!(part, zeron_doc::MessagePart::Fork { .. }))
+                        })?,
+                    )
+                }
             }
         };
-        let history: Vec<_> = entries[..end]
-            .iter()
-            .map(|entry| {
-                let text = entry
-                    .parts
+        let mut budget = 48_000usize;
+        let mut truncated = false;
+        let mut history = Vec::new();
+        for entry in entries[start..end].iter().rev() {
+            if !matches!(
+                entry.role,
+                zeron_doc::MessageRole::User | zeron_doc::MessageRole::Assistant
+            ) {
+                continue;
+            }
+            let text = entry
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    zeron_doc::MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.is_empty() {
+                continue;
+            }
+            if budget == 0 {
+                truncated = true;
+                break;
+            }
+            let count = text.chars().count();
+            let text = if count > budget {
+                truncated = true;
+                text.chars().skip(count - budget).collect::<String>()
+            } else {
+                text
+            };
+            budget -= count.min(budget);
+            history.push(serde_json::json!({"role":entry.role,"text":text}));
+        }
+        history.reverse();
+        if history.is_empty() {
+            return None;
+        }
+        let content = serde_json::to_string(&history).unwrap_or_default();
+        let lineage = chat
+            .as_ref()
+            .and_then(|chat| chat.orchestration.as_ref())
+            .and_then(|state| state.fork.as_ref());
+        let initial_fork = doc.provider_harness().is_none()
+            && entries[..end].iter().any(|e| {
+                e.parts
                     .iter()
-                    .filter_map(|part| match part {
-                        zeron_doc::MessagePart::Text { text, .. } => Some(text.clone()),
-                        zeron_doc::MessagePart::Tool { call, output, .. } => Some(format!(
-                            "Tool: {}\n{}",
-                            serde_json::to_string(call).unwrap_or_default(),
-                            output.clone().unwrap_or_default()
-                        )),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                (entry.role, text)
-            })
-            .filter(|(_, text)| !text.is_empty())
-            .map(|(role, text)| serde_json::json!({ "role": role, "text": text }))
-            .collect();
-        (!history.is_empty()).then(|| {
-            format!(
-                "Continue this side conversation using the following prior conversation as context.\n<conversation>\n{}\n</conversation>\n\n{}",
-                serde_json::to_string(&history).unwrap_or_default(),
-                prompt
-            )
-        })
+                    .any(|p| matches!(p, zeron_doc::MessagePart::Fork { .. }))
+            });
+        let source_message_id = if initial_fork {
+            lineage.map(|f| f.source_message_id.clone())
+        } else {
+            entries[..end].last().map(|e| e.id.clone())
+        };
+        let source_chat_id = if initial_fork {
+            lineage
+                .map(|f| f.source_chat_id.clone())
+                .unwrap_or_else(|| chat_id.to_owned())
+        } else {
+            chat_id.to_owned()
+        };
+        let transfer_id = crate::doc_host::orchestration::stable_id(
+            chat_id,
+            &format!("handoff:{harness_id:?}:{}", current.unwrap_or(prompt)),
+        );
+        if record {
+            let _ = doc.record_context_transfer(zeron_proto::ContextTransfer {
+                id: transfer_id,
+                kind: if continued.is_some() {
+                    "provider_reactivation"
+                } else if initial_fork {
+                    "fork"
+                } else {
+                    "provider_handoff"
+                }
+                .into(),
+                source_chat_id,
+                source_message_id,
+                target_harness: Some(harness_id),
+                created_at: now_ms(),
+                status: "prepared".into(),
+                content: content.clone(),
+                truncated,
+            });
+        }
+        Some(format!(
+            "Continue this conversation using the following prior visible conversation as context. This is historical context; the current request follows it.{}\n<conversation>\n{}\n</conversation>\n\n{}",
+            if truncated {
+                " Older context was omitted to fit the transfer budget."
+            } else {
+                ""
+            },
+            content,
+            prompt
+        ))
     }
 }
 
@@ -2266,6 +2596,7 @@ struct RunResumeState {
     resume_injected: bool,
     startup_retry: bool,
     fork_history_sent: Arc<std::sync::atomic::AtomicBool>,
+    send_guidance: bool,
     /// Set once the harness stream is open (see [`RunHandle::started`]).
     started: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -2368,6 +2699,17 @@ async fn drive_run(
     });
     // A side chat owns a fresh provider session. Bootstrap it from the frozen
     // conversation, never resume (and mutate) the parent's provider session.
+    if request.resume.is_none() && !resume_state.idle {
+        request.resume = inner
+            .resolve_native_fork(
+                &chat_id,
+                &doc,
+                harness_id,
+                &resume_state.user_message_id,
+                &request.cwd,
+            )
+            .await;
+    }
     let mut carried_history = false;
     let provider = match request.resume.as_deref() {
         None => ProviderSession::Fresh,
@@ -2389,6 +2731,23 @@ async fn drive_run(
             .fork_history_sent
             .store(true, std::sync::atomic::Ordering::Release);
     }
+    // A lost Codex rollout must receive full visible context on fresh fallback,
+    // rather than only the delta prepared for the saved native session.
+    let mut fresh_context = if harness_id == HarnessId::Codex && request.resume.is_some() {
+        inner.fork_history_prompt_inner(
+            &chat_id,
+            &doc,
+            harness_id,
+            &user_prompt,
+            Some(&resume_state.user_message_id),
+            ProviderSession::Fresh,
+            false,
+        )
+    } else {
+        None
+    };
+    let resume_context_available = fresh_context.is_some();
+    let expected_native_session = request.resume.clone();
     // Startup can stop before the SDK saves user text, with no new session
     // ID or receipt. Bridge that unacknowledged tail from our transcript;
     // a fresh session needs all prior user text, not just the latest tail.
@@ -2426,10 +2785,27 @@ async fn drive_run(
                     wire_request.prompt =
                         zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
                 }
+                if resume_state.send_guidance {
+                    wire_request.prompt = orchestration_instructions::prepare(
+                        &wire_request.prompt,
+                        harness_id,
+                        Some(&std::sync::atomic::AtomicBool::new(false)),
+                    )
+                    .unwrap_or(wire_request.prompt);
+                    if let Some(context) = &fresh_context {
+                        fresh_context = orchestration_instructions::prepare(
+                            context,
+                            harness_id,
+                            Some(&std::sync::atomic::AtomicBool::new(false)),
+                        );
+                    }
+                }
                 if resume_state.idle {
                     harness.start_idle(wire_request, controls).await
                 } else {
-                    harness.run(wire_request, controls).await
+                    harness
+                        .run_with_resume_context(wire_request, controls, fresh_context)
+                        .await
                 }
             } else {
                 Ok(futures::stream::once(async {
@@ -2882,6 +3258,25 @@ async fn drive_run(
             event
         };
 
+        if let AgentEvent::ProviderTurn {
+            session_id,
+            turn_id,
+        } = &event
+        {
+            let _ = doc.remember_provider(
+                zeron_proto::ProviderPoint {
+                    harness: harness_id,
+                    session_id: session_id.clone(),
+                    cwd: run_cwd.clone(),
+                    turn_id: Some(turn_id.clone()),
+                },
+                None,
+            );
+            // This boundary is control metadata, never a transcript row or
+            // a legacy event-stream frame an older viewer must decode.
+            continue;
+        }
+
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream
         // into the subagent's own doc, and the parent keeps only the spawn
@@ -3323,6 +3718,7 @@ async fn drive_run(
                     .filter(|id| !id.is_empty())
             {
                 let _ = doc.set_fork_history_session(&session);
+                let _ = doc.mark_provider_context(&session);
             }
             continue;
         }
@@ -3332,10 +3728,42 @@ async fn drive_run(
                 session_id, cwd, ..
             } => {
                 saw_session_started = true;
+                if resume_context_available
+                    && expected_native_session
+                        .as_ref()
+                        .is_some_and(|id| id != session_id)
+                {
+                    // The driver used its fresh fallback. Make inspection and
+                    // the fork-delivery receipt describe the context it sent.
+                    carried_history = inner
+                        .fork_history_prompt_inner(
+                            &chat_id,
+                            &doc,
+                            harness_id,
+                            &user_prompt,
+                            Some(&resume_state.user_message_id),
+                            ProviderSession::Fresh,
+                            true,
+                        )
+                        .is_some();
+                }
                 // The event's own cwd (where the harness actually created the
                 // session) scopes the stored id, not the request's.
                 inner.remember_harness_session(&chat_id, session_id, cwd);
+                let _ = doc.remember_provider(
+                    zeron_proto::ProviderPoint {
+                        harness: harness_id,
+                        session_id: session_id.clone(),
+                        cwd: cwd.clone(),
+                        turn_id: None,
+                    },
+                    None,
+                );
+                if !native_command(&user_prompt, harness_id) {
+                    let _ = doc.mark_provider_context(session_id);
+                }
                 note_fork_history_session(&doc, carried_history, session_id);
+                let _ = doc.consume_context_transfers(harness_id);
             }
             AgentEvent::Done {
                 session_id: Some(session_id),
@@ -3343,6 +3771,7 @@ async fn drive_run(
             } => {
                 inner.remember_harness_session(&chat_id, session_id, &run_cwd);
                 note_fork_history_session(&doc, carried_history, session_id);
+                let _ = doc.consume_context_transfers(harness_id);
             }
             AgentEvent::InputRequested { .. } => {
                 // Known-id guaranteed: the unknown-id twin was dropped above,
@@ -3479,6 +3908,36 @@ async fn drive_run(
             // way (see `continues_with_sent_message`); rows the user queued
             // themselves still notify.
             let pending_steer = inner.has_pending_steers(&chat_id, &run_id);
+            if turn_was_active {
+                if let Some(known) = doc.provider_session(harness_id, &run_cwd) {
+                    let last = doc
+                        .read_entries()
+                        .ok()
+                        .and_then(|entries| {
+                            entries
+                                .iter()
+                                .find(|e| e.id == entry_id)
+                                .map(|e| e.id.clone())
+                        })
+                        .unwrap_or_else(|| resume_state.user_message_id.clone());
+                    if !native_command(&user_prompt, harness_id) {
+                        let _ = doc.mark_provider_context(&known.point.session_id);
+                    }
+                    let _ = doc.remember_provider(known.point, Some(&last));
+                }
+                let _ = doc.record_root_run_outcome(&zeron_proto::RootRunOutcome {
+                    status: *status,
+                    message_id: entry_id.clone(),
+                    finished_at: now_ms(),
+                });
+                if *status == DoneStatus::Completed
+                    && let Some(host) = inner.doc_host()
+                {
+                    if let Err(error) = host.capture_run_checkpoint(&chat_id, false, true).await {
+                        tracing::warn!(chat = %chat_id, %error, "run checkpoint failed");
+                    }
+                }
+            }
             let completed_turn = (*status == DoneStatus::Completed
                 && !interrupted
                 && turn_was_active

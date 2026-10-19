@@ -579,6 +579,13 @@ pub enum DoneStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AgentEvent {
+    /// Provider-native root boundary, retained for exact forks/checkpoints.
+    /// Internal bookkeeping; it never becomes visible transcript content.
+    #[serde(rename_all = "camelCase")]
+    ProviderTurn {
+        session_id: String,
+        turn_id: String,
+    },
     #[serde(rename_all = "camelCase")]
     SessionStarted {
         harness: HarnessId,

@@ -1,5 +1,7 @@
 //! [`Client`] — the account-scoped root object.
 
+mod orchestration;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -787,6 +789,7 @@ impl Client {
             last_seen_at: None,
             room_gen: Some(2),
             parent_chat_id: None,
+            orchestration: None,
         };
         let id = chat.id.clone();
         self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;

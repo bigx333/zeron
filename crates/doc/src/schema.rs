@@ -439,6 +439,25 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Replace a conversation in one committed CRDT transaction. The host
+    /// durably preserves the current entries in a recovery checkpoint first.
+    pub fn restore_messages(&self, entries: &[SessionMessageEntry]) -> Result<(), DocError> {
+        let messages = self.doc.get_list("messages");
+        if !messages.is_empty() {
+            messages.delete(0, messages.len())?;
+        }
+        for entry in entries {
+            let map = messages.push_container(LoroMap::new())?;
+            write_entry_scalar_fields(&map, entry)?;
+            let parts = map.insert_container("parts", LoroList::new())?;
+            for part in &entry.parts {
+                push_part(&parts, part)?;
+            }
+        }
+        self.doc.commit();
+        Ok(())
+    }
+
     /// Read all entries (continuations NOT joined — see `join_continuation_entries`).
     ///
     /// Malformed entries are SKIPPED, not fatal: a torn intermediate state

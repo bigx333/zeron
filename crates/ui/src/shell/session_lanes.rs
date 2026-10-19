@@ -4,6 +4,13 @@
 //! spawn chips of its transcript, with their live status). Each lane is a
 //! section of session-card rows; clicking a row opens it in the right pane.
 //! Settled subagents fold into one "finished" row, closed until opened.
+//!
+//! Delegated **tasks** (children with `orchestration.task`) lead the card in
+//! a lane of their own, with a row back up to the chat this one came from
+//! (see `tasks`).
+
+mod history;
+mod tasks;
 
 use zeron_doc::{MessagePart, SubagentStatus};
 use zeron_proto::{Chat, ChatIndicator};
@@ -26,6 +33,10 @@ pub(super) struct LaneState {
     scroll: gpui::ScrollHandle,
     /// The card's floating scrollbar, the file tree's treatment.
     bar: popover::MenuScrollbarState,
+    /// The task lane's unfolds, measurements and requests in flight.
+    tasks: tasks::TaskLaneState,
+    /// The open chat's checkpoints and any restore in flight.
+    history: history::HistoryState,
 }
 
 impl LaneState {
@@ -173,30 +184,53 @@ pub(super) struct ChildChatRow {
     pub change_request: Option<zeron_proto::ChangeRequestSummary>,
     /// The harness it runs on, drawn as the sidebar's brand mark.
     pub harness: Option<zeron_proto::HarnessId>,
+    /// A fork with recorded lineage: it can merge back.
+    pub fork: bool,
+    /// Mid-turn or asking: a merge waits for its turn to end.
+    pub busy: bool,
+    /// On the open chat's host — merging only works there.
+    pub same_device: bool,
     activity: DateTime<Utc>,
 }
 
 /// The live (unarchived) children of `chat_id`, most recent activity first —
-/// the same order the sidebar's Sessions list keeps.
+/// the same order the sidebar's Sessions list keeps. Delegated tasks list
+/// in their own lane instead.
 pub(super) fn child_chat_rows(
     state: &AppState,
     chat_id: &str,
     now: DateTime<Utc>,
 ) -> Vec<ChildChatRow> {
+    let host = state
+        .chats
+        .iter()
+        .find(|chat| chat.id == chat_id)
+        .map(|chat| chat.device_id.clone());
     let mut rows: Vec<ChildChatRow> = state
         .chats
         .iter()
         .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(chat_id))
+        .filter(|chat| !tasks::is_task(chat))
         .map(|chat| {
             let activity = chat.last_message_at.unwrap_or(chat.created_at);
+            let status = state.display_status_for(chat, now);
             ChildChatRow {
                 chat_id: chat.id.clone(),
                 device_id: chat.device_id.clone(),
                 title: child_chat_title(chat).into(),
-                status: state.display_status_for(chat, now),
+                status,
                 time_ago: zeron_proto::view::format_time_ago(activity, now).into(),
                 change_request: state.change_request_for_chat(chat).cloned(),
                 harness: chat.config.as_ref().map(|config| config.harness),
+                fork: chat
+                    .orchestration
+                    .as_ref()
+                    .is_some_and(|orchestration| orchestration.fork.is_some()),
+                busy: matches!(
+                    status,
+                    ChatIndicator::Working | ChatIndicator::AwaitingInput
+                ),
+                same_device: host.as_deref() == Some(chat.device_id.as_str()),
                 activity,
             }
         })
@@ -344,13 +378,17 @@ impl Shell {
     ) -> AnyElement {
         let now = Utc::now();
         self.session_lanes.follow(&chat.id);
-        let (side_chats, subagents) = {
+        let (side_chats, subagents, delegated) = {
             let state = self.state.read(cx);
             (
                 child_chat_rows(state, &chat.id, now),
                 SubagentLane::new(subagent_rows(state, &chat.id)),
+                tasks::TaskLane::new(tasks::task_rows(state, &chat.id, now)),
             )
         };
+        if side_chats.iter().any(|row| row.fork && row.same_device) {
+            self.ensure_chat_transfers(chat, cx);
+        }
         let view = cx.entity_id();
         // Subagents run on the session's own harness.
         let harness = chat.config.as_ref().map(|config| config.harness);
@@ -412,17 +450,30 @@ impl Shell {
                 );
             }
         }
-        let mut rows: Vec<AnyElement> = vec![heading.pr(px(2.0)).into_any_element()];
+        let mut rows: Vec<AnyElement> = Vec::new();
+        // ── Where it came from, then what it delegated.
+        if let Some(lineage) = self.render_lineage_row(chat, theme, cx) {
+            rows.push(lineage);
+            rows.push(popover::picker_divider().into_any_element());
+        }
+        let delegated = self.render_task_lane(delegated, view, theme, cx);
+        if !delegated.is_empty() {
+            rows.extend(delegated);
+            rows.push(popover::picker_divider().into_any_element());
+        }
+        rows.push(heading.pr(px(2.0)).into_any_element());
         rows.extend(starters);
 
         // ── Side chats.
         let shown = LaneState::shown(self.session_lanes.shown_chats);
         let hidden = side_chats.len().saturating_sub(shown);
         for row in side_chats.into_iter().take(shown) {
+            let strip = self.render_fork_merge_strip(&row, view, theme, cx);
             rows.push(
                 self.render_side_chat_row(row, view, theme, cx)
                     .into_any_element(),
             );
+            rows.extend(strip);
         }
         if hidden > 0 {
             rows.push(self.render_show_more(
@@ -482,6 +533,12 @@ impl Shell {
                     },
                 ));
             }
+        }
+        // ── History: the checkpoints each finished turn left, restorable.
+        let history = self.render_history(chat, view, theme, cx);
+        if !history.is_empty() {
+            rows.push(popover::picker_divider().into_any_element());
+            rows.extend(history);
         }
 
         let body = div()
@@ -549,8 +606,11 @@ impl Shell {
         };
         let open_id = row.chat_id.clone();
         let menu_id = row.chat_id.clone();
+        let group = SharedString::from(format!("{key}-group"));
+        let merge = self.render_fork_merge_tile(&row, group.clone(), theme, cx);
         popover::picker_row(theme, false, false, key.clone())
             .id(SharedString::from(key.clone()))
+            .group(group)
             .aria_label(SharedString::from(format!("Open side chat {}", row.title)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
@@ -573,6 +633,15 @@ impl Shell {
             .child(popover::picker_icon_slot(mark))
             // The harness mark leads the title, as on the sidebar's rows.
             .children(row.harness.map(|harness| harness_mark(harness, theme)))
+            // A fork with lineage says so beside its harness.
+            .when(row.fork, |el| {
+                el.child(
+                    icon(icons::FORK)
+                        .size(px(12.0))
+                        .flex_none()
+                        .text_color(theme.text_faint),
+                )
+            })
             .child(title)
             .when(revealing, |row| {
                 let shell = cx.weak_entity();
@@ -602,6 +671,7 @@ impl Shell {
                     theme,
                 )
             }))
+            .children(merge)
             .child(time_label(row.time_ago.clone(), theme))
     }
 
@@ -700,6 +770,17 @@ impl Shell {
                     .child(format!("Show {} more", remaining.min(PAGE_ROWS))),
             )
             .into_any_element()
+    }
+}
+
+/// Native task-lanes fixture only: scroll the lanes card to its foot, where
+/// History sits.
+#[cfg(feature = "appshots-fixture")]
+impl Shell {
+    pub fn fixture_scroll_lanes_to_end(&mut self, cx: &mut Context<Self>) {
+        let scroll = &self.session_lanes.scroll;
+        scroll.set_offset(gpui::point(px(0.0), -scroll.max_offset().y));
+        cx.notify();
     }
 }
 

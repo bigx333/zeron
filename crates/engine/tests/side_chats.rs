@@ -582,11 +582,21 @@ impl Harness for Warm {
 /// (warm dispatch or steer), exactly once, and survive a cold resume.
 #[tokio::test]
 async fn warm_side_chat_sends_owed_fork_history_once() {
+    warm_side_chat_with_guidance(false).await;
+}
+
+#[tokio::test]
+async fn explicit_warm_steer_sends_pending_history_and_guidance_once() {
+    warm_side_chat_with_guidance(true).await;
+}
+
+async fn warm_side_chat_with_guidance(steer_first: bool) {
     let dir = tempfile::tempdir().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(Warm(seen.clone())));
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    core.sessions.set_ipc_port(27699);
     core.workspace
         .create_chat(
             "main",
@@ -660,10 +670,26 @@ async fn warm_side_chat_sends_owed_fork_history_once() {
         "nothing delivered yet"
     );
     // Warm dispatch into the live runtime: the owed history goes out.
-    dispatch("What should you remember?", "f2").await.unwrap();
+    if steer_first {
+        core.sessions
+            .steer("fork", "What should you remember?", Some("f2".into()))
+            .await
+            .unwrap();
+    } else {
+        dispatch("What should you remember?", "f2").await.unwrap();
+    }
     let warm = settle(2).await;
     assert!(warm.contains("PINEAPPLE"), "{warm}");
-    assert!(warm.ends_with("What should you remember?"), "{warm}");
+    assert!(
+        warm.contains("<zeron_orchestration_instructions>"),
+        "{warm}"
+    );
+    assert!(
+        warm.ends_with("What should you remember?\n</user_request>"),
+        "{warm}"
+    );
+    let entries = doc.doc().read_entries().unwrap();
+    assert!(entries.iter().any(|entry| entry.id == "f2" && entry.parts.iter().any(|part| matches!(part, MessagePart::Text { text, .. } if text == "What should you remember?"))));
     assert!(seen.lock().unwrap()[1].2, "delivered to the live runtime");
     assert_eq!(
         doc.doc().fork_history_session().as_deref(),
@@ -679,7 +705,16 @@ async fn warm_side_chat_sends_owed_fork_history_once() {
     // A cold resume of the same provider session owes nothing either.
     core.sessions.interrupt("fork").await.unwrap();
     dispatch("Again", "f4").await.unwrap();
-    assert_eq!(settle(4).await, "Again");
+    let cold = settle(4).await;
+    assert!(
+        cold.contains("<zeron_orchestration_instructions>"),
+        "new runtimes refresh app guidance"
+    );
+    assert!(
+        !cold.contains("PINEAPPLE"),
+        "provider history must not be replayed with guidance"
+    );
+    assert!(cold.ends_with("Again\n</user_request>"));
     assert!(!seen.lock().unwrap()[3].2, "a new runtime");
     assert_eq!(
         seen.lock().unwrap()[3].1.as_deref(),

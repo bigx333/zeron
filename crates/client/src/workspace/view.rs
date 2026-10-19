@@ -70,6 +70,90 @@ pub struct ProjectRef {
 }
 
 /// One session row, as every list renders it.
+/// Provider-independent task facts shared by native mobile clients.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DelegatedTaskView {
+    pub id: String,
+    pub parent_chat_id: String,
+    pub status: String,
+    pub status_label: String,
+    pub terminal: bool,
+    pub stopping: bool,
+    pub cancel_requested: bool,
+    pub role_label: Option<String>,
+    pub isolation_label: String,
+    pub isolation: String,
+    pub summary: Option<String>,
+    pub summary_truncated: bool,
+    pub delivered: bool,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+impl From<&zeron_proto::DelegatedTask> for DelegatedTaskView {
+    fn from(task: &zeron_proto::DelegatedTask) -> Self {
+        use zeron_proto::{TaskIsolation, TaskRole};
+        let stopping = task.cancel_requested && !task.status.is_terminal();
+        Self {
+            id: task.id.clone(),
+            parent_chat_id: task.parent_chat_id.clone(),
+            status: serde_json::to_value(task.status)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            status_label: if stopping {
+                "Stopping…"
+            } else {
+                task.status.label()
+            }
+            .into(),
+            terminal: task.status.is_terminal(),
+            stopping,
+            cancel_requested: task.cancel_requested,
+            role_label: match task.role {
+                TaskRole::Implementation => Some("Implementation"),
+                TaskRole::Research => Some("Research"),
+                TaskRole::Review => Some("Review"),
+                TaskRole::Design => Some("Design"),
+                TaskRole::Test => Some("Test"),
+                TaskRole::General => None,
+            }
+            .map(str::to_owned),
+            isolation_label: match task.isolation {
+                TaskIsolation::Shared => "Shared checkout",
+                TaskIsolation::Worktree => "Own worktree",
+            }
+            .into(),
+            isolation: match task.isolation {
+                TaskIsolation::Shared => "shared",
+                TaskIsolation::Worktree => "worktree",
+            }
+            .into(),
+            summary: task.summary.clone(),
+            summary_truncated: task.summary_truncated,
+            delivered: task.delivered,
+            created_at_ms: task.created_at,
+            updated_at_ms: task.updated_at,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ForkLineageView {
+    pub source_chat_id: String,
+    pub source_message_id: String,
+    pub created_at_ms: i64,
+    pub strategy: String,
+}
+impl From<&zeron_proto::ForkLineage> for ForkLineageView {
+    fn from(fork: &zeron_proto::ForkLineage) -> Self {
+        Self {
+            source_chat_id: fork.source_chat_id.clone(),
+            source_message_id: fork.source_message_id.clone(),
+            created_at_ms: fork.created_at,
+            strategy: fork.strategy.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRow {
     pub id: String,
@@ -115,6 +199,8 @@ pub struct SessionRow {
     /// Oldest unadopted send from this device, if any.
     pub send_state: Option<SendState>,
     pub parent_chat_id: Option<String>,
+    pub task: Option<DelegatedTaskView>,
+    pub fork: Option<ForkLineageView>,
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
 }
@@ -438,6 +524,8 @@ fn hash_row(row: &SessionRow) -> u64 {
     }
     row.send_state.hash(&mut h);
     row.parent_chat_id.hash(&mut h);
+    row.task.hash(&mut h);
+    row.fork.hash(&mut h);
     row.room_gen.hash(&mut h);
     h.finish()
 }
@@ -539,6 +627,16 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         pull_request: change_request_for_chat(chat, cx.change_requests).cloned(),
         send_state,
         parent_chat_id: chat.parent_chat_id.clone(),
+        task: chat
+            .orchestration
+            .as_ref()
+            .and_then(|o| o.task.as_ref())
+            .map(Into::into),
+        fork: chat
+            .orchestration
+            .as_ref()
+            .and_then(|o| o.fork.as_ref())
+            .map(Into::into),
         room_gen: chat.room_gen.unwrap_or(1),
     };
     row.revision = hash_row(&row);
@@ -889,5 +987,68 @@ mod tests {
         assert_eq!(relative_time_label(now - 34 * 60_000, now), "34m");
         assert_eq!(relative_time_label(now - 4 * 3_600_000 - 1, now), "4h");
         assert_eq!(relative_time_label(now - 2 * 86_400_000, now), "2d");
+    }
+}
+
+#[cfg(test)]
+mod orchestration_projection_tests {
+    use super::*;
+    #[test]
+    fn child_task_updates_change_the_snapshot_without_polluting_top_level_sessions() {
+        let parent: Chat=serde_json::from_value(serde_json::json!({"id":"parent","deviceId":"host","createdAt":"2026-10-19T00:00:00Z","archived":false})).unwrap();
+        let mut child = parent.clone();
+        child.id = "child".into();
+        child.parent_chat_id = Some(parent.id.clone());
+        child.orchestration=Some(zeron_proto::ChatOrchestration { fork:None,task:Some(serde_json::from_value(serde_json::json!({"id":"child","parentChatId":"parent","role":"review","isolation":"worktree","status":"running","prompt":"brief","requestFingerprint":"key","createdAt":1,"updatedAt":1})).unwrap()) });
+        let mut state = WorkspaceState {
+            devices: vec![],
+            spaces: vec![],
+            chats: vec![parent, child],
+            sessions: vec![],
+        };
+        let presence = HashMap::new();
+        let sends = HashMap::new();
+        let mut cx = DeriveContext {
+            self_device_id: "host",
+            now: Utc::now(),
+            presence: &presence,
+            change_requests: &[],
+            send_states: &sends,
+            synced: true,
+            previous: None,
+        };
+        let first = derive(&state, None, &cx);
+        let first_task = first.session("child").unwrap();
+        assert_eq!(first_task.task.as_ref().unwrap().status, "running");
+        assert_eq!(first.children("parent").len(), 1);
+        assert!(!first.front.recent.iter().any(|row| row.id == "child"));
+        let task = state.chats[1]
+            .orchestration
+            .as_mut()
+            .unwrap()
+            .task
+            .as_mut()
+            .unwrap();
+        task.status = zeron_proto::TaskStatus::Completed;
+        task.summary = Some("Checked the change".into());
+        task.delivered = true;
+        cx.previous = Some(&first);
+        let second = derive(&state, None, &cx);
+        assert_ne!(
+            first_task.revision,
+            second.session("child").unwrap().revision
+        );
+        assert_ne!(first.content_hash(), second.content_hash());
+        assert_eq!(
+            second
+                .session("child")
+                .unwrap()
+                .task
+                .as_ref()
+                .unwrap()
+                .summary
+                .as_deref(),
+            Some("Checked the change")
+        );
     }
 }

@@ -89,6 +89,15 @@ pub mod methods {
     /// fresh chat2 socket, host nudge, drain pass, and a new delivery escort
     /// per pending command. Params `{chatId}`; IPC-only.
     pub const RETRY_DELIVERY: &str = "RetryDelivery";
+    pub const CHAT_TRANSFERS: &str = "ChatTransfers";
+    pub const DELEGATE_TASK: &str = "DelegateTask";
+    pub const CHAT_CHECKPOINTS: &str = "ChatCheckpoints";
+    pub const CREATE_CHAT_CHECKPOINT: &str = "CreateChatCheckpoint";
+    pub const ROLLBACK_CHAT: &str = "RollbackChat";
+    pub const TASK_STATUS: &str = "TaskStatus";
+    pub const TASK_RESULT: &str = "TaskResult";
+    pub const TASK_CANCEL: &str = "TaskCancel";
+    pub const MERGE_CHAT: &str = "MergeChat";
     pub const FORK_SIDE_CHAT: &str = "ForkSideChat";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync

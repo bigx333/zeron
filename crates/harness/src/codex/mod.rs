@@ -45,6 +45,7 @@
 //!   unresponsive; the stream always ends with `Done { status: Interrupted }`.
 
 pub(crate) mod catalog;
+mod history;
 mod normalize;
 pub mod realtime;
 mod subagents;
@@ -715,6 +716,15 @@ fn parse_skills(result: &Value) -> Vec<zeron_proto::invocation::Skill> {
 
 #[async_trait]
 impl Harness for CodexHarness {
+    fn supports_native_fork(&self) -> bool {
+        true
+    }
+    async fn fork_session(
+        &self,
+        source: &zeron_proto::ProviderPoint,
+    ) -> Result<String, HarnessError> {
+        self.fork_history(source).await
+    }
     fn id(&self) -> HarnessId {
         HarnessId::Codex
     }
@@ -832,7 +842,18 @@ impl Harness for CodexHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false, false).await
+        self.run_with_mode(request, controls, false, false, None)
+            .await
+    }
+
+    async fn run_with_resume_context(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+        fresh_context: Option<String>,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.run_with_mode(request, controls, false, false, fresh_context)
+            .await
     }
 
     async fn start_idle(
@@ -840,7 +861,8 @@ impl Harness for CodexHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false, true).await
+        self.run_with_mode(request, controls, false, true, None)
+            .await
     }
 
     async fn run_title(
@@ -854,7 +876,8 @@ impl Harness for CodexHarness {
         request.mcp = None;
         request.model_options.clear();
         request.auto_approve = false;
-        self.run_with_mode(request, controls, true, false).await
+        self.run_with_mode(request, controls, true, false, None)
+            .await
     }
 }
 
@@ -865,6 +888,7 @@ impl CodexHarness {
         controls: RunControls,
         title_only: bool,
         idle: bool,
+        fresh_context: Option<String>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let native = command_request(&request.prompt, "")?;
         if native
@@ -955,6 +979,7 @@ impl CodexHarness {
             event_tx,
             controls,
             request,
+            fresh_context,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
@@ -981,6 +1006,7 @@ struct Session {
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
     request: RunRequest,
+    fresh_context: Option<String>,
     interrupt_grace: Duration,
     kill_grace: Duration,
     /// Rolling stderr tail for the crash message on an unexpected exit.
@@ -1195,7 +1221,8 @@ async fn run_session(session: Session) {
         mut incoming,
         event_tx,
         controls,
-        request,
+        mut request,
+        fresh_context,
         interrupt_grace,
         kill_grace,
         stderr_tail,
@@ -1359,6 +1386,9 @@ async fn run_session(session: Session) {
                         target: "zeron_harness::codex",
                         "thread/resume failed (starting fresh): {e}"
                     );
+                    if let Some(context) = &fresh_context {
+                        request.prompt = context.clone();
+                    }
                     client
                         .request("thread/start", Value::Object(start_params.clone()))
                         .await?
@@ -1571,6 +1601,9 @@ async fn run_session(session: Session) {
                 match method.as_str() {
                     "turn/started" => {
                         let id = turn_id(&params);
+                        if !id.is_empty() && !send(&event_tx, AgentEvent::ProviderTurn {
+                            session_id: thread_id.clone(), turn_id: id.clone(),
+                        }).await { break 'main; }
                         // Native voice handoffs start a turn without going through turn/start.
                         // Publish the boundary before its text/tool deltas reach the parked engine.
                         if done_current && !id.is_empty() && !router.is_completed(&id) {

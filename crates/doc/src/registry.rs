@@ -1254,6 +1254,7 @@ impl RegistryDoc {
                     .unwrap_or(Value::Null),
             ),
             ("config", config),
+            ("orchestration", serde_json::to_value(&chat.orchestration)?),
             (
                 "lastMessagePreview",
                 opt_str(chat.last_message_preview.as_deref()),
@@ -1466,6 +1467,23 @@ impl RegistryDoc {
             chat_id,
             OpKind::Update,
             fields([("checkoutId", json!(checkout_id))]),
+        );
+        Ok(true)
+    }
+
+    pub fn set_chat_orchestration(
+        &mut self,
+        chat_id: &str,
+        state: &zeron_proto::ChatOrchestration,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("orchestration", serde_json::to_value(state)?)]),
         );
         Ok(true)
     }
@@ -1718,6 +1736,7 @@ impl RegistryDoc {
                     ("branch", opt_str(chat.branch.as_deref())),
                     ("checkoutId", opt_str(chat.checkout_id.as_deref())),
                     ("config", config),
+                    ("orchestration", serde_json::to_value(&chat.orchestration)?),
                     (
                         "lastMessagePreview",
                         opt_str(chat.last_message_preview.as_deref()),

@@ -16,6 +16,10 @@
 //! another device POSTs a durable nudge to that device's room (§7 cold-chat delivery);
 //! the host's relay receives it and warm-opens the doc, which drains the queue.
 
+pub(crate) mod orchestration;
+mod history;
+mod history_files;
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
@@ -251,6 +255,9 @@ struct DocHostInner {
     /// doc-host reference each other through Arcs, so a retired runtime's
     /// graph only drops once this back-edge is severed.
     sessions: Mutex<Option<SessionsEngine>>,
+    orchestration: tokio::sync::Mutex<()>,
+    history_capture: tokio::sync::Mutex<()>,
+    orchestration_started: AtomicBool,
     workspace: OnceLock<WorkspaceHost>,
     /// Worktree materialization for Run commands (see `set_repos`).
     repos: OnceLock<crate::repos::Repos>,
@@ -973,6 +980,9 @@ impl DocHost {
                 store,
                 config,
                 sessions: Mutex::new(None),
+                orchestration: tokio::sync::Mutex::new(()),
+                history_capture: tokio::sync::Mutex::new(()),
+                orchestration_started: AtomicBool::new(false),
                 workspace: OnceLock::new(),
                 repos: OnceLock::new(),
                 project_action_runtime: OnceLock::new(),
@@ -1068,6 +1078,7 @@ impl DocHost {
             });
         }
         self.spawn_queue_flush_watcher(statuses);
+        self.spawn_task_reconciler();
     }
 
     /// The turn-end hook for held messages. Doc changes drive `drain_queue` for
@@ -1186,6 +1197,7 @@ impl DocHost {
         if self.inner.workspace.set(workspace).is_ok() {
             self.spawn_cutover_watcher(chats);
             self.spawn_migration_sweep();
+            self.spawn_task_reconciler();
         }
     }
 

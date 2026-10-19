@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import sh.zeron.android.design.ZIcons
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.imePadding
@@ -99,7 +100,7 @@ private data class TextSheet(val title: String, val text: String, val mono: Bool
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoice: () -> Unit = {}, onVoiceSettings: () -> Unit = {}) {
+fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenChat: (String) -> Unit = {}, onOpenVoice: () -> Unit = {}, onVoiceSettings: () -> Unit = {}) {
     val client by model.client.collectAsState()
     val core = client ?: return
     val handle: SessionHandle = remember(chatId) { runCatching { core.openSession(chatId) }.getOrNull() } ?: run {
@@ -185,6 +186,8 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
 
     val project = row?.project?.name ?: "No project"
     val subtitle = composer.host.name?.let { "$project @ $it" } ?: project
+    var orchestration by remember(chatId) { mutableStateOf(false) }
+    val related = remember(workspace?.revision, chatId) { core.childSessions(parentId = chatId) }
     var overflow by remember { mutableStateOf(false) }
     var snoozing by remember { mutableStateOf(false) }
     var pickingWake by remember { mutableStateOf(false) }
@@ -219,6 +222,8 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
                     sh.zeron.android.voice.VoiceHeaderButton(model.voice, onOpenStage = onOpenVoice, onOpenSettings = onVoiceSettings)
                     androidx.compose.foundation.layout.Spacer(Modifier.size(8.dp))
                 }
+                TonalCircleButton(ZIcons.Branch, "Tasks and side chats", onClick = { orchestration = true }, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                androidx.compose.foundation.layout.Spacer(Modifier.size(8.dp))
                 Box {
                     TonalCircleButton(ZIcons.More, "More", onClick = { overflow = true }, container = MaterialTheme.colorScheme.surfaceContainerHighest)
                     ActionMenu(
@@ -240,6 +245,14 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
                         ),
                     )
                 }
+            }
+        }
+        (row?.task?.parentChatId ?: row?.fork?.sourceChatId ?: row?.parentChatId)?.let { parentId ->
+            val parent = remember(workspace?.revision, parentId) { core.sessionRow(chatId = parentId) }
+            androidx.compose.material3.TextButton(onClick = { onOpenChat(parentId) }, enabled = parent != null, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                sh.zeron.android.design.ZIcon(ZIcons.Back, null, Modifier.size(16.dp))
+                androidx.compose.foundation.layout.Spacer(Modifier.size(8.dp))
+                Text("${if (row?.task != null) "Task from" else if (row?.fork != null) "Forked from" else "Side chat of"} ${parent?.title ?: "parent chat"}", maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -276,6 +289,9 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
     if (snoozing) SnoozeSheet(row, onDismiss = { snoozing = false }, onPickDateTime = { pickingWake = true }) { model.snooze(chatId, it) }
     if (pickingWake) SnoozeDateTimeDialogs(onDismiss = { pickingWake = false }) { model.snooze(chatId, it) }
 
+    if (orchestration) {
+        OrchestrationSheet(core, row, related, onDismiss = { orchestration = false }, onOpen = { target -> orchestration = false; onOpenChat(target) })
+    }
     sheet?.let { s ->
         ModalBottomSheet(onDismissRequest = { sheet = null }) {
             Text(s.title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 24.dp))

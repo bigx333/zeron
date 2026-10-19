@@ -160,6 +160,7 @@ private fun MainNav(model: AppModel) {
                                     model,
                                     id,
                                     onBack = { selected = null },
+                                    onOpenChat = open,
                                     onOpenVoice = { nav.navigate(Routes.VOICE) { launchSingleTop = true } },
                                     onVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) },
                                 )
@@ -184,6 +185,7 @@ private fun MainNav(model: AppModel) {
                 model,
                 id,
                 onBack = { nav.popBackStack() },
+                onOpenChat = { target -> nav.navigate(Routes.chat(target)) { launchSingleTop = true } },
                 onOpenVoice = { nav.navigate(Routes.VOICE) { launchSingleTop = true } },
                 onVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) },
             )

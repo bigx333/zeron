@@ -85,6 +85,7 @@ final class AppModel {
     private var lastT3Mode = false
     private var workspaceRevision: UInt64 = 0
     private var observers: [UUID: () -> Void] = [:]
+    private var workspaceObservers: [UUID: () -> Void] = [:]
     private var sessionObservers: [String: [UUID: () -> Void]] = [:]
     private lazy var bridge = ListenerBridge(app: self)
     private var refreshScheduled = false
@@ -362,6 +363,14 @@ final class AppModel {
         return Token { [weak self] in self?.observers[id] = nil }
     }
 
+    /// Every workspace frame, changed front page or not: child chats (tasks,
+    /// side chats) never reach the front page, so their moves only show here.
+    func observeWorkspace(_ handler: @escaping () -> Void) -> AnyObject {
+        let id = UUID()
+        workspaceObservers[id] = handler
+        return Token { [weak self] in self?.workspaceObservers[id] = nil }
+    }
+
     func observeSession(_ chatId: String, _ handler: @escaping () -> Void) -> AnyObject {
         let id = UUID()
         sessionObservers[chatId, default: [:]][id] = handler
@@ -448,6 +457,7 @@ final class AppModel {
         frontPage = page
         archived = archivedVMs
         if changed { observers.values.forEach { $0() } }
+        workspaceObservers.values.forEach { $0() }
     }
 
     /// Like the desktop's project grouping: checkouts of one repository

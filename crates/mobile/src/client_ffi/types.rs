@@ -61,6 +61,36 @@ impl From<zc::ClientError> for CoreError {
 
 pub type CoreResult<T> = Result<T, CoreError>;
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RunCheckpointView {
+    pub id: String,
+    pub message_id: Option<String>,
+    pub title: String,
+    pub created_at_ms: i64,
+    pub recovery: bool,
+    pub provider_strategy: String,
+    pub files_available: bool,
+    pub files_changed: Option<u32>,
+    pub restorable: bool,
+    pub blocked_reason: Option<String>,
+}
+impl From<zeron_proto::RunCheckpoint> for RunCheckpointView {
+    fn from(p: zeron_proto::RunCheckpoint) -> Self {
+        Self {
+            id: p.id,
+            message_id: p.message_id,
+            title: p.title,
+            created_at_ms: p.created_at_ms,
+            recovery: p.recovery,
+            provider_strategy: p.provider_strategy,
+            files_available: p.files_available,
+            files_changed: p.files_changed,
+            restorable: p.restorable,
+            blocked_reason: p.blocked_reason,
+        }
+    }
+}
+
 // ── config / credentials ──────────────────────────────────────────────────
 
 /// Static per-install configuration.
@@ -464,6 +494,63 @@ pub struct ProjectRef {
 }
 
 /// One session row, as every list renders it.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DelegatedTaskView {
+    pub id: String,
+    pub parent_chat_id: String,
+    pub status: String,
+    pub status_label: String,
+    pub terminal: bool,
+    pub stopping: bool,
+    pub cancel_requested: bool,
+    pub role_label: Option<String>,
+    pub isolation_label: String,
+    pub isolation: String,
+    pub summary: Option<String>,
+    pub summary_truncated: bool,
+    pub delivered: bool,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+impl From<&zc::DelegatedTaskView> for DelegatedTaskView {
+    fn from(r: &zc::DelegatedTaskView) -> Self {
+        Self {
+            id: r.id.clone(),
+            parent_chat_id: r.parent_chat_id.clone(),
+            status: r.status.clone(),
+            status_label: r.status_label.clone(),
+            terminal: r.terminal.clone(),
+            stopping: r.stopping.clone(),
+            cancel_requested: r.cancel_requested.clone(),
+            role_label: r.role_label.clone(),
+            isolation_label: r.isolation_label.clone(),
+            isolation: r.isolation.clone(),
+            summary: r.summary.clone(),
+            summary_truncated: r.summary_truncated,
+            delivered: r.delivered.clone(),
+            created_at_ms: r.created_at_ms.clone(),
+            updated_at_ms: r.updated_at_ms.clone(),
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ForkLineageView {
+    pub source_chat_id: String,
+    pub source_message_id: String,
+    pub created_at_ms: i64,
+    pub strategy: String,
+}
+impl From<&zc::ForkLineageView> for ForkLineageView {
+    fn from(r: &zc::ForkLineageView) -> Self {
+        Self {
+            source_chat_id: r.source_chat_id.clone(),
+            source_message_id: r.source_message_id.clone(),
+            created_at_ms: r.created_at_ms,
+            strategy: r.strategy.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct SessionRow {
     pub id: String,
@@ -509,6 +596,8 @@ pub struct SessionRow {
     /// Oldest unadopted send from this device (open sessions only).
     pub send_state: Option<SendState>,
     pub parent_chat_id: Option<String>,
+    pub task: Option<DelegatedTaskView>,
+    pub fork: Option<ForkLineageView>,
     /// 2 = chat2; 1 = legacy (not dialable).
     pub room_gen: u32,
 }
@@ -552,6 +641,8 @@ impl From<&zc::SessionRow> for SessionRow {
             pull_request: r.pull_request.as_ref().map(PullRequest::from),
             send_state: r.send_state.map(Into::into),
             parent_chat_id: r.parent_chat_id.clone(),
+            task: r.task.as_ref().map(Into::into),
+            fork: r.fork.as_ref().map(Into::into),
             room_gen: r.room_gen,
         }
     }

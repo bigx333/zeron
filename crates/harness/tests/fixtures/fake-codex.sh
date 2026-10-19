@@ -26,6 +26,10 @@ has "$line" '"method":"initialized"' || exit 1
 
 # ---- thread start / resume -------------------------------------------------
 read -r line || exit 1
+if has "$line" '"method":"skills/extraRoots/set"'; then
+  emit "{\"id\":$(rid "$line"),\"result\":{}}"
+  read -r line || exit 1
+fi
 if has "$line" '"method":"getAuthStatus"'; then
   # Dictation credential probe: a ChatGPT login whose JWT carries the
   # account claim; a forced refresh reports a different account.
@@ -588,6 +592,11 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"threadId":"th-resumed","turn":{"id":"t-2","status":"completed"}}}'
   ;;
 
+*scenario:resumed-full*)
+  has "$turnline" 'full-history: PINEAPPLE' || { fail_turn "$tid" "fresh fallback lost full history"; exit 0; }
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
 *scenario:resumed*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'

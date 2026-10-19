@@ -1024,6 +1024,7 @@ impl WorkspaceHost {
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
+                orchestration: None,
             })
         })?;
         if let Some(notifier) = self.inner.notifier.get().filter(|n| n.enabled())
@@ -1225,6 +1226,14 @@ impl WorkspaceHost {
     /// LWW full-config replace on the chat row (zeron `SetChatConfig` — the
     /// composer's mid-session model/reasoning/options changes). Returns false
     /// when the chat doesn't exist.
+    pub fn set_chat_orchestration(
+        &self,
+        chat_id: &str,
+        state: &zeron_proto::ChatOrchestration,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_orchestration(chat_id, state))?)
+    }
+
     pub fn set_chat_config(&self, chat_id: &str, config: &ChatConfig) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_config(chat_id, config))?)
     }
@@ -1268,6 +1277,10 @@ impl WorkspaceHost {
     // ── persistence / teardown ──────────────────────────────────────────────
 
     /// Persist the snapshot now (shutdown path; bypasses the debounce).
+    pub(crate) fn persist_now(&self) -> Result<(), EngineError> {
+        self.inner.persist_snapshot().map(|_| ())
+    }
+
     pub fn flush(&self) {
         self.inner.save_snapshot();
     }

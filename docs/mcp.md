@@ -46,9 +46,10 @@ The creation result includes the effective `kind`, `chatId`, `deviceId`,
 `project` and `parentChatId`. Kind is derived from the parent; it is not persisted.
 
 Children record `Chat.parent_chat_id` (proto) ⇄ `parentChatId` on the registry
-row (`Mutate createChat { parentChatId? }`). Chats with a parent cannot create
-chats through MCP, including standalone and batch creation or an explicit parent
-override. A side chat cannot be selected as a parent; only one level is supported.
+row (`Mutate createChat { parentChatId? }`). Chats with a parent cannot use ordinary `create_chat` or `create_chats`,
+including standalone and batch creation or an explicit parent override. Managed
+`delegate_task` supports nested work up to four levels, with completion barriers
+and parent result delivery. A side chat cannot be selected as a parent; only one level is supported.
 
 For children, `parent` (id, prefix, or title) overrides the origin (`ZERON_CHAT_ID`).
 `list_chats { parent }` returns children, and chat summaries carry `parentChatId`.
@@ -229,6 +230,50 @@ read back like a scene's image. Nothing foreign is hosted, so a visual scrolls, 
 the glass composer, and takes input like any other row, identically on Linux,
 macOS, and Windows, and it follows theme, appearance, and text-size changes
 without rerunning the script.
+
+## Managed orchestration
+
+See [orchestration v2 parity and lifecycle](orchestration-v2.md) for the source audit,
+behavioral guarantees, capability boundaries, context policy and validation.
+
+| Tool | Purpose |
+| --- | --- |
+| `orchestrator_capabilities` | Live provider/models, inherited config and explicit feature flags. |
+| `delegate_task` | Managed child task with role, inherited settings, optional worktree isolation and async completion delivery. |
+| `task_status` / `list_tasks` | Read your stable task results and pending-question states. |
+| `task_cancel` | Stop managed work and descendants, preserving documents and checkouts. |
+| `fork_chat` | Fork from a completed response, optionally into another provider. |
+| `merge_chat` | Send a finished fork's result to its parent or another chat on the same host. |
+| `chat_transfers` | Inspect bounded context artifacts and their provenance. |
+| `chat_checkpoints` | List checkpoints and the host's restore availability. |
+| `create_chat_checkpoint` | Save an idle chat's conversation and tracked/nonignored working files. |
+| `rollback_chat` | Restore an idle chat's checkpoint, returning a recovery checkpoint for Undo. |
+
+`delegate_task` requires an injected chat origin. Its `target` accepts `harness`,
+`model`, `reasoning`, `modelOptions` and `sandbox`; omitted values inherit, while a
+provider change uses the new provider's defaults. A child cannot request broader
+permissions. `isolation: "worktree"` creates a fresh checkout from the parent's
+actual committed HEAD; dirty files stay in the parent checkout.
+
+Prefer `mode: "async"`: a child's terminal result automatically wakes or steers
+the parent, so end the turn instead of polling. `mode: "wait"` returns on completion,
+a blocking question, or `timeout_secs`. Timeouts never cancel work. For a question,
+use `childChatId` with the existing input inspection and response tools. Reuse a
+`client_request_id` on retry; a different task under the same key is rejected.
+
+A task's published result is immutable. Later child messages are ordinary chat
+turns; each new delegated review round should use a new task and request key.
+`merge_chat` transfers conversation context; it does not change Git branches.
+
+History tools default to the injected originating chat. Creation and restore
+accept `chat` to target an idle child while a controller's own turn is active.
+`rollback_chat` takes `checkpoint_id` and optional `client_request_id`; reuse the
+request id after a timeout. The reply's `recoveryCheckpointId` can be restored
+with a new request id to undo the change. Working-file restore preserves ignored
+files, Git index and HEAD. Busy chats, queued messages, shared-checkout writers,
+and unknown checkout identities are refused. Native Codex forks/restores use an
+exact completed provider turn and preserve the source session. Providers without
+native controls use the saved visible conversation in a fresh session.
 
 ## Selecting a host and project
 

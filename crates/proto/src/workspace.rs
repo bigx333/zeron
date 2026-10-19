@@ -22,7 +22,12 @@ pub mod capabilities {
     /// their placed key; older hosts reject the action outright.
     pub const SIDEBAR_SECTION_ORDER_V1: &str = "sidebar-section-order-v1";
 
+    pub const ORCHESTRATION_V2: &str = "orchestration-v2";
+    pub const ORCHESTRATION_HISTORY_V2: &str = "orchestration-history-v2";
+
     pub const CURRENT: &[&str] = &[
+        ORCHESTRATION_V2,
+        ORCHESTRATION_HISTORY_V2,
         COMPOSER_REFERENCES_V1,
         MESSAGE_QUEUE_V1,
         MESSAGE_QUEUE_ACTIONS_V1,
@@ -107,6 +112,8 @@ mod tests {
                 "workspaceScope": "local",
                 "cursorSdkVersion": "1.0.31",
                 "capabilities": [
+                    "orchestration-v2",
+                    "orchestration-history-v2",
                     "composer-references-v1",
                     "message-queue-v1",
                     "message-queue-actions-v1",

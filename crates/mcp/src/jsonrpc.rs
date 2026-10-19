@@ -30,7 +30,7 @@ Chats are referenced by full id, a unique id prefix, or an exact title. Use \
 `whoami` to learn which chat you are speaking from; messages you send are \
 attributed to it and a chat cannot message itself. For request/response \
 with a single chat, `send_message` with `wait: true` returns its reply. \
-For parallel delegation, use `create_chats` with a prompt for each chat or \
+For parallel messaging between ordinary conversations, use `create_chats` with a prompt for each chat or \
 `send_messages` for existing chats. These batch tools launch requests concurrently \
 even if your harness executes tool calls sequentially. Alternatively, launch ALL \
 chats/messages with `wait: false` first, then use `wait_for_turn` to collect replies. \
@@ -38,7 +38,8 @@ Do not wait for one worker before launching the next independent worker. \
 Use `kind: chat` in `create_chat` or each `create_chats` request for a standalone \
 session visible in Sessions; it cannot have a parent. Use `kind: side` for a child \
 with an explicit parent or your origin chat. Omitted kind keeps legacy defaults: \
-side with an origin/parent, standalone otherwise. Side chats cannot create chats. \
+side with an origin/parent, standalone otherwise. Side chats cannot use create_chat(s); \
+managed delegate_task supports up to four levels. \
 Discover hosts with `list_devices`, then `list_projects {device}`, \
 `list_harnesses {device}` and `list_models {device, harness}`. A project fixes \
 its host; with both project and device it must belong to that device. Use listed \
@@ -163,7 +164,7 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                         "name": "zeron",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": INSTRUCTIONS,
+                    "instructions": format!("{INSTRUCTIONS}\n\n{}", zeron_proto::ORCHESTRATION_INSTRUCTIONS),
                 }),
             )
         }

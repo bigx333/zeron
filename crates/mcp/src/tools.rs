@@ -6,6 +6,8 @@
 //! deliver a message to a chat in this state" choice the composer makes
 //! for humans.
 
+mod orchestration;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -221,6 +223,7 @@ fn catalog() -> Vec<ToolDef> {
             })),
         },
     ];
+    tools.extend(orchestration::catalog());
     for (name, single, description) in [
         (
             "create_chats",
@@ -682,6 +685,8 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         "reasoning": chat.config.as_ref().and_then(|c| c.reasoning),
         "archived": chat.archived,
         "parentChatId": chat.parent_chat_id,
+        "task": orchestration::task_result(chat),
+        "fork": chat.orchestration.as_ref().and_then(|o| o.fork.as_ref()),
         "status": status,
         "statusAgeSecs": status_age,
         "lastMessageAt": chat.last_message_at,
@@ -749,6 +754,17 @@ impl Tools {
             "send_messages" => self.batch(parse(args)?, false).await,
             "read_chat" => self.read_chat(parse(args)?).await,
             "send_message" => self.send_message(parse(args)?).await,
+            "orchestrator_capabilities"
+            | "delegate_task"
+            | "task_status"
+            | "task_cancel"
+            | "list_tasks"
+            | "fork_chat"
+            | "merge_chat"
+            | "chat_transfers" => self.orchestration_call(name, args).await,
+            "chat_checkpoints" | "create_chat_checkpoint" | "rollback_chat" => {
+                self.orchestration_call(name, args).await
+            }
             "wait_for_turn" => self.wait_for_turn(parse(args)?).await,
             "wait_for_any" => self.wait_for_any(parse(args)?).await,
             "list_pending_inputs" => self.list_pending_inputs(parse(args)?).await,
@@ -1129,6 +1145,7 @@ impl Tools {
                 harness_session_id: None,
                 harness_session_cwd: None,
                 parent_chat_id: parent_chat_id.clone(),
+                orchestration: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 room_gen: None,
