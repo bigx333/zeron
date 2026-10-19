@@ -277,14 +277,15 @@ fn t3_lanes_preserve_pins_sections_and_default_order() {
     assert!(client.snooze_session("missing", 60).is_err());
     assert!(client.wake_session("missing").is_err());
 
-    // Attention outranks recency, stably within both sections and Inbox.
+    // Section assignments append in placed order. T3 stably prioritizes
+    // attention within that order, and within the recency-sorted Inbox.
     client
         .assign_section("chat-cjk", Some("section-p0".into()))
         .unwrap();
     let ws = client.workspace();
     assert_eq!(
         ids(&ws.front.sections[0].sessions),
-        ["chat-cjk", "chat-tabs", "chat-errored"]
+        ["chat-tabs", "chat-errored", "chat-cjk"]
     );
     assert_eq!(
         ids(&ws.t3_front.sections[0].sessions),
@@ -298,6 +299,7 @@ fn t3_lanes_preserve_pins_sections_and_default_order() {
     assert_eq!(
         ids(&ws.t3_front.recent),
         [
+            "6a1e0c2d-5b7f-4c1e-9d0a-3f2b1c4d5e60",
             "chat-tabs",
             "chat-errored",
             "chat-visuals",
