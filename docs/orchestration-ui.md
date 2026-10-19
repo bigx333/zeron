@@ -336,7 +336,7 @@ Shared by the native apps:
 ## Transcript activity, chat pills and the sidebar tree
 
 PR #608's presentation, carried onto the task engine: who is speaking in a parent's
-transcript is never ambiguous, every chat the transcript names is one tap away, and a
+transcript is explicit, named chats in agent prose and reports are one tap away, and a
 parent's work is visible from the sidebar without children taking top-level rows. Captures:
 `docs/screenshots/orchestration-activity/`.
 
@@ -452,7 +452,7 @@ nothing.
 - iOS has no unit-test target for `TaskMark`/`TaskLane`. The rules mirror the desktop's
   tested `tasks.rs`.
 
-## Validation
+## Initial migration validation
 
 **Desktop**
 - `cargo check -p zeron-ui --tests` compiles.
@@ -488,8 +488,8 @@ Full Xcode isn't installed (CommandLineTools only, no iOS SDK). Instead:
   `swiftc -typecheck -target arm64-apple-ios26.0-macabi -sdk $(xcrun --show-sdk-path) -Fsystem $SDK/System/iOSSupport/System/Library/Frameworks -I <zeron_coreFFI modulemap> -swift-version 5`.
 - That check has zero errors or warnings in the edited files. The only errors come from
   excluded voice files that need WebRTC or ActivityKit.
-- The checked-in `zeron_core.swift` matches regenerated declarations and checksums
-  (`diff -w` is clean); trailing whitespace was normalized on changed lines.
+- The checked-in `zeron_core.swift` matches the generator byte for byte; generated
+  whitespace is preserved.
 - History was re-checked the same way against the regenerated bindings
   (`RunCheckpointView`, `chatCheckpoints`, `createChatCheckpoint`, `rollbackChat`). There
   are zero diagnostics in `TaskLanesController.swift`, `CheckpointHistory.swift`,
