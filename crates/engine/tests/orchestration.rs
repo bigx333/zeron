@@ -175,11 +175,22 @@ async fn delegation_inherits_and_retries_launch_once_then_delivers_result_once()
     parent(&core, "parent");
     parent(&core, "other");
     let client = zeron_rpc::memory_client(core.rpc_service());
+    // Retry keys are opaque bytes. Display sanitizers must not trim a valid
+    // key and then derive a different child from the engine's receipt.
+    let request_key = " round-1 ";
     let (first, retry) = tokio::join!(
-        delegate(&client, "hold task: review this change", "round-1"),
-        delegate(&client, "hold task: review this change", "round-1")
+        delegate(&client, "hold task: review this change", request_key),
+        delegate(&client, "hold task: review this change", request_key)
     );
     assert_eq!(first.id, retry.id);
+    assert_eq!(
+        first.id,
+        zeron_proto::chat_refs::managed_task_id("parent", request_key)
+    );
+    assert_ne!(
+        first.id,
+        zeron_proto::chat_refs::managed_task_id("parent", request_key.trim())
+    );
     assert_eq!(first.parent_chat_id.as_deref(), Some("parent"));
     assert_eq!(
         first.config.as_ref().unwrap().sandbox,
@@ -201,7 +212,7 @@ async fn delegation_inherits_and_retries_launch_once_then_delivers_result_once()
             .await
             .is_err()
     );
-    assert!(client.call(methods::DELEGATE_TASK,json!({"parentChatId":"parent","task":"a changed brief","target":{},"clientRequestId":"round-1"})).await.is_err());
+    assert!(client.call(methods::DELEGATE_TASK,json!({"parentChatId":"parent","task":"a changed brief","target":{},"clientRequestId":request_key})).await.is_err());
     assert!(client.call(methods::DELEGATE_TASK,json!({"parentChatId":"parent","task":"escalation","target":{"sandbox":"danger-full-access"}})).await.is_err());
     release.add_permits(1);
     let finished = wait_task(&client, &first.id, |t| {
@@ -231,7 +242,7 @@ async fn delegation_inherits_and_retries_launch_once_then_delivers_result_once()
             .count(),
         1
     );
-    let retry = delegate(&client, "hold task: review this change", "round-1").await;
+    let retry = delegate(&client, "hold task: review this change", request_key).await;
     assert_eq!(retry.id, first.id);
     // A later child turn cannot replace the published task result.
     core.workspace
