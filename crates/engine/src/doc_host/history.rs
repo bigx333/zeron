@@ -336,16 +336,18 @@ impl DocHost {
                     continue;
                 }
                 let active = sessions.session_status(&other.id).is_some_and(|s| {
-                    matches!(
-                        s.status,
-                        zeron_proto::SessionStatus::Working
-                            | zeron_proto::SessionStatus::AwaitingInput
-                    )
-                }) || other
-                    .orchestration
-                    .as_ref()
-                    .and_then(|o| o.task.as_ref())
-                    .is_some_and(|t| !t.status.is_terminal() && !t.cancel_requested);
+                    s.running_subagents > 0
+                        || matches!(
+                            s.status,
+                            zeron_proto::SessionStatus::Working
+                                | zeron_proto::SessionStatus::AwaitingInput
+                        )
+                }) || sessions.holds_background_work(&other.id)
+                    || other
+                        .orchestration
+                        .as_ref()
+                        .and_then(|o| o.task.as_ref())
+                        .is_some_and(|t| !t.status.is_terminal() && !t.cancel_requested);
                 if active
                     && let Some(cwd) = other.cwd
                     && repos

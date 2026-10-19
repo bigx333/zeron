@@ -29,6 +29,54 @@ struct Driver {
     id: HarnessId,
     observed: Observed,
 }
+
+struct BackgroundDriver(Observed);
+#[async_trait]
+impl Harness for BackgroundDriver {
+    fn id(&self) -> HarnessId {
+        HarnessId::Codex
+    }
+    fn display_name(&self) -> &str {
+        "Parked background fixture"
+    }
+    fn supports_steering(&self) -> bool {
+        true
+    }
+    fn steering_mode(&self) -> zeron_proto::SteeringMode {
+        zeron_proto::SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        controls.turn.set_background(1);
+        let interrupt = controls.interrupt.clone();
+        let initial = Driver {
+            id: HarnessId::Codex,
+            observed: self.0.clone(),
+        }
+        .run(request, controls)
+        .await?;
+        Ok(initial
+            .chain(stream::once(async move {
+                interrupt.cancelled().await;
+                Ok(AgentEvent::Done {
+                    status: DoneStatus::Interrupted,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                })
+            }))
+            .boxed())
+    }
+}
 #[async_trait]
 impl Harness for Driver {
     fn id(&self) -> HarnessId {
@@ -656,6 +704,59 @@ async fn restore_is_blocked_while_another_chat_owns_the_shared_checkout() {
     assert_eq!(o.forks.lock().unwrap().len(), 0);
     core.sessions.terminate("other").await.unwrap();
     assert!(checkpoints(&rpc, "chat").await[0].restorable);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn restore_is_blocked_by_a_parked_background_writer_in_an_idle_chat() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("repo");
+    repo(&root).await;
+    let o = Observed::default();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Driver {
+        id: HarnessId::Mock,
+        observed: o.clone(),
+    }));
+    registry.register(Arc::new(BackgroundDriver(o)));
+    let core = EngineCore::assemble(
+        &temp.path().join("state"),
+        Arc::new(registry),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    chat(&core, "chat", &root, HarnessId::Mock);
+    chat(&core, "other", &root, HarnessId::Codex);
+    run(&core, "chat", "first", HarnessId::Mock, &root).await;
+    let rpc = zeron_rpc::memory_client(core.rpc_service());
+    let point = checkpoints(&rpc, "chat").await.remove(0);
+    run(&core, "other", "background", HarnessId::Codex, &root).await;
+    assert!(core.sessions.holds_background_work("other"));
+    let view = checkpoints(&rpc, "chat").await;
+    assert!(!view[0].restorable);
+    assert!(
+        view[0]
+            .blocked_reason
+            .as_ref()
+            .unwrap()
+            .contains("checkout")
+    );
+    let error = rpc
+        .call(
+            methods::ROLLBACK_CHAT,
+            json!({"chatId":"chat","checkpointId":point.id,"clientRequestId":"background"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("checkout"));
+    assert_eq!(
+        std::fs::read_to_string(root.join("file.txt")).unwrap(),
+        "base\n"
+    );
+    core.sessions.interrupt("other").await.unwrap();
+    assert!(checkpoints(&rpc, "chat").await[0].restorable);
+    restore(&rpc, "chat", &point.id, "background").await;
     core.shutdown().await;
 }
 

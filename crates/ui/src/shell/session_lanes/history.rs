@@ -177,6 +177,19 @@ pub(super) fn availability(tasks: &[(String, zeron_proto::DelegatedTask)]) -> St
     parts.join(",")
 }
 
+/// Whether the chat moved on after a restore, so its Undo would now mean
+/// something else: a turn's checkpoint newer than the recovery point that
+/// restore kept. Both times are the host's, so a viewer's clock skew can't
+/// retire Undo early or keep it forever; until the recovery point is listed,
+/// Undo stays.
+pub(super) fn receipt_retired(list: &[Checkpoint], recovery: &str) -> bool {
+    let Some(kept) = list.iter().find(|c| c.id == recovery) else {
+        return false;
+    };
+    list.iter()
+        .any(|c| !c.recovery && c.created_at > kept.created_at)
+}
+
 fn ago(ms: i64, now: DateTime<Utc>) -> String {
     match zeron_proto::view::format_time_ago(millis(ms), now).as_str() {
         "now" => "just now".into(),
@@ -202,8 +215,6 @@ struct Receipt {
     title: SharedString,
     recovery: String,
     undone: bool,
-    /// When the restore landed (ms); a turn finished after it retires Undo.
-    at: i64,
 }
 
 /// History's view state, inside [`LaneState`] so it follows the open chat.
@@ -295,10 +306,11 @@ impl Shell {
                     Ok(list) => {
                         // The chat moved on after the restore: Undo would
                         // now mean something else, so the receipt retires.
-                        if history.receipt.as_ref().is_some_and(|receipt| {
-                            list.iter()
-                                .any(|c| !c.recovery && c.created_at > receipt.at)
-                        }) {
+                        if history
+                            .receipt
+                            .as_ref()
+                            .is_some_and(|receipt| receipt_retired(&list, &receipt.recovery))
+                        {
                             history.receipt = None;
                         }
                         if !history.first_listed {
@@ -1053,14 +1065,12 @@ impl Shell {
                             (true, Some(previous)) => Receipt {
                                 undone: true,
                                 recovery: receipt.recovery_checkpoint_id,
-                                at: Utc::now().timestamp_millis(),
                                 ..previous
                             },
                             _ => Receipt {
                                 title,
                                 recovery: receipt.recovery_checkpoint_id,
                                 undone: false,
-                                at: Utc::now().timestamp_millis(),
                             },
                         });
                         this.reload_history(cx);
@@ -1158,7 +1168,6 @@ impl Shell {
             title: title.to_owned().into(),
             recovery: recovery.to_owned(),
             undone: false,
-            at: Utc::now().timestamp_millis(),
         });
         history.recovery_open = recovery_open;
         self.show_session_info(cx);
@@ -1274,6 +1283,30 @@ mod tests {
         later[1].1.status = zeron_proto::TaskStatus::Cancelled;
         later[1].1.cancel_requested = true;
         assert_ne!(availability(&later), key);
+    }
+
+    #[test]
+    fn undo_retires_on_the_hosts_clock_not_the_viewers() {
+        let point = |id: &str, at: i64, recovery: bool| {
+            checkpoint(serde_json::json!({
+                "id": id, "title": id, "createdAtMs": at, "recovery": recovery,
+            }))
+        };
+        // The host's clock runs far behind the viewer's: nothing here is
+        // newer than "now" on the viewer, yet the turn after the restore is.
+        let list = vec![point("old", 100, false), point("kept", 200, true)];
+        assert!(!receipt_retired(&list, "kept"), "no turn since the restore");
+        let moved_on = vec![
+            point("next", 300, false),
+            point("old", 100, false),
+            point("kept", 200, true),
+        ];
+        assert!(receipt_retired(&moved_on, "kept"));
+        // Until the recovery point is listed, Undo stays.
+        assert!(!receipt_retired(&moved_on, "not-listed-yet"));
+        // Other recovery points never retire it.
+        let restores = vec![point("again", 400, true), point("kept", 200, true)];
+        assert!(!receipt_retired(&restores, "kept"));
     }
 
     #[test]

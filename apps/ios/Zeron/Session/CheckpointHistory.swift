@@ -127,8 +127,6 @@ final class HistorySection {
         var title: String
         var recovery: String
         var undone = false
-        /// When the restore landed; a turn finished after it retires Undo.
-        var at = Int64(Date().timeIntervalSince1970 * 1000)
     }
 
     private let app: AppModel
@@ -226,7 +224,7 @@ final class HistorySection {
                 self.load = .ready(list)
                 // The chat moved on after the restore: Undo would now mean
                 // something else, so the receipt retires.
-                if let receipt = self.receipt, list.contains(where: { !$0.recovery && $0.createdAtMs > receipt.at }) {
+                if let receipt = self.receipt, Self.retired(list, recovery: receipt.recovery) {
                     self.receipt = nil
                 }
             } catch CoreError.Unsupported, CoreError.NotImplemented {
@@ -237,6 +235,15 @@ final class HistorySection {
             self.reading = false
             self.onChange()
         }
+    }
+
+    /// A turn's checkpoint newer than the recovery point the restore kept.
+    /// Both times are the host's, so this phone's clock skew can't retire
+    /// Undo early or keep it forever; until the recovery point is listed,
+    /// Undo stays.
+    static func retired(_ list: [RunCheckpointView], recovery: String) -> Bool {
+        guard let kept = list.first(where: { $0.id == recovery }) else { return false }
+        return list.contains { !$0.recovery && $0.createdAtMs > kept.createdAtMs }
     }
 
     private func reread() {

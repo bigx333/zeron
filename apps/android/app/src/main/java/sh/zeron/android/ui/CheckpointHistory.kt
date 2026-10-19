@@ -111,8 +111,17 @@ private sealed interface HistoryLoad {
     data object Unsupported : HistoryLoad
 }
 
-/** `at`: when the restore landed; a turn finished after it retires Undo. */
-private data class Receipt(val title: String, val recovery: String, val undone: Boolean = false, val at: Long = System.currentTimeMillis())
+private data class Receipt(val title: String, val recovery: String, val undone: Boolean = false)
+
+/**
+ * A turn's checkpoint newer than the recovery point the restore kept. Both
+ * times are the host's, so this phone's clock skew can't retire Undo early or
+ * keep it forever; until the recovery point is listed, Undo stays.
+ */
+internal fun receiptRetired(points: List<RunCheckpointView>, recovery: String): Boolean {
+    val kept = points.firstOrNull { it.id == recovery } ?: return false
+    return points.any { !it.recovery && it.createdAtMs > kept.createdAtMs }
+}
 
 /**
  * The History section. Reads again after each finished turn (a new checkpoint
@@ -148,7 +157,7 @@ fun CheckpointHistory(core: CoreClient, chat: SessionRow, workspaceRevision: ULo
         load = try {
             val points = core.chatCheckpoints(chatId = chat.id)
             // The chat moved on after the restore: Undo would now mean something else.
-            receipt?.let { shown -> if (points.any { !it.recovery && it.createdAtMs > shown.at }) receipt = null }
+            receipt?.let { shown -> if (receiptRetired(points, shown.recovery)) receipt = null }
             HistoryLoad.Ready(points)
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -169,7 +178,7 @@ fun CheckpointHistory(core: CoreClient, chat: SessionRow, workspaceRevision: ULo
             try {
                 val recovery = core.rollbackChat(chatId = chat.id, checkpointId = id, clientRequestId = request)
                 requests.remove(id)
-                receipt = if (undo) receipt?.copy(recovery = recovery, undone = true, at = System.currentTimeMillis()) else Receipt(title, recovery)
+                receipt = if (undo) receipt?.copy(recovery = recovery, undone = true) else Receipt(title, recovery)
                 reload++
             } catch (cancelled: CancellationException) {
                 throw cancelled

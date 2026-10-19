@@ -186,17 +186,18 @@ performed. Android device/runtime validation is also still outstanding.
 selected turn, provider reactivation with only missing context after restart,
 checkpoint restore and Undo across restart, idempotent retry, unchanged Git index
 and HEAD, ignored-file preservation, ignored obstructions and active writers in
-a shared checkout. `crates/harness/tests/history.rs` exercises the real Codex
+a shared checkout, including parked background work in an idle chat.
+`crates/harness/tests/history.rs` exercises the real Codex
 JSON-RPC adapter against a control-only fixture, including a paginated native
 fork and rejection of a missing source boundary without starting a process.
 
-The reviewed migration passes 11 history integration tests, all 12
+The reviewed migration passes 12 history integration tests, all 12
 orchestration and 7 side-chat regressions, 15 session unit tests, 39 Codex adapter
 tests (4 ignored), and 3 native-history adapter tests. Document (153), protocol
 (85), client (26) and MCP (42) unit suites also pass. History checks include first-turn
 baseline recovery, interrupted retry recovery with intervening edits, executable
 modes, symlinks, file/directory transitions, frozen task results and merge receipt
-revisions. Desktop lane coverage is now 15 tests; the four new History captures
+revisions. Desktop lane coverage is now 16 tests; the four new History captures
 were visually reviewed in dark and light. `cargo check --workspace` passes.
 
 The latest broader engine run from a clean review checkout reports 590 passed,
@@ -222,3 +223,7 @@ Other chats sharing the checkout are always checked by the engine at restore;
 their status alone does not refresh an open History list. Closing a mobile sheet
 during a restore can lose its immediate Undo receipt, while the durable recovery
 point remains available in History.
+
+Undo expiry compares checkpoint timestamps from the host only. It waits until the
+returned recovery point is present, then retires Undo after a newer non-recovery
+checkpoint; clock skew on a viewer cannot prematurely hide the receipt.
