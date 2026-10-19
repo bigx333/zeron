@@ -3303,7 +3303,13 @@ fn spawn_transcript_watch(
         // deselected or deleted, so retrying can't outlive relevance.
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
         'resubscribe: loop {
-            let params = serde_json::json!({ "chatId": chat_id, "openingTail": true });
+            // `activityV1`: this build reads typed orchestration activity; a
+            // host downgrades it to text for clients that don't ask.
+            let params = serde_json::json!({
+                "chatId": chat_id,
+                "openingTail": true,
+                "activityV1": true,
+            });
             let mut rx = match handle
                 .client()
                 .subscribe_checked(methods::WATCH_DOC_MESSAGES, params)
@@ -3453,7 +3459,7 @@ fn spawn_subagent_watch(
     cx.spawn(async move |this, cx| {
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
         'resubscribe: loop {
-            let params = serde_json::json!({ "chatId": doc_id });
+            let params = serde_json::json!({ "chatId": doc_id, "activityV1": true });
             let mut rx = match handle
                 .client()
                 .subscribe_checked(methods::WATCH_DOC_MESSAGES, params)

@@ -645,6 +645,94 @@ fn cjk(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     ]
 }
 
+/// A parent that delegated work: the spawn group, `@chat:` pills in its
+/// reply, a task's result and an open question, reported as activity.
+fn orchestration(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    use super::fixtures::{ORCH_AUDIT, ORCH_DESIGN, ORCH_REVIEW};
+    let delegate = |id: &str, title: &str| {
+        tool(
+            id,
+            ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: "delegate_task".into(),
+                input: Some(serde_json::json!({ "title": title })),
+            },
+            false,
+            None,
+        )
+    };
+    let report = |id: &str, at: i64, kind, source: &str, title: &str, status, body: &str| {
+        entry(
+            id,
+            MessageRole::System,
+            host,
+            at,
+            vec![MessagePart::Activity(zeron_doc::ChatActivity {
+                id: "activity".into(),
+                activity: kind,
+                source_chat_id: source.into(),
+                source_title: title.into(),
+                task_status: Some(status),
+                request_id: None,
+                body: body.into(),
+                truncated: false,
+            })],
+        )
+    };
+    vec![
+        user(
+            "m1",
+            now - 2 * 3_600_000,
+            "Port PR #608's orchestration presentation onto the task engine. Keep me posted as the tasks land.",
+        ),
+        assistant(
+            "m2",
+            host,
+            now - 2 * 3_600_000 + 60_000,
+            vec![
+                text("t0", "Splitting this three ways so the transcript and mobile work land in parallel."),
+                delegate("d1", "Audit the handoff budget"),
+                delegate("d2", "Review the merge receipts"),
+                delegate("d3", "Design the mobile report rows"),
+                text(
+                    "t1",
+                    &format!(
+                        "Started @chat:{ORCH_AUDIT} for the budget audit, @chat:{}… for the receipts review and @chat:{ORCH_DESIGN} for the report rows.",
+                        &ORCH_REVIEW[..8]
+                    ),
+                ),
+            ],
+        ),
+        report(
+            "x1",
+            now - 30 * 60_000,
+            zeron_doc::ActivityKind::TaskResult,
+            ORCH_AUDIT,
+            "Audit the handoff budget",
+            zeron_proto::TaskStatus::Completed,
+            "The handoff budget holds: **24,000 characters** on Unicode boundaries, with `truncated` set when a result is cut.
+
+- Registry previews stay under 4 KiB.
+- Full results come from the child document on demand.",
+        ),
+        assistant(
+            "m3",
+            host,
+            now - 29 * 60_000,
+            vec![text("t0", "The audit holds. Waiting on the review's question before the merge RPC lands.")],
+        ),
+        report(
+            "x2",
+            now - 12 * 60_000,
+            zeron_doc::ActivityKind::TaskInput,
+            ORCH_REVIEW,
+            "Review the merge receipts",
+            zeron_proto::TaskStatus::Waiting,
+            "Should a merge receipt also be written when the parent restored a checkpoint after the fork's last response?",
+        ),
+    ]
+}
+
 fn short(host: &str, now: i64, prompt: &str, reply: &str) -> Vec<SessionMessageEntry> {
     vec![
         user("m1", now - 120_000, prompt),
@@ -657,6 +745,25 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
     let now = last_activity;
     match chat_id {
         "chat-veil" => veil(host, crate::now_ms()),
+        super::fixtures::ORCH_PARENT => orchestration(host, now),
+        super::fixtures::ORCH_AUDIT => short(
+            host,
+            now,
+            "Audit the handoff budget for delegated results.",
+            "The budget holds: **24,000 characters** on Unicode boundaries, with `truncated` set when a result is cut.",
+        ),
+        super::fixtures::ORCH_REVIEW => short(
+            host,
+            now,
+            "Review the merge receipts against restores.",
+            "Should a merge receipt also be written when the parent restored a checkpoint after the fork's last response?",
+        ),
+        super::fixtures::ORCH_DESIGN => short(
+            host,
+            now,
+            "Design the mobile report rows.",
+            "Reports fold like tool groups: the pill opens the chat, the chevron unfolds the report.",
+        ),
         "chat-picker" => picker(host, now),
         "chat-tabs" => tabs(host, now),
         "chat-errored" => errored(host, now),

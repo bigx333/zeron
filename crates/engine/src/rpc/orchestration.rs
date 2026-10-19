@@ -22,6 +22,8 @@ struct TaskParams {
     parent_chat_id: String,
     task_id: String,
     reason: Option<String>,
+    #[serde(default)]
+    acknowledge_input: bool,
 }
 
 fn failed(error: crate::EngineError) -> RpcError {
@@ -100,12 +102,22 @@ impl EngineRpc {
             }
             methods::TASK_STATUS => {
                 let p: TaskParams = parse_params(params)?;
-                RpcReply::value(
-                    &self
-                        .doc_host
-                        .task_chat(&p.parent_chat_id, &p.task_id)
-                        .map_err(failed)?,
-                )
+                let chat = self
+                    .doc_host
+                    .task_chat(&p.parent_chat_id, &p.task_id)
+                    .map_err(failed)?;
+                if p.acknowledge_input
+                    && chat
+                        .orchestration
+                        .as_ref()
+                        .and_then(|o| o.task.as_ref())
+                        .is_some_and(|task| task.status == zeron_proto::TaskStatus::Waiting)
+                {
+                    self.doc_host
+                        .acknowledge_task_question(&p.parent_chat_id, &p.task_id)
+                        .map_err(failed)?;
+                }
+                RpcReply::value(&chat)
             }
             methods::TASK_CANCEL => {
                 let p: TaskParams = parse_params(params)?;
@@ -221,8 +233,12 @@ impl EngineRpc {
                         .ok()
                         .and_then(|h| h.doc().history_revision())
                         .unwrap_or_default();
-                        let base = format!("{}:{}:{}", source.id, result.id, target.id);
-                        if revision.is_empty() { base } else { format!("{base}:{revision}") }
+                    let base = format!("{}:{}:{}", source.id, result.id, target.id);
+                    if revision.is_empty() {
+                        base
+                    } else {
+                        format!("{base}:{revision}")
+                    }
                 });
                 let id = crate::doc_host::orchestration::stable_id(
                     &format!("merge:{}", source.id),

@@ -16,7 +16,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         ToolDef {
             name: "chat_checkpoints",
             description: "List this chat's durable conversation and checkout checkpoints, newest first, with host-authoritative restore availability. Recovery points preserve the state before each restore.",
-            input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
+            input_schema: json!({"type":"object","properties":{"chat":{"type":"string"}},"additionalProperties":false}),
         },
         ToolDef {
             name: "create_chat_checkpoint",
@@ -132,6 +132,49 @@ pub(super) fn task_result(chat: &Chat) -> Value {
 }
 
 impl Tools {
+    pub(crate) async fn cli_wait_chat(
+        &self,
+        key: &str,
+        timeout_secs: u64,
+    ) -> anyhow::Result<Value> {
+        let chat = self.zeron.resolve_chat(key).await?;
+        let owned = chat
+            .orchestration
+            .as_ref()
+            .and_then(|o| o.task.as_ref())
+            .is_some_and(|task| {
+                Some(task.parent_chat_id.as_str()) == self.zeron.origin().chat_id.as_deref()
+            });
+        if owned {
+            let parent = self.orchestration_parent().await?;
+            self.await_task(&parent, &chat.id, wait_duration(Some(timeout_secs)))
+                .await
+        } else {
+            self.wait_for_turn(WaitArgs {
+                chat: chat.id,
+                timeout_secs: Some(timeout_secs),
+            })
+            .await
+        }
+    }
+    pub(crate) async fn cli_frozen_result(&self, key: &str) -> anyhow::Result<Option<Value>> {
+        let chat = self.zeron.resolve_chat(key).await?;
+        let owned = chat
+            .orchestration
+            .as_ref()
+            .and_then(|o| o.task.as_ref())
+            .is_some_and(|task| {
+                Some(task.parent_chat_id.as_str()) == self.zeron.origin().chat_id.as_deref()
+            });
+        if owned {
+            Ok(Some(
+                self.orchestration_call("task_status", json!({"task_id":chat.id}))
+                    .await?,
+            ))
+        } else {
+            Ok(None)
+        }
+    }
     async fn complete_task_result(&self, chat: &Chat) -> Value {
         let mut result = task_result(chat);
         let Some(task) = chat.orchestration.as_ref().and_then(|o| o.task.as_ref()) else {
@@ -236,6 +279,9 @@ impl Tools {
                 let history = devices.iter().find(|d| d.id == device_id).is_some_and(|d| {
                     d.supports(zeron_proto::capabilities::ORCHESTRATION_HISTORY_V2)
                 });
+                let activity = devices.iter().find(|d| d.id == device_id).is_some_and(|d| {
+                    d.supports(zeron_proto::capabilities::ORCHESTRATION_ACTIVITY_V1)
+                });
                 let native = history
                     && harnesses
                         .iter()
@@ -252,7 +298,7 @@ impl Tools {
                 })).await;
                 Ok(
                     json!({"inherited":parent.as_ref().and_then(|c|c.config.as_ref()),"deviceId":device,"providers":providers,
-                    "features":{"managedTasks":supported && parent.is_some(),"asyncResultDelivery":supported,"taskCancellation":supported,"taskDepthLimit":4,"worktreeIsolation":supported,"batchCreation":true,"portableFork":supported,"providerHandoff":supported,"mergeBack":supported,"nativeFork":native,"rollback":history,"nativeCheckpointRestore":native,"providerSessionReactivation":history},
+                    "features":{"managedTasks":supported && parent.is_some(),"asyncResultDelivery":supported,"taskCancellation":supported,"taskDepthLimit":4,"taskChildLimit":activity.then_some(zeron_proto::MAX_ACTIVE_CHILD_TASKS),"taskNeedsInputDelivery":activity,"taskStopPausesUpdates":activity,"attributedActivity":activity,"worktreeIsolation":supported,"batchCreation":true,"portableFork":supported,"providerHandoff":supported,"mergeBack":supported,"nativeFork":native,"rollback":history,"nativeCheckpointRestore":native,"providerSessionReactivation":history},
                     "contextBudgetChars":48000}),
                 )
             }
@@ -292,7 +338,7 @@ impl Tools {
                 } else {
                     methods::TASK_STATUS
                 };
-                let chat:Chat=serde_json::from_value(self.zeron.call(method,json!({"parentChatId":parent.id,"taskId":a.task_id,"reason":a.reason,"targetDeviceId":parent.device_id})).await?)?;
+                let chat:Chat=serde_json::from_value(self.zeron.call(method,json!({"parentChatId":parent.id,"taskId":a.task_id,"reason":a.reason,"acknowledgeInput":true,"targetDeviceId":parent.device_id})).await?)?;
                 Ok(self.complete_task_result(&chat).await)
             }
             "list_tasks" => {
@@ -378,7 +424,7 @@ impl Tools {
             .await?;
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let chat:Chat=serde_json::from_value(self.zeron.call(methods::TASK_STATUS,json!({"parentChatId":parent.id,"taskId":id,"targetDeviceId":parent.device_id})).await?)?;
+            let chat:Chat=serde_json::from_value(self.zeron.call(methods::TASK_STATUS,json!({"parentChatId":parent.id,"taskId":id,"acknowledgeInput":true,"targetDeviceId":parent.device_id})).await?)?;
             let mut last = task_result(&chat);
             let task = chat
                 .orchestration

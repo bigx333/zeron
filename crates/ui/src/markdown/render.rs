@@ -103,6 +103,9 @@ pub struct RenderOptions {
     /// Whether and in which face formulas typeset; owners fill it from
     /// [`crate::settings::math_style`].
     pub math: super::math::MathStyle,
+    /// `@chat:` references draw as live chat pills when wired; `None` keeps
+    /// the written token (surfaces that don't know the user's chats).
+    pub chats: Option<super::chat_pills::ChatUi>,
 }
 
 #[derive(Clone)]
@@ -418,6 +421,7 @@ impl RenderOptions {
             workspace_root: None,
             code: None,
             math: super::math::MathStyle::default(),
+            chats: None,
         }
     }
 }
@@ -1186,6 +1190,8 @@ pub struct FlatText {
     /// Reserved slots for formulas — displayed-text coordinates. Each slot
     /// paints its formula; copy and selection read its `$tex$` source.
     pub math: Vec<super::math::MathSlot>,
+    /// `@chat:` references shown as pills — displayed-text coordinates.
+    pub chats: Vec<super::chat_pills::ChatPillSpan>,
 }
 
 /// Inline-code tint: a text-safe use of the selected accent identity.
@@ -1225,7 +1231,20 @@ fn flatten_runs_weighted(
     base_weight: FontWeight,
     math_style: super::math::MathStyle,
 ) -> FlatText {
+    flatten_runs_with(runs, theme, base_weight, math_style, None)
+}
+
+/// [`flatten_runs_weighted`], drawing `@chat:` references as pills when a
+/// surface resolves chats.
+pub(crate) fn flatten_runs_with(
+    runs: &[InlineRun],
+    theme: &Theme,
+    base_weight: FontWeight,
+    math_style: super::math::MathStyle,
+    chats: Option<&dyn Fn(&str) -> crate::chat_pill::ChatRef>,
+) -> FlatText {
     let mut text = String::new();
+    let mut pills: Vec<super::chat_pills::ChatPillSpan> = Vec::new();
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
     let mut code_ranges: Vec<Range<usize>> = Vec::new();
@@ -1233,9 +1252,11 @@ fn flatten_runs_weighted(
     // A run may stand for a longer source text than it shows (a file link
     // labeled by its file name, a formula's slot). The source is only kept
     // when some run does.
-    let relabeled = runs
-        .iter()
-        .any(|run| run.style.file_label.is_some() || run.style.math);
+    let relabeled = runs.iter().any(|run| {
+        run.style.file_label.is_some()
+            || run.style.math
+            || (run.style.chat.is_some() && chats.is_some())
+    });
     let mut source = String::new();
     let mut omissions: Vec<(Range<usize>, Range<usize>)> = Vec::new();
     // Slots are placed by left-to-right glyph positions: in a paragraph with
@@ -1267,6 +1288,52 @@ fn flatten_runs_weighted(
                     Some((formula, slot))
                 })
         });
+        // A chat reference shows as its pill: slot spaces around the title
+        // in the body face; the overlay paints its mark and status.
+        if let (Some(written), Some(resolve)) = (run.style.chat.as_deref(), chats) {
+            let chat = resolve(written);
+            let (shown, icon, status) = super::chat_pills::pill_text(&chat);
+            let start = text.len();
+            text.push_str(&shown);
+            let source_start = source.len();
+            source.push_str(&run.text);
+            omissions.push((source_start..source.len(), start..text.len()));
+            pills.push(super::chat_pills::ChatPillSpan {
+                range: start..text.len(),
+                icon_slot: start + icon.start..start + icon.end,
+                status_slot: start + status.start..start + status.end,
+                written: written.to_owned().into(),
+                known: chat.known,
+            });
+            let label_font = |family: SharedString, weight: FontWeight| {
+                let mut f = font(family);
+                f.weight = weight;
+                f
+            };
+            let slot_run = |len: usize| TextRun {
+                len,
+                font: super::math::slot_font(),
+                color: theme.text,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            out.push(slot_run(icon.len()));
+            out.push(TextRun {
+                len: status.start - icon.end,
+                font: label_font(theme.font_sans.clone(), FontWeight::MEDIUM),
+                color: if chat.known {
+                    theme.text
+                } else {
+                    theme.text_muted
+                },
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+            out.push(slot_run(status.len()));
+            continue;
+        }
         let delimited = run.style.math.then(|| format!("${}$", run.text));
         let run_source = delimited.as_deref().unwrap_or(&run.text);
         let (formula, slot) = match formula {
@@ -1386,6 +1453,7 @@ fn flatten_runs_weighted(
         code_ranges,
         file_glyphs: Vec::new(),
         math,
+        chats: pills,
     }
 }
 
@@ -1409,11 +1477,23 @@ fn flatten_cached(
                 .flats
                 .entry((opts.row_key.clone(), top_ix, ix))
                 .or_insert_with(|| {
-                    Rc::new(flatten_runs_weighted(runs, theme, base_weight, opts.math))
+                    Rc::new(flatten_runs_with(
+                        runs,
+                        theme,
+                        base_weight,
+                        opts.math,
+                        opts.chats.as_ref().map(|ui| &*ui.resolve),
+                    ))
                 })
                 .clone()
         }
-        None => Rc::new(flatten_runs_weighted(runs, theme, base_weight, opts.math)),
+        None => Rc::new(flatten_runs_with(
+            runs,
+            theme,
+            base_weight,
+            opts.math,
+            opts.chats.as_ref().map(|ui| &*ui.resolve),
+        )),
     }
 }
 
@@ -1494,6 +1574,8 @@ pub(super) fn flat_text_presented_element(
     // that drive text selection (round 18; see markdown/selection.rs).
     let sel_key: std::sync::Arc<str> = format!("{}:{ix}", opts.row_key).into();
     let code_ranges = flat.code_ranges.clone();
+    let pill_ranges: Vec<Range<usize>> = flat.chats.iter().map(|pill| pill.range.clone()).collect();
+    let pill_wash = theme.ink(0.055);
     let flat_text = flat
         .original
         .as_ref()
@@ -1514,6 +1596,18 @@ pub(super) fn flat_text_presented_element(
                         rect,
                         px(INLINE_CODE_RADIUS),
                         wash,
+                        px(0.0),
+                        gpui::transparent_black(),
+                        BorderStyle::default(),
+                    ));
+                }
+            }
+            for range in &pill_ranges {
+                for rect in range_rects(&layout, range, 0.0, INLINE_CODE_INSET_Y) {
+                    window.paint_quad(quad(
+                        rect,
+                        px(super::chat_pills::PILL_RADIUS),
+                        pill_wash,
                         px(0.0),
                         gpui::transparent_black(),
                         BorderStyle::default(),
@@ -1567,7 +1661,19 @@ pub(super) fn flat_text_presented_element(
     let child = if flat.links.is_empty() {
         child
     } else {
-        link_text_element(flat, child, link_layout, ix, opts)
+        link_text_element(flat, child, link_layout.clone(), ix, opts)
+    };
+    // Chat pills paint their marks and take their clicks over the text.
+    let child = match opts.chats.clone().filter(|_| !flat.chats.is_empty()) {
+        Some(ui) => super::chat_pills::ChatPills {
+            id: format!("{}-chats-{ix}", opts.row_key).into(),
+            child,
+            layout: link_layout,
+            pills: flat.chats.clone(),
+            ui,
+        }
+        .into_any_element(),
+        None => child,
     };
     // Formulas paint over their reserved slots, above everything else.
     if math_slots.is_empty() {
@@ -4508,6 +4614,7 @@ mod tests {
                     code_ranges: Vec::new(),
                     file_glyphs: Vec::new(),
                     math: Vec::new(),
+                    chats: Vec::new(),
                 }),
             );
             cache.code.insert(
@@ -4554,6 +4661,7 @@ mod tests {
                 code_ranges: Vec::new(),
                 file_glyphs: Vec::new(),
                 math: Vec::new(),
+                chats: Vec::new(),
             }),
         );
         cache.sync_generation(10);

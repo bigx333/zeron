@@ -8,6 +8,11 @@ pub(super) fn prepare(
     harness: HarnessId,
     sent: Option<&AtomicBool>,
 ) -> Option<String> {
+    // These providers receive the same app guidance through their native
+    // instruction channel on both start and resume, never inside user text.
+    if matches!(harness, HarnessId::ClaudeCode | HarnessId::Codex) {
+        return None;
+    }
     if sent.is_none_or(|sent| sent.load(Ordering::Acquire)) || native_command(prompt, harness) {
         return None;
     }
@@ -24,12 +29,10 @@ mod tests {
     #[test]
     fn guidance_requires_tools_and_waits_for_a_normal_prompt() {
         let sent = AtomicBool::new(false);
-        for harness in [
-            HarnessId::Codex,
-            HarnessId::ClaudeCode,
-            HarnessId::Opencode,
-            HarnessId::Cursor,
-        ] {
+        for harness in [HarnessId::Codex, HarnessId::ClaudeCode] {
+            assert!(prepare("hello", harness, Some(&sent)).is_none());
+        }
+        for harness in [HarnessId::Opencode, HarnessId::Cursor] {
             assert!(prepare("hello", harness, None).is_none());
             assert!(prepare("/compact", harness, Some(&sent)).is_none());
             assert!(!sent.load(Ordering::Acquire));
@@ -56,11 +59,35 @@ mod tests {
         handle
             .write_user_message("prior", "earlier context", 1)
             .unwrap();
+        let sender = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
         handle
-            .write_user_message("current", "current request", 2)
+            .write_user_message(
+                "report",
+                &zeron_proto::chat_refs::agent_message(
+                    Some("Reviewer"),
+                    sender,
+                    "The activity context must survive provider switching",
+                ),
+                2,
+            )
+            .unwrap();
+        let report = handle
+            .doc()
+            .read_entries()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == "report")
+            .unwrap();
+        assert_eq!(report.role, zeron_doc::MessageRole::System);
+        assert!(
+            matches!(report.parts.first(), Some(zeron_doc::MessagePart::Activity(activity))
+            if activity.source_chat_id == sender && activity.body == "The activity context must survive provider switching")
+        );
+        handle
+            .write_user_message("current", "current request", 3)
             .unwrap();
         handle
-            .write_user_message("future", "queued future request", 3)
+            .write_user_message("future", "queued future request", 4)
             .unwrap();
         let prompt = core
             .sessions
@@ -75,6 +102,8 @@ mod tests {
             )
             .unwrap();
         assert!(prompt.contains("earlier context"));
+        assert!(prompt.contains("The activity context must survive provider switching"));
+        assert!(prompt.contains(sender));
         assert!(!prompt.contains("queued future request"));
         assert!(prompt.ends_with("\n\ncurrent request"));
         assert!(

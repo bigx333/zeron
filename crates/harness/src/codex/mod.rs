@@ -932,6 +932,7 @@ impl CodexHarness {
             route.apply_codex(&mut cmd);
         }
         crate::compose_child_path(&mut cmd, &exe);
+        crate::orchestration::apply_env(&mut cmd, request.mcp.as_ref());
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }
@@ -1290,6 +1291,12 @@ async fn run_session(session: Session) {
                 .as_object_mut()
                 .expect("thread/start config overrides are an object");
             overrides.extend(codex_mcp_overrides(mcp));
+            for (key, value) in crate::orchestration::shell_env(Some(mcp)) {
+                overrides.insert(format!("shell_environment_policy.set.{key}"), value.into());
+            }
+            if let Some(instructions) = crate::orchestration::instructions(Some(mcp)) {
+                p.insert("developerInstructions".into(), instructions.into());
+            }
         }
         p.insert("approvalPolicy".into(), approval_policy.into());
         p.insert("sandbox".into(), sandbox_mode(request.sandbox).into());

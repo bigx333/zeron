@@ -6,6 +6,34 @@ use loro::{LoroValue, ToJson, ValueOrContainer};
 use zeron_proto::{HarnessId, ProviderPoint, ProviderSessionState, RunCheckpoint};
 
 impl SessionDoc {
+    pub fn acknowledge_task_input(&self, request_id: &str) -> Result<(), DocError> {
+        self.doc()
+            .get_map("taskInputAcks")
+            .insert(request_id, true)?;
+        self.doc().commit();
+        Ok(())
+    }
+    pub fn task_input_acknowledged(&self, request_id: &str) -> bool {
+        matches!(
+            self.doc().get_map("taskInputAcks").get(request_id),
+            Some(ValueOrContainer::Value(LoroValue::Bool(true)))
+        )
+    }
+    /// A user's Stop holds automatic child updates until an explicit new send.
+    /// Store this outside the transcript so it survives process restarts/rewinds.
+    pub fn child_updates_paused(&self) -> bool {
+        matches!(
+            self.doc().get_map("meta").get("childUpdatesPaused"),
+            Some(ValueOrContainer::Value(LoroValue::Bool(true)))
+        )
+    }
+    pub fn set_child_updates_paused(&self, paused: bool) -> Result<(), DocError> {
+        self.doc()
+            .get_map("meta")
+            .insert("childUpdatesPaused", paused)?;
+        self.doc().commit();
+        Ok(())
+    }
     pub fn history_was_restored(&self) -> bool {
         self.doc()
             .get_map("meta")

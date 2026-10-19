@@ -41,6 +41,10 @@ pub struct InlineStyle {
     pub task: Option<TaskMarker>,
     /// Inline TeX math (`$…$`, `\(…\)`): `text` is the TeX source without delimiters.
     pub math: bool,
+    /// A `@chat:<id>` reference (see `zeron_proto::chat_refs`): `text` is the
+    /// written token, this is the id as written (full or a prefix). Hosts
+    /// resolve it against the chats they know and may show a pill instead.
+    pub chat: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1865,13 +1869,36 @@ fn not_math(tex: &str, next: Option<u8>) -> bool {
 /// constantly; user report: the link isn't clickable). Runs already inside a
 /// link, code span or formula pass through untouched. Idempotent, so nested containers
 /// re-applying it on their merged output is harmless.
+///
+/// `@chat:` references are marked in the same pass: plain text splits around
+/// each one, and a code span is marked only when it is exactly one reference
+/// (agents often quote the token). Link text and formulas never are.
 fn autolink_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out = Vec::with_capacity(runs.len());
-    for run in runs {
-        if run.style.link.is_some() || run.style.code || run.style.math {
+    for mut run in runs {
+        if run.style.link.is_some() || run.style.math || run.style.chat.is_some() {
+            out.push(run);
+        } else if run.style.code {
+            let refs = zeron_proto::chat_refs::chat_refs(&run.text);
+            if let [only] = refs.as_slice()
+                && only.range == (0..run.text.len())
+            {
+                run.style.chat = Some(only.chat_id.to_owned());
+            }
             out.push(run);
         } else {
-            push_text_autolinked(&mut out, &run.text, &run.style);
+            let mut at = 0;
+            for chat in zeron_proto::chat_refs::chat_refs(&run.text) {
+                push_text_autolinked(&mut out, &run.text[at..chat.range.start], &run.style);
+                let mut style = run.style.clone();
+                style.chat = Some(chat.chat_id.to_owned());
+                out.push(InlineRun {
+                    text: run.text[chat.range.clone()].to_owned(),
+                    style,
+                });
+                at = chat.range.end;
+            }
+            push_text_autolinked(&mut out, &run.text[at..], &run.style);
         }
     }
     out
@@ -2311,6 +2338,84 @@ fn strip_container_markers(mut line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CHAT_ID: &str = "3f6b2a18-9c4d-4e5f-8a7b-1c2d3e4f5a6b";
+
+    /// `(run text, chat id)` for every chat reference, in document order.
+    fn chat_runs(source: &str) -> Vec<(String, String)> {
+        fn runs(runs: &[InlineRun], out: &mut Vec<(String, String)>) {
+            out.extend(
+                runs.iter()
+                    .filter_map(|r| Some((r.text.clone(), r.style.chat.clone()?))),
+            );
+        }
+        fn walk(block: &Block, out: &mut Vec<(String, String)>) {
+            match block {
+                Block::Paragraph { runs: r } | Block::Heading { runs: r, .. } => runs(r, out),
+                Block::BlockQuote { children } => children.iter().for_each(|b| walk(b, out)),
+                Block::List { items, .. } => items.iter().flatten().for_each(|b| walk(b, out)),
+                Block::Table { header, rows, .. } => header
+                    .iter()
+                    .chain(rows.iter().flatten())
+                    .for_each(|cell| runs(cell, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for top in &parse_full(source).blocks {
+            walk(&top.block, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn chat_references_are_marked_in_prose_lists_quotes_and_tables() {
+        let token = format!("@chat:{CHAT_ID}");
+        assert_eq!(
+            chat_runs(&format!("Started {token} to review.")),
+            [(token.clone(), CHAT_ID.to_owned())]
+        );
+        let Block::Paragraph { runs } = &parse_full(&format!("see ({token}).")).blocks[0].block
+        else {
+            panic!("paragraph");
+        };
+        assert_eq!(runs[0].text, "see (");
+        assert_eq!(runs[1].style.chat.as_deref(), Some(CHAT_ID));
+        assert_eq!(runs[2].text, ").");
+        for source in [
+            format!("- {token}"),
+            format!("> {token}"),
+            format!("| a |\n|---|\n| {token} |"),
+            format!("**{token}** and @chat:ba6888c8…"),
+        ] {
+            assert!(!chat_runs(&source).is_empty(), "{source}");
+        }
+        // A reference beside a bare URL keeps both.
+        let Block::Paragraph { runs } =
+            &parse_full(&format!("{token} https://x.dev")).blocks[0].block
+        else {
+            panic!("paragraph");
+        };
+        assert!(runs[0].style.chat.is_some());
+        assert_eq!(runs.last().unwrap().style.link.as_deref(), Some("https://x.dev"));
+    }
+
+    #[test]
+    fn chat_references_skip_fences_links_and_partial_code() {
+        let token = format!("@chat:{CHAT_ID}");
+        assert_eq!(chat_runs(&format!("`{token}`")).len(), 1);
+        assert!(chat_runs(&format!("`see {token}`")).is_empty());
+        assert!(chat_runs(&format!("```\n{token}\n```")).is_empty());
+        assert!(chat_runs(&format!("[{token}](https://x.dev)")).is_empty());
+        assert!(chat_runs(&format!("foo{token}")).is_empty());
+        // Streaming the same paragraph converges on the full parse.
+        let source = format!("Ask {token} first.\n\nThen wait.");
+        let mut parser = IncrementalParser::new();
+        for end in (0..=source.len()).filter(|&i| source.is_char_boundary(i)) {
+            parser.set_text(&source[..end]);
+        }
+        assert_eq!(parser.tree().blocks, parse_full(&source).blocks);
+    }
 
     #[test]
     fn task_ranges_survive_nested_lists_unicode_crlf_and_streaming() {

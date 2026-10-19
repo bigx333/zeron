@@ -3,6 +3,8 @@
 use crate::{ChatConfig, HarnessId, ReasoningLevel, SandboxLevel};
 use serde::{Deserialize, Serialize};
 
+pub const MAX_ACTIVE_CHILD_TASKS: usize = 8;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskResult {

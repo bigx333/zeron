@@ -226,6 +226,12 @@ fun elapsed(secs: Long): String = when {
 @Composable
 private fun AssetIcon(name: String, tint: Color) {
     val context = LocalContext.current
+    // A chat pill's well: the harness's brand mark.
+    if (name.startsWith("brand-")) {
+        return Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            sh.zeron.android.design.HarnessMark(name.removePrefix("brand-"), 14.dp, tint = tint)
+        }
+    }
     when (name) {
         "square", "checkmark.square.fill" -> return TaskBox(name != "square", tint)
         "arrow.triangle.branch" -> return ZIcon(ZIcons.Branch, null, Modifier.fillMaxSize(), tint = tint)

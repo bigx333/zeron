@@ -8,6 +8,8 @@
 //! ranges are a binary search, display lists are built on demand from the
 //! frame's prepared rows (pure arithmetic, no measurement).
 
+mod activity;
+mod chats;
 pub mod display;
 mod markdown;
 mod file_icons;
@@ -357,6 +359,10 @@ enum Msg {
     ToggleDetail { row: u64, detail: u64, open: bool },
     /// A visual row's height changed (its key), or visuals got a source.
     Visual(Option<u64>),
+    /// The workspace moved: the chats references and reports name.
+    Workspace(Arc<zeron_client::WorkspaceSnapshot>),
+    /// The chat this transcript shows (delegations find their children).
+    Chat(String),
     Shutdown,
 }
 
@@ -371,6 +377,9 @@ pub struct TranscriptView {
     shared: Arc<Shared>,
     /// Live session subscription (Rust→Rust; rows never cross FFI).
     watch: Mutex<Option<zeron_client::SnapshotWatch>>,
+    /// Workspace listener feeding the chats rows name (held: the client
+    /// keeps only a weak reference).
+    workspace_tap: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     visuals: Arc<crate::visual::VisualHub>,
 }
 
@@ -402,6 +411,7 @@ impl TranscriptView {
             tx: Mutex::new(tx),
             shared,
             watch: Mutex::new(None),
+            workspace_tap: Mutex::new(None),
             visuals,
         })
     }
@@ -446,6 +456,17 @@ impl TranscriptView {
             let _ = tx.lock().unwrap().send(Msg::Input(input));
         });
         *self.watch.lock().unwrap() = Some(guard);
+        // Chats the transcript names resolve against the workspace, now and
+        // whenever it moves.
+        self.send(Msg::Chat(chat_id.clone()));
+        let tx = Mutex::new(self.tx.lock().unwrap().clone());
+        let source = client.clone();
+        let tap: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let _ = tx.lock().unwrap().send(Msg::Workspace(source.client().workspace()));
+        });
+        tap();
+        client.workspace_taps.add(&tap);
+        *self.workspace_tap.lock().unwrap() = Some(tap);
         true
     }
 
@@ -484,6 +505,7 @@ impl TranscriptView {
 
     pub fn close(&self) {
         self.watch.lock().unwrap().take();
+        self.workspace_tap.lock().unwrap().take();
         self.visuals.shutdown();
         self.send(Msg::Shutdown);
     }
@@ -555,6 +577,8 @@ pub(crate) struct Worker {
     shared: Arc<Shared>,
     listener: Option<Arc<dyn LayoutListener>>,
     visuals: Option<Arc<crate::visual::VisualHub>>,
+    chats: Arc<chats::ChatDirectory>,
+    workspace_revision: Option<u64>,
 }
 
 impl Worker {
@@ -577,6 +601,8 @@ impl Worker {
             shared,
             listener: Some(listener),
             visuals,
+            chats: Arc::default(),
+            workspace_revision: None,
         }
     }
 
@@ -590,6 +616,19 @@ impl Worker {
                     Msg::Input(input) => {
                         self.input = input;
                         dirty = true;
+                    }
+                    Msg::Chat(id) => {
+                        self.builder.chat_id = Some(id);
+                        dirty = true;
+                    }
+                    Msg::Workspace(ws) => {
+                        // Rows naming chats compare their resolution on the
+                        // next build and rebuild only if it moved.
+                        if self.workspace_revision != Some(ws.revision) {
+                            self.workspace_revision = Some(ws.revision);
+                            self.chats = Arc::new(chats::ChatDirectory::from_workspace(&ws));
+                            dirty = true;
+                        }
                     }
                     Msg::Viewport { width, scale } => {
                         if (scale - self.typo.scale).abs() > f32::EPSILON {
@@ -661,6 +700,7 @@ impl Worker {
         self.builder.collapsed = old.collapsed;
         self.builder.detail_open = old.detail_open;
         self.builder.visual_slots = old.visual_slots;
+        self.builder.chat_id = old.chat_id;
         self.heights.clear();
     }
 
@@ -672,6 +712,7 @@ impl Worker {
             .is_some_and(|r| match &r.core.content {
                 rows::Content::Tools(t) => t.expanded,
                 rows::Content::User(u) => u.expanded,
+                rows::Content::Activity(a) => a.expanded,
                 _ => false,
             })
     }
@@ -686,6 +727,7 @@ impl Worker {
                 math_failures: &mut self.math_failures,
                 in_table: false,
                 math_area: 0.0,
+                chats: &self.chats,
             };
             self.builder.build(&mut ctx, &self.input)
         };

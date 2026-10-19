@@ -139,7 +139,7 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenCha
     val scope = rememberCoroutineScope()
     var sheet by remember { mutableStateOf<TextSheet?>(null) }
     var viewing by remember { mutableStateOf<ImageBitmap?>(null) }
-    val actions = remember(chatId, composer.host.deviceId) {
+    val actions = remember(chatId, composer.host.deviceId, onOpenChat) {
         val device = composer.host.deviceId
         suspend fun fetch(ref: String): Result<ImageBitmap> {
             val key = ImageCache.key(device, ref)
@@ -163,6 +163,8 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenCha
                 val uri = Uri.parse(url)
                 when (uri.scheme?.lowercase()) {
                     "http", "https" -> CustomTabsIntent.Builder().build().launchUrl(context, uri)
+                    // A chat the transcript names (a pill, a report, "Open task").
+                    "zeron-chat" -> url.removePrefix("zeron-chat:").takeIf { it.isNotEmpty() && it != chatId }?.let(onOpenChat)
                     // An image chip opens its upload full size, as its thumbnail did.
                     "zeron-preview" -> uri.getQueryParameter("ref")?.let(open) ?: cantOpen(url)
                     // A path on the chat's host: only it can read the file, so fetch it from there.

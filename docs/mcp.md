@@ -546,3 +546,33 @@ duplicate chats. Already idle chats return immediately; remove collected chats
 from the next wait. Pending sends tracked by the same MCP session retain the
 usual “wait for this new turn” semantics. A timed out wait leaves that tracking
 intact.
+
+
+## Agent CLI
+
+The engine injects `ZERON_CHAT_ID`, `ZERON_DEVICE_ID`, `ZERON_IPC_PORT` and
+`ZERON_CLI` into agent processes. The CLI is an additional transport over the
+same `Tools` implementation and engine policy; MCP stays injected.
+
+```sh
+zeron guide chats
+zeron harness list
+zeron model list --harness claude-code
+zeron chat spawn --prompt 'Review the current checkout' --role review --request-id review-1
+zeron chat wait <child-id> --timeout-secs 600
+zeron chat output <child-id>
+zeron chat cancel <task-id> --reason 'No longer needed'
+zeron chat show self --json
+```
+
+Managed spawn/cancel/status and frozen task reads are parent-scoped. Use a
+self-contained brief and a new request id for each review round; repeat that
+id only for a retry of the same round. Worktree isolation starts at the parent's
+committed HEAD and excludes dirty changes. Shared isolation uses the current
+checkout. `merge` transfers context rather than Git changes.
+
+Child reports and unanswered questions arrive automatically between parent
+turns. Stop holds automatic updates across restarts until the user sends again.
+A task wait or status read acknowledges a blocking question it returns. Reference
+chats as `@chat:<full-id>` for live navigation. See `zeron chat --help` for all
+commands and `zeron guide history` for checkpoint/Undo retry semantics.

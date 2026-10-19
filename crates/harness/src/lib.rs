@@ -23,6 +23,7 @@ use zeron_proto::{
     AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand, SteeringMode,
     UserInputAnswer, UserInputQuestion,
 };
+mod orchestration;
 
 /// Opt-in native permission prompts; existing unattended behavior is the default.
 pub(crate) fn prompt_for_approvals() -> bool {

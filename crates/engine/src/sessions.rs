@@ -624,8 +624,16 @@ impl SessionsEngine {
         request: RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
-        self.dispatch_with(chat_id, harness_id, request, message_id, false)
-            .await
+        let automatic = message_id.as_deref().is_some_and(|id| {
+            id.starts_with("task:") && (id.ends_with(":result") || id.contains(":input:"))
+        }) || request.prompt.starts_with("[Message from Zeron chat ");
+        let result = self
+            .dispatch_with(chat_id, harness_id, request, message_id, false)
+            .await?;
+        if !automatic && let Some(host) = self.inner.doc_host() {
+            host.pause_child_updates(chat_id, false)?;
+        }
+        Ok(result)
     }
 
     /// [`Self::dispatch`] with the startup-crash retry marker: the retry
@@ -1214,6 +1222,9 @@ impl SessionsEngine {
     /// conversation in a fresh process. (Sending, steering and switching
     /// models never come here: they keep the runtime and its work.)
     pub async fn interrupt(&self, chat_id: &str) -> Result<bool, EngineError> {
+        if let Some(host) = self.inner.doc_host() {
+            host.pause_child_updates(chat_id, true)?;
+        }
         self.terminate(chat_id).await
     }
 
@@ -1316,6 +1327,17 @@ impl SessionsEngine {
         lock(&self.inner.runs)
             .get(chat_id)
             .is_some_and(|h| h.engine_tx.send(event).is_ok())
+    }
+
+    /// The runtime registers an input before publishing AwaitingInput; its doc
+    /// part can land later through the coalesced sink.
+    pub(crate) fn pending_input_ids(&self, chat_id: &str) -> Vec<String> {
+        let pending = lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|run| run.pending_inputs.clone());
+        pending
+            .map(|pending| lock(&pending).keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Resolve a pending `request_input` question set. Returns `false` when no such
@@ -1839,12 +1861,13 @@ impl Inner {
         let command = std::env::current_exe().ok()?.to_str()?.to_owned();
         Some(zeron_proto::McpServer {
             name: "zeron".into(),
-            command,
+            command: command.clone(),
             args: vec!["mcp".into()],
             env: [
                 ("ZERON_IPC_PORT".to_owned(), port.to_string()),
                 ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
                 ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
+                ("ZERON_CLI".to_owned(), command),
             ]
             .into_iter()
             .collect(),
@@ -2198,17 +2221,24 @@ impl Inner {
         let mut truncated = false;
         let mut history = Vec::new();
         for entry in entries[start..end].iter().rev() {
-            if !matches!(
-                entry.role,
-                zeron_doc::MessageRole::User | zeron_doc::MessageRole::Assistant
-            ) {
+            let activity = entry
+                .parts
+                .iter()
+                .any(|part| matches!(part, zeron_doc::MessagePart::Activity(_)));
+            if !activity
+                && !matches!(
+                    entry.role,
+                    zeron_doc::MessageRole::User | zeron_doc::MessageRole::Assistant
+                )
+            {
                 continue;
             }
             let text = entry
                 .parts
                 .iter()
                 .filter_map(|part| match part {
-                    zeron_doc::MessagePart::Text { text, .. } => Some(text.as_str()),
+                    zeron_doc::MessagePart::Text { text, .. } if !activity => Some(text.clone()),
+                    zeron_doc::MessagePart::Activity(activity) => Some(activity.agent_text()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()

@@ -299,7 +299,7 @@ impl Zeron {
         chat_id: &str,
         device: Option<&str>,
     ) -> anyhow::Result<Vec<SessionMessageEntry>> {
-        let mut params = json!({ "chatId": chat_id });
+        let mut params = json!({ "chatId": chat_id, "activityV1": true });
         if let Some(device) = device {
             params["targetDeviceId"] = json!(device);
         }
@@ -379,6 +379,16 @@ impl Zeron {
     /// Full id, unique id prefix, or exact (case-insensitive) title.
     pub async fn resolve_chat(&self, key: &str) -> anyhow::Result<Chat> {
         let key = key.trim();
+        let key = if key == "self" {
+            self.origin
+                .chat_id
+                .as_deref()
+                .context("self requires a Zeron chat origin")?
+        } else if let Some(reference) = key.strip_prefix("@chat:") {
+            reference.trim_end_matches(['…', '.'])
+        } else {
+            key
+        };
         if key.is_empty() {
             bail!("chat is required");
         }
@@ -763,6 +773,53 @@ mod tests {
             .to_string();
         assert!(err.contains("2 chats are titled"), "{err}");
         assert!(resolve_chat_in(&chats, "zzz").is_err());
+    }
+
+    #[tokio::test]
+    async fn chat_references_resolve_without_rewriting_literal_titles() {
+        struct Directory;
+        #[async_trait::async_trait]
+        impl zeron_rpc::RpcService for Directory {
+            async fn handle(
+                &self,
+                method: &str,
+                _params: Value,
+            ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+                assert_eq!(method, methods::WATCH_CHATS);
+                Ok(zeron_rpc::RpcReply::Stream(Box::pin(
+                    futures::stream::iter([serde_json::to_value([chat(
+                        "aaaa1111-1",
+                        Some("Release..."),
+                    )])
+                    .unwrap()]),
+                )))
+            }
+        }
+        let client = Zeron::with_client(
+            zeron_rpc::memory_client(Arc::new(Directory)),
+            Origin {
+                chat_id: Some("aaaa1111-1".into()),
+                device_id: None,
+            },
+        );
+        for reference in ["self", "@chat:aaaa1111…", "Release..."] {
+            assert_eq!(
+                client.resolve_chat(reference).await.unwrap().id,
+                "aaaa1111-1"
+            );
+        }
+        let external = Zeron::with_client(
+            zeron_rpc::memory_client(Arc::new(Directory)),
+            Origin::default(),
+        );
+        assert!(
+            external
+                .resolve_chat("self")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("origin")
+        );
     }
 
     fn space(id: &str, path: &str, name: Option<&str>) -> Space {

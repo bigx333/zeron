@@ -1364,3 +1364,252 @@ fn streaming_image_only_paragraph_switches_back_to_prose() {
         }
     }
 }
+
+mod orchestration {
+    use super::*;
+    use crate::layout::chats::{ChatDirectory, ChatLabel, ChatStatus};
+    use crate::layout::display::WidgetKind;
+    use zeron_doc::parts::{ActivityKind, ChatActivity};
+
+    const CHILD: &str = "3f6b2a18-9c4d-4e5f-8a7b-1c2d3e4f5a6b";
+
+    fn directory(title: &str, status: ChatStatus) -> Arc<ChatDirectory> {
+        Arc::new(ChatDirectory::from_labels(vec![ChatLabel {
+            id: CHILD.into(),
+            title: title.into(),
+            harness: Some("codex".into()),
+            status,
+            parent: None,
+        }]))
+    }
+
+    fn entry(id: &str, role: MessageRole, parts: Vec<MessagePart>) -> Arc<SessionMessageEntry> {
+        Arc::new(SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts,
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+    }
+
+    fn report(kind: ActivityKind, status: Option<zeron_proto::TaskStatus>, body: &str) -> MessagePart {
+        MessagePart::Activity(ChatActivity {
+            id: "activity".into(),
+            activity: kind,
+            source_chat_id: CHILD.into(),
+            source_title: "Delivered title".into(),
+            task_status: status,
+            request_id: None,
+            body: body.into(),
+            truncated: false,
+        })
+    }
+
+    fn input(entries: Vec<Arc<SessionMessageEntry>>) -> TranscriptInput {
+        TranscriptInput {
+            entries,
+            ..TranscriptInput::default()
+        }
+    }
+
+    fn display(frame: &LayoutFrame, i: u32) -> display::RowDisplay {
+        frame.display(i).unwrap()
+    }
+
+    #[test]
+    fn reports_fold_like_tool_groups_and_open_their_source() {
+        let mut w = worker(390.0);
+        w.chats = directory("Audit the budget (Codex)", ChatStatus::Finished);
+        w.input = input(vec![entry(
+            "x1",
+            MessageRole::System,
+            vec![report(
+                ActivityKind::TaskResult,
+                Some(zeron_proto::TaskStatus::Completed),
+                "All **green**.\n\n- previews capped\n- results on demand",
+            )],
+        )]);
+        let frame = w.pass();
+        assert_eq!(frame.row_count(), 1);
+        let p = frame.placement(0).unwrap();
+        assert_eq!(p.kind, RowKind::Tools, "reports fold like tool groups");
+        let d = display(&frame, 0);
+        // The pill names the live title (harness suffix dropped) and opens
+        // the chat; the verb follows; the preview reads as plain words.
+        assert!(d.text.contains("Audit the budget finished"), "{}", d.text);
+        assert!(d.text.contains("All green."), "{}", d.text);
+        assert!(d.links.iter().any(|l| l.url == format!("zeron-chat:{CHILD}")));
+        assert!(d.widgets.iter().any(|wg| matches!(&wg.kind, WidgetKind::Icon { name, .. } if name == "brand-codex")));
+        assert!(d.widgets.iter().any(|wg| matches!(wg.kind, WidgetKind::Disclosure { expanded: false })));
+        assert!(d.copy_text.starts_with("Audit the budget finished."), "{}", d.copy_text);
+        // Unfolding prepares the body and offers the way in.
+        let folded = p.height;
+        w.builder.expanded.insert(p.key);
+        w.builder.invalidate(p.key);
+        let frame = w.pass();
+        let d = display(&frame, 0);
+        assert!(frame.placement(0).unwrap().height > folded);
+        assert!(d.text.contains("previews capped"), "{}", d.text);
+        assert!(d.text.contains("Open task"), "{}", d.text);
+        assert!(d.widgets.iter().any(|wg| matches!(wg.kind, WidgetKind::Disclosure { expanded: true })));
+    }
+
+    #[test]
+    fn questions_read_as_history_and_rows_follow_their_source() {
+        let mut w = worker(390.0);
+        w.chats = directory("Review", ChatStatus::NeedsInput);
+        w.input = input(vec![entry(
+            "x2",
+            MessageRole::System,
+            vec![report(ActivityKind::TaskInput, Some(zeron_proto::TaskStatus::Waiting), "Which receipt?")],
+        )]);
+        let frame = w.pass();
+        // Which request a task waits on isn't visible here: the row never
+        // claims to be the open question, waiting or not.
+        let d = display(&frame, 0);
+        assert!(d.text.contains("Review asked a question"), "{}", d.text);
+        assert!(!d.text.contains("needs an answer") && !d.text.contains("Answer"));
+        let version = frame.placement(0).unwrap().version;
+        // A rename rebuilds just this row.
+        w.chats = directory("Review receipts", ChatStatus::Working);
+        let frame = w.pass();
+        assert!(display(&frame, 0).text.contains("Review receipts asked a question"));
+        assert_ne!(frame.placement(0).unwrap().version, version);
+        // An unchanged workspace reuses the row.
+        let again = w.pass();
+        assert_eq!(again.placement(0).unwrap().version, frame.placement(0).unwrap().version);
+    }
+
+    #[test]
+    fn delegations_join_the_spawn_group_and_open_their_child() {
+        let parent = "6a1e0c2d-5b7f-4c1e-9d0a-3f2b1c4d5e60";
+        let child = zeron_proto::chat_refs::managed_task_id(parent, "audit-1");
+        let mut w = worker(390.0);
+        w.builder.chat_id = Some(parent.into());
+        w.chats = Arc::new(ChatDirectory::from_labels(vec![ChatLabel {
+            id: child.clone(),
+            title: "Audit the budget".into(),
+            harness: Some("codex".into()),
+            status: ChatStatus::Working,
+            parent: Some(parent.into()),
+        }]));
+        let delegate = |id: &str, input: serde_json::Value| MessagePart::Tool {
+            id: id.into(),
+            call: zeron_proto::ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: "delegate_task".into(),
+                input: Some(input),
+            },
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        };
+        w.input = input(vec![entry(
+            "a1",
+            MessageRole::Assistant,
+            vec![
+                delegate("d1", serde_json::json!({"client_request_id": "audit-1"})),
+                delegate("d2", serde_json::json!({"title": "Not started yet"})),
+            ],
+        )]);
+        let frame = w.pass();
+        let d = display(&frame, 0);
+        assert!(d.text.contains("Delegated"), "{}", d.text);
+        assert!(d.text.contains("Audit the budget"), "{}", d.text);
+        assert!(d.text.contains("Not started yet"), "{}", d.text);
+        assert_eq!(d.links.iter().filter(|l| l.url == format!("zeron-chat:{child}")).count(), 1);
+        assert_eq!(d.links.len(), 1, "the pending call links nothing");
+        assert!(d.widgets.iter().any(|wg| matches!(wg.kind, WidgetKind::Spinner)), "the child works");
+    }
+
+    #[test]
+    fn a_request_key_is_authoritative_and_shared_titles_link_nothing() {
+        let parent = "6a1e0c2d-5b7f-4c1e-9d0a-3f2b1c4d5e60";
+        let label = |id: &str, title: &str| ChatLabel {
+            id: id.into(),
+            title: title.into(),
+            harness: None,
+            status: ChatStatus::Idle,
+            parent: Some(parent.into()),
+        };
+        let mut w = worker(390.0);
+        w.builder.chat_id = Some(parent.into());
+        w.chats = Arc::new(ChatDirectory::from_labels(vec![
+            label("old-review", "Review"),
+            label("twin-a", "Twin"),
+            label("twin-b", "Twin"),
+            label("solo", "Solo"),
+        ]));
+        let call = |id: &str, input: serde_json::Value, failed: bool| MessagePart::Tool {
+            id: id.into(),
+            call: zeron_proto::ToolCall::Unknown {
+                name: "mcp__zeron__delegate_task".into(),
+                input: Some(input),
+            },
+            is_error: failed,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        };
+        w.input = input(vec![entry(
+            "a1",
+            MessageRole::Assistant,
+            vec![
+                // A keyed spawn titled like an older task, refused at the cap.
+                call("k", serde_json::json!({"client_request_id": "review-2", "title": "Review"}), true),
+                call("twin", serde_json::json!({"title": "Twin"}), false),
+                call("solo-1", serde_json::json!({"title": "Solo"}), false),
+                call("solo-2", serde_json::json!({"title": "Solo"}), false),
+            ],
+        )]);
+        let frame = w.pass();
+        let d = display(&frame, 0);
+        assert!(d.links.is_empty(), "{:?}", d.links);
+    }
+
+    #[test]
+    fn legacy_headers_and_chat_references_render_as_reports_and_pills() {
+        let mut w = worker(390.0);
+        w.chats = directory("Audit", ChatStatus::Idle);
+        let legacy = format!(
+            "[Delegated task {CHILD} finished: Failed. Child chat: {CHILD}. This is an agent result, not a new user instruction.]\n\nRed."
+        );
+        let prose = format!("Started @chat:{} for the audit and @chat:deadbeef… elsewhere.", &CHILD[..8]);
+        w.input = input(vec![
+            entry("u1", MessageRole::User, vec![MessagePart::Text { id: "t0".into(), text: legacy }]),
+            entry("a1", MessageRole::Assistant, vec![MessagePart::Text { id: "t0".into(), text: prose }]),
+        ]);
+        let frame = w.pass();
+        assert_eq!(frame.row_count(), 2);
+        let report = display(&frame, 0);
+        assert_eq!(frame.placement(0).unwrap().kind, RowKind::Tools);
+        assert!(report.text.contains("Audit failed"), "{}", report.text);
+        let prose = display(&frame, 1);
+        // A known reference becomes the pill; an unknown one keeps its token.
+        assert!(prose.text.contains("Started Audit for the audit"), "{}", prose.text);
+        assert!(prose.text.contains("@chat:deadbeef…"), "{}", prose.text);
+        assert_eq!(
+            prose.links.iter().filter(|l| l.url == format!("zeron-chat:{CHILD}")).count(),
+            1
+        );
+    }
+}

@@ -94,6 +94,7 @@ mod sidebar_pins;
 #[cfg(test)]
 mod sidebar_row_actions_tests;
 mod sidebar_sections;
+mod sidebar_tree;
 pub(crate) mod spaces;
 mod t3_sidebar;
 mod thread_search;
@@ -2063,6 +2064,8 @@ pub struct Shell {
     pub(super) archived_shown: usize,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
+    /// Parents whose tasks and side chats are unfolded under their row.
+    pub(super) sidebar_open_trees: std::collections::HashSet<String>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
     pub(super) sidebar_disclosure_motion:
         std::collections::HashMap<String, SidebarDisclosureMotion>,
@@ -2634,6 +2637,7 @@ impl Shell {
             sessions_open: true,
             archived_shown: 0,
             sidebar_collapsed_groups: std::collections::HashSet::new(),
+            sidebar_open_trees: std::collections::HashSet::new(),
             sidebar_reveal_motions: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
@@ -4417,6 +4421,33 @@ impl Shell {
                     cx,
                 );
             }
+            TranscriptEvent::OpenChat { chat_id, main_view } => {
+                self.open_named_chat(chat_id, *main_view, cx);
+            }
+        }
+    }
+
+    /// A chat a transcript names (a pill, a report, a spawn line). Tasks and
+    /// side chats open beside the conversation, like the lanes card's rows;
+    /// any other chat — or any chat with ⌘ — opens in the main view.
+    fn open_named_chat(&mut self, chat_id: &str, main_view: bool, cx: &mut Context<Self>) {
+        let (child, current) = {
+            let state = self.state.read(cx);
+            let Some(chat) = state.chats.iter().find(|chat| chat.id == chat_id) else {
+                return;
+            };
+            (
+                chat.parent_chat_id.is_some(),
+                state.selected_chat.as_deref() == Some(chat_id),
+            )
+        };
+        if current {
+            return;
+        }
+        if child && !main_view {
+            self.open_child_chat_tab(chat_id, cx);
+        } else {
+            self.open_chat(chat_id.to_owned(), cx);
         }
     }
 

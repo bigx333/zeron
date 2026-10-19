@@ -1689,7 +1689,7 @@ impl AcpHarness {
         cwd: Option<&str>,
         block_on_install: bool,
         extra_args: &[String],
-        _mcp: Option<&zeron_proto::McpServer>,
+        mcp: Option<&zeron_proto::McpServer>,
     ) -> Result<
         (
             Option<ScratchDir>,
@@ -1705,6 +1705,7 @@ impl AcpHarness {
         cmd.args(extra_args);
         child::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
+        crate::orchestration::apply_env(&mut cmd, mcp);
         self.configure_adapter_environment(&mut cmd, &exe);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);

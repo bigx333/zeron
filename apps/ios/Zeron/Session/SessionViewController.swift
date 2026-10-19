@@ -69,6 +69,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { throw CancellationError() }
             return try await self.source.image(ref)
         }
+        // Pills and reports name chats: open them like the lanes sheet does.
+        list.openChat = { [weak self] id in
+            guard let self, id != self.chatId else { return }
+            self.openRelated(id)
+        }
         // Hidden while following (the runway glide and tail spring travel).
         list.onDistanceFromBottom = { [weak self] d in
             guard let self else { return }

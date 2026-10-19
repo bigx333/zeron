@@ -69,12 +69,30 @@ final class RowView: UIView {
     private func rebuildLinkElements(_ d: RowDisplay) {
         linkElements = d.links.map { l in
             let e = UIAccessibilityElement(accessibilityContainer: self)
-            e.accessibilityLabel = URL(string: l.url)?.host() ?? l.url
-            e.accessibilityValue = l.url
+            if l.url.hasPrefix("zeron-chat:") {
+                // A chat pill speaks the chat's title, not its id.
+                let title = RowView.paintedText(of: l, in: d)
+                e.accessibilityLabel = title.isEmpty ? "Chat" : title
+                e.accessibilityHint = "Opens the chat"
+            } else {
+                e.accessibilityLabel = URL(string: l.url)?.host() ?? l.url
+                e.accessibilityValue = l.url
+            }
             e.accessibilityTraits = .link
             e.accessibilityIdentifier = "transcript-link"
             return (e, l)
         }
+    }
+
+    /// The text painted inside a link's hit rect.
+    private static func paintedText(of l: LinkHit, in d: RowDisplay) -> String {
+        let ns = d.text as NSString
+        let hit = CGRect(x: CGFloat(l.x), y: CGFloat(l.y), width: CGFloat(l.w), height: CGFloat(l.h)).insetBy(dx: -1, dy: -1)
+        return d.runs
+            .filter { $0.scroller == l.scroller && hit.contains(CGPoint(x: CGFloat($0.x) + 0.5, y: CGFloat($0.baseline) - 1)) }
+            .map { ns.substring(with: NSRange(location: Int($0.start), length: Int($0.len))) }
+            .joined()
+            .trimmingCharacters(in: .whitespaces)
     }
 
     /// Link elements where they're painted now (code/table scrollers move).
@@ -267,9 +285,13 @@ final class RowView: UIView {
                 }, for: .touchUpInside)
                 view = b
             case let .icon(name, color):
-                // Desktop icon assets (tool-*, fileicon-*), else an SF symbol.
+                // Desktop icon assets (tool-*, fileicon-*), a harness's brand
+                // mark (brand-<harness>, a chat pill's well), else an SF symbol.
                 let iv: UIImageView
-                if let asset = RowView.asset(name) {
+                if name.hasPrefix("brand-") {
+                    iv = UIImageView(image: BrandMarks.image(for: String(name.dropFirst("brand-".count)), side: rect.height))
+                    iv.contentMode = .scaleAspectFit
+                } else if let asset = RowView.asset(name) {
                     iv = UIImageView(image: asset)
                     iv.contentMode = .scaleAspectFit
                 } else {

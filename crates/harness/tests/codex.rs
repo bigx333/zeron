@@ -905,7 +905,10 @@ async fn models_discovers_visible_catalog_with_pagination() {
         .models()
         .await
         .expect("fallback models");
-    assert!(!fallback.is_empty(), "failed probe must fall back to the curated catalog");
+    assert!(
+        !fallback.is_empty(),
+        "failed probe must fall back to the curated catalog"
+    );
 
     let missing = CodexHarness::new().with_executable("/nonexistent/codex-nowhere");
     // models() requires a resolvable binary… but with_executable trusts the
@@ -1930,7 +1933,12 @@ async fn idle_voice_runtime_has_no_initial_turn_and_preserves_mcp() {
         name: "zeron".into(),
         command: "zeron".into(),
         args: vec!["mcp".into()],
-        env: Default::default(),
+        env: [
+            ("ZERON_CHAT_ID".into(), "parent".into()),
+            ("ZERON_CLI".into(), "/opt/zeron/zeron".into()),
+        ]
+        .into_iter()
+        .collect(),
     });
     let (mut controls, steer, token) = controls("Yes");
     let (voice, bridge, _events) = zeron_harness::codex::realtime::channel();
@@ -1963,6 +1971,27 @@ async fn idle_voice_runtime_has_no_initial_turn_and_preserves_mcp() {
     assert!(!calls.contains("turn/start"));
     assert!(!calls.contains("thread/realtime/start"));
     assert!(calls.contains("mcp_servers"));
+    let frames: Vec<serde_json::Value> = calls
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let start = &frames
+        .iter()
+        .find(|frame| frame["method"] == "thread/start")
+        .unwrap()["params"];
+    assert_eq!(
+        start["developerInstructions"],
+        zeron_proto::ORCHESTRATION_INSTRUCTIONS
+    );
+    assert_eq!(
+        start["config"]["shell_environment_policy.set.ZERON_CHAT_ID"],
+        "parent"
+    );
+    assert_eq!(
+        start["config"]["shell_environment_policy.set.ZERON_CLI"],
+        "/opt/zeron/zeron"
+    );
+
     steer
         .send(SteerMessage::text("text remains usable"))
         .await

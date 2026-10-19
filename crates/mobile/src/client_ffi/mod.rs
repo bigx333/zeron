@@ -32,11 +32,43 @@ pub trait ClientListener: Send + Sync {
     fn on_event(&self, event: ClientEvent);
 }
 
-struct ListenerBridge(Arc<dyn ClientListener>);
+/// Rust-side listeners for workspace changes: the layout engine resolves
+/// the chats a transcript names from the workspace, so it hears when that
+/// moves without a round trip through the platform. Held weakly — a
+/// transcript that goes away stops listening.
+#[derive(Default)]
+pub(crate) struct WorkspaceTaps(std::sync::Mutex<Vec<std::sync::Weak<dyn Fn() + Send + Sync>>>);
+
+impl WorkspaceTaps {
+    pub(crate) fn add(&self, tap: &Arc<dyn Fn() + Send + Sync>) {
+        let mut taps = self.0.lock().unwrap();
+        taps.retain(|tap| tap.strong_count() > 0);
+        taps.push(Arc::downgrade(tap));
+    }
+
+    fn notify(&self) {
+        let live: Vec<_> = {
+            let mut taps = self.0.lock().unwrap();
+            taps.retain(|tap| tap.strong_count() > 0);
+            taps.iter().filter_map(std::sync::Weak::upgrade).collect()
+        };
+        for tap in live {
+            tap();
+        }
+    }
+}
+
+struct ListenerBridge {
+    platform: Arc<dyn ClientListener>,
+    taps: Arc<WorkspaceTaps>,
+}
 
 impl zc::ClientListener for ListenerBridge {
     fn on_event(&self, event: zc::ClientEvent) {
-        self.0.on_event(event.into());
+        if matches!(event, zc::ClientEvent::WorkspaceChanged { .. }) {
+            self.taps.notify();
+        }
+        self.platform.on_event(event.into());
     }
 }
 
@@ -81,6 +113,7 @@ fn attachment_error(err: CoreError) -> CoreError {
 pub struct CoreClient {
     pub(crate) client: zc::Client,
     pub(crate) dictation: DictationClients,
+    pub(crate) workspace_taps: Arc<WorkspaceTaps>,
 }
 
 #[allow(dead_code)] // consumed in Rust by the layout engine
@@ -108,14 +141,19 @@ impl CoreClient {
         credentials: Credentials,
         listener: Arc<dyn ClientListener>,
     ) -> CoreResult<Arc<Self>> {
+        let workspace_taps = Arc::new(WorkspaceTaps::default());
         let client = zc::Client::new(
             config.into(),
             credentials.into(),
-            Arc::new(ListenerBridge(listener)),
+            Arc::new(ListenerBridge {
+                platform: listener,
+                taps: workspace_taps.clone(),
+            }),
         )?;
         Ok(Arc::new(Self {
             client,
             dictation: Default::default(),
+            workspace_taps,
         }))
     }
 
@@ -186,17 +224,18 @@ impl CoreClient {
             .collect()
     }
 
+    // Host calls run on the client's Tokio runtime: the platform's async
+    // executor has no reactor ("no reactor running" otherwise).
     pub async fn chat_checkpoints(&self, chat_id: String) -> CoreResult<Vec<RunCheckpointView>> {
-        Ok(self
-            .client
-            .chat_checkpoints(&chat_id)
-            .await?
-            .into_iter()
-            .map(Into::into)
-            .collect())
+        let client = self.client.clone();
+        let checkpoints = on_runtime(async move { client.chat_checkpoints(&chat_id).await }).await?;
+        Ok(checkpoints.into_iter().map(Into::into).collect())
     }
     pub async fn create_chat_checkpoint(&self, chat_id: String) -> CoreResult<RunCheckpointView> {
-        Ok(self.client.create_chat_checkpoint(&chat_id).await?.into())
+        let client = self.client.clone();
+        Ok(on_runtime(async move { client.create_chat_checkpoint(&chat_id).await })
+            .await?
+            .into())
     }
     pub async fn rollback_chat(
         &self,
@@ -204,10 +243,13 @@ impl CoreClient {
         checkpoint_id: String,
         client_request_id: Option<String>,
     ) -> CoreResult<String> {
-        self.client
-            .rollback_chat(&chat_id, &checkpoint_id, client_request_id.as_deref())
-            .await
-            .map_err(Into::into)
+        let client = self.client.clone();
+        on_runtime(async move {
+            client
+                .rollback_chat(&chat_id, &checkpoint_id, client_request_id.as_deref())
+                .await
+        })
+        .await
     }
 
     pub fn project(&self, space_id: String) -> Option<ProjectView> {

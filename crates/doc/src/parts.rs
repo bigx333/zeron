@@ -119,6 +119,104 @@ pub enum SubagentStatus {
     Failed,
 }
 
+/// What an orchestration activity row reports to the chat it lands in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ActivityKind {
+    /// A managed task reached a terminal status. `body` is its frozen result.
+    TaskResult,
+    /// A managed task is blocked on a question (`request_id`). `body` is the
+    /// question.
+    TaskInput,
+    /// Another chat's agent wrote here. `body` is the message.
+    Message,
+}
+
+impl ActivityKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskResult => "taskResult",
+            Self::TaskInput => "taskInput",
+            Self::Message => "message",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "taskResult" => Self::TaskResult,
+            "taskInput" => Self::TaskInput,
+            "message" => Self::Message,
+            _ => return None,
+        })
+    }
+}
+
+/// Orchestration activity in a PARENT's transcript: a delegated task's
+/// result or question, or a message from another chat's agent. Written by
+/// the engine as its own `role: System` entry (keyed by the notification's
+/// deterministic id) while the agent receives the same news as a hidden
+/// runtime prompt, so the human reads an attributed row rather than a user
+/// bubble they never typed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatActivity {
+    pub id: String,
+    pub activity: ActivityKind,
+    /// The task's child chat (a task id IS its chat id), or the sender.
+    pub source_chat_id: String,
+    /// The source's title at delivery: the row's fallback when the registry
+    /// no longer knows the chat. A live title wins.
+    pub source_title: String,
+    /// Task rows: the status at delivery.
+    #[serde(default)]
+    pub task_status: Option<zeron_proto::orchestration::TaskStatus>,
+    /// Task questions: the pending request this row asked about.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// Markdown: the result, the question or the message.
+    #[serde(default)]
+    pub body: String,
+    /// `body` was cut short; the source chat holds the whole text.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+impl ChatActivity {
+    /// The row as plain text, for agents reading a transcript (`read_chat`)
+    /// and the runtime prompt that accompanies it.
+    pub fn agent_text(&self) -> String {
+        let title = if self.source_title.trim().is_empty() {
+            self.source_chat_id.as_str()
+        } else {
+            self.source_title.trim()
+        };
+        let head = match self.activity {
+            ActivityKind::TaskResult => format!(
+                "Task \"{title}\" (chat {}) finished: {}.",
+                self.source_chat_id,
+                self.task_status.map_or("Finished", |s| s.label())
+            ),
+            ActivityKind::TaskInput => format!(
+                "Task \"{title}\" (chat {}) needs input.",
+                self.source_chat_id
+            ),
+            ActivityKind::Message => {
+                format!("Message from chat \"{title}\" ({}).", self.source_chat_id)
+            }
+        };
+        let tail = if self.truncated {
+            "\n\n(Shortened; the chat holds the full text.)"
+        } else {
+            ""
+        };
+        if self.body.trim().is_empty() {
+            format!("{head}{tail}")
+        } else {
+            format!("{head}\n\n{}{tail}", self.body)
+        }
+    }
+}
+
 /// One rendered part of an assistant message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -229,6 +327,10 @@ pub enum MessagePart {
         /// source does not rewrite history.
         source_title: String,
     },
+    /// Orchestration activity ([`ChatActivity`]). Its content rides
+    /// dedicated doc fields, never `text`: old desktop builds' unknown-kind
+    /// fallback degrades to an invisible empty part; iOS drops unknown kinds.
+    Activity(ChatActivity),
 }
 
 impl MessagePart {
@@ -242,6 +344,7 @@ impl MessagePart {
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
             | MessagePart::Fork { id, .. } => id,
+            MessagePart::Activity(activity) => &activity.id,
         }
     }
 
@@ -280,6 +383,12 @@ impl MessagePart {
                 source_title,
                 ..
             } => source_chat_id.len() + source_title.len(),
+            MessagePart::Activity(activity) => {
+                activity.source_chat_id.len()
+                    + activity.source_title.len()
+                    + activity.request_id.as_ref().map_or(0, String::len)
+                    + activity.body.len()
+            }
         }
     }
 }
@@ -636,6 +745,9 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
 /// neither, which keeps it idempotent: re-sanitizing a sanitized call is a
 /// fixpoint (the kept keys are themselves kept).
 fn spawn_badge(call: &ToolCall) -> Option<serde_json::Value> {
+    if zeron_proto::chat_refs::zeron_tool(call) == Some("delegate_task") {
+        return delegate_badge(call);
+    }
     if !call.is_subagent_spawn() {
         return None;
     }
@@ -650,6 +762,36 @@ fn spawn_badge(call: &ToolCall) -> Option<serde_json::Value> {
             (!value.is_empty()).then(|| ((*key).to_owned(), serde_json::Value::from(value)))
         })
         .collect();
+    (!kept.is_empty()).then(|| serde_json::Value::Object(kept))
+}
+
+/// A managed delegation keeps the identifiers that link its chip to the
+/// child chat and label it ([`zeron_proto::chat_refs::DELEGATE_INPUT_KEEP`]
+/// plus the target's harness and model), each capped. Never the brief.
+/// Re-sanitizing is a fixpoint like [`spawn_badge`].
+fn delegate_badge(call: &ToolCall) -> Option<serde_json::Value> {
+    use zeron_proto::chat_refs::{DELEGATE_INPUT_KEEP, DELEGATE_TARGET_KEEP};
+    let input = match call {
+        ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. } => input.as_ref()?,
+        _ => return None,
+    };
+    let keep = |value: &serde_json::Value, keys: &[&str]| {
+        keys.iter()
+            .filter_map(|key| {
+                let value = value.get(key)?.as_str()?.trim();
+                let value: String = value.chars().take(512).collect();
+                (!value.is_empty()).then(|| ((*key).to_owned(), serde_json::Value::from(value)))
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>()
+    };
+    let mut kept = keep(input, &DELEGATE_INPUT_KEEP);
+    let target = input
+        .get("target")
+        .map(|target| keep(target, &DELEGATE_TARGET_KEEP))
+        .filter(|target| !target.is_empty());
+    if let Some(target) = target {
+        kept.insert("target".into(), serde_json::Value::Object(target));
+    }
     (!kept.is_empty()).then(|| serde_json::Value::Object(kept))
 }
 
@@ -991,6 +1133,55 @@ mod tests {
             }
         );
         assert_eq!(clean.subagent_model(), None);
+    }
+
+    /// A managed delegation keeps what links its chip to the child and
+    /// labels it; the brief and every other option stay host-local.
+    #[test]
+    fn sanitize_keeps_a_delegations_link_ids_and_drops_its_brief() {
+        let call = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "delegate_task".into(),
+            input: Some(serde_json::json!({
+                "task": "secret brief",
+                "title": "Audit the budget",
+                "client_request_id": "audit-1",
+                "role": "research",
+                "mode": "async",
+                "target": {"harness": "codex", "model": "gpt-5.3-codex", "reasoning": "high"}
+            })),
+        };
+        let clean = sanitize_tool_call(&call);
+        let expected = serde_json::json!({
+            "title": "Audit the budget",
+            "client_request_id": "audit-1",
+            "role": "research",
+            "target": {"harness": "codex", "model": "gpt-5.3-codex"}
+        });
+        assert_eq!(
+            clean,
+            ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: "delegate_task".into(),
+                input: Some(expected),
+            }
+        );
+        assert_eq!(sanitize_tool_call(&clean), clean);
+        let link = zeron_proto::chat_refs::delegate_call(&clean).unwrap();
+        assert_eq!(link.request_id.as_deref(), Some("audit-1"));
+        assert_eq!(link.model.as_deref(), Some("gpt-5.3-codex"));
+        // A brief-only call keeps nothing.
+        let bare = ToolCall::Unknown {
+            name: "mcp__zeron__delegate_task".into(),
+            input: Some(serde_json::json!({ "task": "secret" })),
+        };
+        assert_eq!(
+            sanitize_tool_call(&bare),
+            ToolCall::Unknown {
+                name: "mcp__zeron__delegate_task".into(),
+                input: None,
+            }
+        );
     }
 
     #[test]

@@ -182,6 +182,16 @@ pub fn truncate(
             .collect(),
         code_ranges: flat.code_ranges.iter().map(shown).collect(),
         file_glyphs: flat.file_glyphs.iter().map(shown).collect(),
+        chats: flat
+            .chats
+            .iter()
+            .map(|pill| super::chat_pills::ChatPillSpan {
+                range: shown(&pill.range),
+                icon_slot: shown(&pill.icon_slot),
+                status_slot: shown(&pill.status_slot),
+                ..pill.clone()
+            })
+            .collect(),
         // A formula cut away with its label leaves no slot to paint over.
         math: flat
             .math
@@ -368,6 +378,16 @@ fn with_file_link_glyphs(flat: &FlatText, opts: &RenderOptions) -> FlatText {
             .collect(),
         code_ranges: flat.code_ranges.iter().map(&map_range).collect(),
         file_glyphs: glyphs,
+        chats: flat
+            .chats
+            .iter()
+            .map(|pill| super::chat_pills::ChatPillSpan {
+                range: map_range(&pill.range),
+                icon_slot: map_range(&pill.icon_slot),
+                status_slot: map_range(&pill.status_slot),
+                ..pill.clone()
+            })
+            .collect(),
         math: flat
             .math
             .iter()

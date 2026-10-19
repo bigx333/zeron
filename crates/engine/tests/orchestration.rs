@@ -876,3 +876,426 @@ async fn cancellation_reasons_are_bounded_in_the_registry_with_the_full_result_p
     assert!(!full.truncated);
     core.shutdown().await;
 }
+
+fn comparison_request(prompt: &str) -> RunRequest {
+    RunRequest {
+        prompt: prompt.into(),
+        harness: Some(HarnessId::Mock),
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        cwd: "/tmp".into(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        auto_approve: false,
+        resume: None,
+        attachments: vec![],
+        worktree: None,
+        mcp: None,
+    }
+}
+
+#[tokio::test]
+async fn stopping_a_parent_holds_updates_across_restart_until_the_user_sends() {
+    let dir = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(Semaphore::new(0));
+    let core = assemble(dir.path(), requests.clone(), release.clone());
+    parent(&core, "parent");
+    let rpc = zeron_rpc::memory_client(core.rpc_service());
+    let child = delegate(&rpc, "hold task child", "stop-parent").await;
+    wait_task(&rpc, &child.id, |t| t.status == TaskStatus::Running).await;
+    core.sessions
+        .dispatch(
+            "parent",
+            HarnessId::Mock,
+            comparison_request("You are working on hold task parent"),
+            Some("parent-user".into()),
+        )
+        .await
+        .unwrap();
+    let stop = core
+        .doc_host
+        .queue_command("parent", zeron_doc::SessionCommandPayload::Interrupt {})
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if core
+                .doc_host
+                .open("parent")
+                .unwrap()
+                .doc()
+                .read_commands()
+                .unwrap()
+                .iter()
+                .any(|c| c.id == stop && c.status == zeron_doc::SessionCommandStatus::Applied)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    release.add_permits(1);
+    let done = wait_task(&rpc, &child.id, |t| t.status == TaskStatus::Completed).await;
+    assert!(!done.orchestration.unwrap().task.unwrap().delivered);
+    assert!(
+        core.doc_host
+            .open("parent")
+            .unwrap()
+            .doc()
+            .child_updates_paused()
+    );
+    assert!(
+        !requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.prompt.contains("[Delegated task"))
+    );
+    core.shutdown().await;
+    drop(rpc);
+    drop(core);
+    let core = assemble(dir.path(), requests.clone(), release);
+    let rpc = zeron_rpc::memory_client(core.rpc_service());
+    assert!(
+        core.doc_host
+            .open("parent")
+            .unwrap()
+            .doc()
+            .child_updates_paused()
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.prompt.contains("[Delegated task"))
+    );
+    core.sessions
+        .dispatch(
+            "parent",
+            HarnessId::Mock,
+            comparison_request("Continue"),
+            Some("resume-user".into()),
+        )
+        .await
+        .unwrap();
+    wait_task(&rpc, &child.id, |t| t.delivered).await;
+    assert!(
+        !core
+            .doc_host
+            .open("parent")
+            .unwrap()
+            .doc()
+            .child_updates_paused()
+    );
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.prompt.contains("[Delegated task"))
+            .count(),
+        1
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn stopping_an_idle_parent_does_not_wait_for_a_held_child_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let core = assemble(dir.path(), requests.clone(), Arc::new(Semaphore::new(0)));
+    parent(&core, "parent");
+    let handle = core.doc_host.open("parent").unwrap();
+    handle.doc().set_child_updates_paused(true).unwrap();
+    let report = "task:child:result";
+    handle
+        .doc()
+        .queue_command(&zeron_doc::SessionCommandEntry {
+            id: report.into(),
+            payload: zeron_doc::SessionCommandPayload::Steer {
+                prompt: "Held report".into(),
+                message_id: Some(report.into()),
+            },
+            issued_by: core.device_id.clone(),
+            issued_at: chrono::Utc::now().timestamp_millis(),
+            based_on: None,
+            expires_at: Some(i64::MAX),
+            status: zeron_doc::SessionCommandStatus::Pending,
+            resolution: None,
+        })
+        .unwrap();
+    let stop = core
+        .doc_host
+        .queue_command("parent", zeron_doc::SessionCommandPayload::Interrupt {})
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if handle
+                .doc()
+                .read_commands()
+                .unwrap()
+                .iter()
+                .any(|c| c.id == stop && c.status == zeron_doc::SessionCommandStatus::Applied)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Stop must not wait behind held automatic reports");
+    assert!(
+        handle
+            .doc()
+            .read_commands()
+            .unwrap()
+            .iter()
+            .any(|c| c.id == report && c.status == zeron_doc::SessionCommandStatus::Pending)
+    );
+    assert!(requests.lock().unwrap().is_empty());
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_blocked_async_task_wakes_its_parent_once_with_the_question() {
+    let dir = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let core = assemble(dir.path(), requests.clone(), Arc::new(Semaphore::new(0)));
+    parent(&core, "parent");
+    let rpc = zeron_rpc::memory_client(core.rpc_service());
+    let child = delegate(&rpc, "ask task", "needs-help").await;
+    wait_task(&rpc, &child.id, |t| t.status == TaskStatus::Waiting).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.prompt.contains("needs input"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let count = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.prompt.contains("needs input") && r.prompt.contains("Continue?"))
+        .count();
+    assert_eq!(count, 1);
+    let commands = core
+        .doc_host
+        .open("parent")
+        .unwrap()
+        .doc()
+        .read_commands()
+        .unwrap();
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|c| c.id.starts_with(&format!("task:{}:input:", child.id)))
+            .count(),
+        1
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn concurrent_delegation_enforces_eight_active_children_and_retries_still_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Semaphore::new(0)),
+    );
+    parent(&core, "parent");
+    let rpc = zeron_rpc::memory_client(core.rpc_service());
+    let results=futures::future::join_all((0..9).map(|i| {
+        let rpc=&rpc; async move {
+            rpc.call_as::<Chat>(methods::DELEGATE_TASK,json!({"parentChatId":"parent","task":"hold task","clientRequestId":format!("cap-{i}")})).await
+        }
+    })).await;
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 8);
+    assert!(
+        results
+            .iter()
+            .filter_map(|r| r.as_ref().err())
+            .all(|e| e.to_string().contains("maximum 8"))
+    );
+    let (index, first) = results
+        .iter()
+        .enumerate()
+        .find_map(|(i, r)| r.as_ref().ok().map(|chat| (i, chat)))
+        .unwrap();
+    let retry:Chat=rpc.call_as(methods::DELEGATE_TASK,json!({"parentChatId":"parent","task":"hold task","clientRequestId":format!("cap-{index}")})).await.unwrap();
+    assert_eq!(first.id, retry.id);
+    rpc.call(
+        methods::TASK_CANCEL,
+        json!({"parentChatId":"parent","taskId":first.id}),
+    )
+    .await
+    .unwrap();
+    wait_task(&rpc, &first.id, |t| t.status.is_terminal()).await;
+    let replacement: Chat = rpc
+        .call_as(
+            methods::DELEGATE_TASK,
+            json!({"parentChatId":"parent","task":"hold task","clientRequestId":"replacement"}),
+        )
+        .await
+        .unwrap();
+    assert_ne!(replacement.id, first.id);
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn reading_a_blocking_question_acknowledges_it_before_the_parent_turn_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(Semaphore::new(0));
+    let core = assemble(dir.path(), requests.clone(), release.clone());
+    parent(&core, "parent");
+    core.sessions
+        .dispatch(
+            "parent",
+            HarnessId::Mock,
+            comparison_request("You are working on hold task parent"),
+            Some("parent-user".into()),
+        )
+        .await
+        .unwrap();
+    let rpc = zeron_rpc::memory_client(core.rpc_service());
+    let child = delegate(&rpc, "ask task", "read-question").await;
+    wait_task(&rpc, &child.id, |t| t.status == TaskStatus::Waiting).await;
+    rpc.call(
+        methods::TASK_STATUS,
+        json!({"parentChatId":"parent","taskId":child.id,"acknowledgeInput":true}),
+    )
+    .await
+    .unwrap();
+    let child_handle = core.doc_host.open(&child.id).unwrap();
+    let input = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(request) = child_handle
+                .doc()
+                .read_entries()
+                .unwrap()
+                .into_iter()
+                .flat_map(|e| e.parts)
+                .find_map(|p| match p {
+                    zeron_doc::MessagePart::Input {
+                        request_id,
+                        resolved: false,
+                        ..
+                    } => Some(request_id),
+                    _ => None,
+                })
+            {
+                break request;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Input part eventually reaches the coalesced document sink");
+    assert!(
+        child_handle.doc().task_input_acknowledged(&input),
+        "Returning the blocker must acknowledge its durable question"
+    );
+    release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while core.sessions.turn_in_flight("parent") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !core
+            .doc_host
+            .open("parent")
+            .unwrap()
+            .doc()
+            .child_updates_paused()
+    );
+    let prompts = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.prompt.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(prompts.len(), 2, "{prompts:#?}");
+    assert!(
+        core.doc_host
+            .open("parent")
+            .unwrap()
+            .doc()
+            .read_commands()
+            .unwrap()
+            .iter()
+            .all(|c| !c.id.contains(":input:"))
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn archiving_a_parent_holds_reports_until_an_explicit_new_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(Semaphore::new(0));
+    let core = assemble(dir.path(), requests.clone(), release.clone());
+    parent(&core, "parent");
+    let rpc = zeron_rpc::memory_client(core.rpc_service());
+    let child = delegate(&rpc, "hold task child", "archive-parent").await;
+    wait_task(&rpc, &child.id, |t| t.status == TaskStatus::Running).await;
+    core.workspace.set_chat_archived("parent", true).unwrap();
+    release.add_permits(1);
+    wait_task(&rpc, &child.id, |t| t.status == TaskStatus::Completed).await;
+    assert!(core.workspace.chat("parent").unwrap().unwrap().archived);
+    assert!(
+        core.doc_host
+            .open("parent")
+            .unwrap()
+            .doc()
+            .child_updates_paused()
+    );
+    core.workspace.set_chat_archived("parent", false).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    core.sessions
+        .dispatch(
+            "parent",
+            HarnessId::Mock,
+            comparison_request("Continue"),
+            Some("user-resume".into()),
+        )
+        .await
+        .unwrap();
+    wait_task(&rpc, &child.id, |t| t.delivered).await;
+    let entries = core
+        .doc_host
+        .open("parent")
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap();
+    let report = entries
+        .iter()
+        .find(|e| e.id == format!("task:{}:result", child.id))
+        .unwrap();
+    assert_eq!(report.role, zeron_doc::MessageRole::System);
+    assert!(matches!(
+        report.parts.first(),
+        Some(zeron_doc::MessagePart::Activity(_))
+    ));
+    core.shutdown().await;
+}

@@ -103,7 +103,7 @@ fn fold_into(parent: &mut RenderedMessage, child: RenderedMessage) {
 }
 
 fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMessage {
-    let mut text_parts: Vec<&str> = Vec::new();
+    let mut text_parts: Vec<String> = Vec::new();
     let mut reasoning_parts: Vec<&str> = Vec::new();
     let mut tools = Vec::new();
     let mut pending_input = None;
@@ -112,9 +112,10 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
         match part {
             MessagePart::Text { text, .. } => {
                 if !text.trim().is_empty() {
-                    text_parts.push(text.as_str());
+                    text_parts.push(text.clone());
                 }
             }
+            MessagePart::Activity(activity) => text_parts.push(activity.agent_text()),
             MessagePart::Image { name, .. } => tools.push(format!("image: {name}")),
             MessagePart::Visual { title, .. } => tools.push(format!("visual: {title}")),
             MessagePart::Reasoning { text, .. } => {

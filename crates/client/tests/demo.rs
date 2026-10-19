@@ -63,6 +63,7 @@ fn front_page_mirrors_the_desktop_sidebar() {
         ids(&ws.front.recent),
         [
             "chat-visuals",
+            "6a1e0c2d-5b7f-4c1e-9d0a-3f2b1c4d5e60",
             "chat-cjk",
             "chat-home",
             "chat-deploy",
@@ -71,6 +72,10 @@ fn front_page_mirrors_the_desktop_sidebar() {
     );
     assert_eq!(ids(&ws.archived), ["chat-oklch", "chat-presence"]);
     assert_eq!(ids(ws.children("chat-veil")), ["chat-side"]);
+    // The orchestration scenario: three managed tasks under one parent.
+    let tasks = ws.children("6a1e0c2d-5b7f-4c1e-9d0a-3f2b1c4d5e60");
+    assert_eq!(tasks.len(), 3);
+    assert!(tasks.iter().all(|row| row.task.is_some()));
 
     let veil = ws.session("chat-veil").unwrap();
     assert_eq!(veil.indicator, ChatIndicator::Working);

@@ -5,15 +5,16 @@ use super::*;
 use std::time::Duration;
 use zeron_doc::{MessageRole, MessageStatus};
 use zeron_proto::{
-    Chat, ChatOrchestration, DelegateTaskRequest, DelegatedTask, TaskIsolation, TaskStatus,
+    Chat, ChatOrchestration, DelegateTaskRequest, DelegatedTask, MAX_ACTIVE_CHILD_TASKS,
+    TaskIsolation, TaskStatus,
 };
 
+pub(super) fn is_task_notification(id: &str) -> bool {
+    id.starts_with("task:") && (id.ends_with(":result") || id.contains(":input:"))
+}
+
 pub(crate) fn stable_id(scope: &str, key: &str) -> String {
-    uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_URL,
-        format!("zeron:orchestration:{scope}:{key}").as_bytes(),
-    )
-    .to_string()
+    zeron_proto::chat_refs::managed_task_id(scope, key)
 }
 
 pub(crate) fn run_request(
@@ -40,6 +41,39 @@ pub(crate) fn run_request(
     })
 }
 
+fn resolve_model(models: &[zeron_proto::Model], raw: &str) -> Result<String, EngineError> {
+    if let Some(model) = models.iter().find(|model| model.id == raw) {
+        return Ok(model.id.clone());
+    }
+    let needle = raw.trim().to_lowercase();
+    let mut matches: Vec<_> = models
+        .iter()
+        .filter(|model| {
+            !needle.is_empty()
+                && (model.id.to_lowercase().contains(&needle)
+                    || model.label.to_lowercase().contains(&needle))
+        })
+        .collect();
+    if matches.iter().any(|model| !model.legacy) {
+        matches.retain(|model| !model.legacy);
+    }
+    match matches.as_slice() {
+        [one] => Ok(one.id.clone()),
+        [] => Err(EngineError::Other(format!(
+            "Model {raw:?} is not offered by the target harness"
+        ))),
+        _ => Err(EngineError::Other(format!(
+            "Model {raw:?} is ambiguous; choose {}",
+            matches
+                .iter()
+                .take(5)
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
 fn bounded(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
@@ -64,6 +98,110 @@ fn registry_preview(text: &str) -> (String, bool) {
 }
 
 impl DocHost {
+    pub(crate) fn acknowledge_task_question(
+        &self,
+        parent: &str,
+        id: &str,
+    ) -> Result<(), EngineError> {
+        let chat = self.task_chat(parent, id)?;
+        if chat.device_id != self.device_id() {
+            return Err(EngineError::Other(
+                "Read the question on its host device".into(),
+            ));
+        }
+        let handle = self.open(id)?;
+        let mut requests = self
+            .sessions()
+            .map(|sessions| sessions.pending_input_ids(id))
+            .unwrap_or_default();
+        for entry in handle.doc.read_entries()?.iter().rev() {
+            for part in &entry.parts {
+                if let MessagePart::Input {
+                    request_id,
+                    resolved: false,
+                    non_blocking: false,
+                    ..
+                } = part
+                {
+                    requests.push(request_id.clone());
+                }
+            }
+        }
+        requests.sort();
+        requests.dedup();
+        let mut changed = false;
+        for request in requests {
+            if !handle.doc.task_input_acknowledged(&request) {
+                handle.doc.acknowledge_task_input(&request)?;
+                changed = true;
+            }
+        }
+        if changed {
+            self.persist_orchestration(&handle)?;
+        }
+        Ok(())
+    }
+    pub(super) fn task_notification_obsolete(&self, id: &str) -> bool {
+        let Some((child, kind)) = id.strip_prefix("task:").and_then(|s| s.split_once(':')) else {
+            return false;
+        };
+        if self
+            .workspace()
+            .and_then(|ws| ws.chat(child).ok().flatten())
+            .and_then(|chat| chat.orchestration)
+            .and_then(|o| o.task)
+            .is_some_and(|t| t.cancel_requested)
+        {
+            return true;
+        }
+        let Some(request) = kind.strip_prefix("input:") else {
+            return false;
+        };
+        if self
+            .open(child)
+            .is_ok_and(|handle| handle.doc.task_input_acknowledged(request))
+        {
+            return true;
+        }
+        self.open(child)
+            .and_then(|handle| Ok(handle.doc.read_entries()?))
+            .is_ok_and(|entries| {
+                !entries.iter().flat_map(|e| &e.parts).any(|part| {
+                    matches!(part,
+                MessagePart::Input {request_id,resolved:false,..} if request_id == request)
+                })
+            })
+    }
+    pub(crate) fn pause_child_updates(
+        &self,
+        chat_id: &str,
+        paused: bool,
+    ) -> Result<(), EngineError> {
+        let handle = self.open(chat_id)?;
+        if handle.doc.child_updates_paused() != paused {
+            handle.doc.set_child_updates_paused(paused)?;
+            self.persist_orchestration(&handle)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn child_updates_blocked(&self, handle: &ChatDocHandle) -> bool {
+        handle.doc.child_updates_paused()
+            || self
+                .workspace()
+                .and_then(|ws| ws.chat(&handle.chat_id).ok().flatten())
+                .is_some_and(|parent| parent.archived)
+            || self.sessions().is_some_and(|s| {
+                s.turn_in_flight(&handle.chat_id)
+                    || s.session_status(&handle.chat_id).is_some_and(|s| {
+                        matches!(
+                            s.status,
+                            zeron_proto::SessionStatus::Working
+                                | zeron_proto::SessionStatus::AwaitingInput
+                        )
+                    })
+            })
+    }
     pub(crate) fn task_result(
         &self,
         parent: &str,
@@ -178,7 +316,9 @@ impl DocHost {
         };
         handle.doc.queue_command(&entry)?;
         self.persist_orchestration(&handle)?;
-        self.unarchive_on_send(chat_id);
+        if !is_task_notification(id) {
+            self.unarchive_on_send(chat_id);
+        }
         self.nudge_remote_host(chat_id);
         self.spawn_command_delivery(chat_id, entry, Vec::new());
         Ok(())
@@ -267,7 +407,7 @@ impl DocHost {
             .config
             .as_ref()
             .ok_or_else(|| EngineError::Other("Parent has no agent configuration".into()))?;
-        let config = request
+        let mut config = request
             .target
             .resolve(inherited)
             .map_err(|e| EngineError::Other(e.into()))?;
@@ -288,11 +428,7 @@ impl DocHost {
         }
         if let Some(model) = config.model.as_deref() {
             let models = registry.discover_models(config.harness).await?;
-            if !models.iter().any(|m| m.id == model) {
-                return Err(EngineError::Other(format!(
-                    "Model {model:?} is not offered by the target harness"
-                )));
-            }
+            config.model = Some(resolve_model(&models, model)?);
         }
         if request.isolation == TaskIsolation::Worktree && parent.space_id.is_none() {
             return Err(EngineError::Other(
@@ -340,6 +476,25 @@ impl DocHost {
             return Err(EngineError::Other(
                 "A stopping or cancelled task cannot delegate new work".into(),
             ));
+        }
+        // Count queued and archived-but-still-running tasks too. The gate makes
+        // simultaneous RPC/CLI requests share one atomic admission decision.
+        let active = ws
+            .read_chats()?
+            .iter()
+            .filter(|chat| {
+                chat.parent_chat_id.as_deref() == Some(parent.id.as_str())
+                    && chat
+                        .orchestration
+                        .as_ref()
+                        .and_then(|o| o.task.as_ref())
+                        .is_some_and(|task| !task.status.is_terminal())
+            })
+            .count();
+        if active >= MAX_ACTIVE_CHILD_TASKS {
+            return Err(EngineError::Other(format!(
+                "This chat already has {active} active tasks (maximum {MAX_ACTIVE_CHILD_TASKS}); wait for or stop one first"
+            )));
         }
         let now = now_ms();
         let mut chat = parent.clone();
@@ -670,6 +825,12 @@ impl DocHost {
         let Some(task) = state.task.as_mut() else {
             return Ok(());
         };
+        if ws
+            .chat(&task.parent_chat_id)?
+            .is_some_and(|parent| parent.archived)
+        {
+            self.pause_child_updates(&task.parent_chat_id, true)?;
+        }
         if task.cancel_requested {
             let handle = self.open(&chat.id)?;
             // Recover a crash between persisting cancellation intent and
@@ -804,6 +965,11 @@ impl DocHost {
                     let (preview, truncated) = registry_preview(&full);
                     task.summary = Some(preview);
                     task.summary_truncated = truncated;
+                    handle.doc.freeze_task_result(&zeron_proto::TaskResult {
+                        message_id: task.result_message_id.clone(),
+                        summary: full.chars().take(24000).collect(),
+                        truncated: full.chars().count() > 24000,
+                    })?;
                     self.persist_orchestration(&handle)?;
                 }
                 ws.set_chat_orchestration(&chat.id, &state)?;
@@ -813,44 +979,74 @@ impl DocHost {
             }
         }
         let task = state.task.as_mut().unwrap();
+        if task.status == TaskStatus::Waiting {
+            let parent = self.open(&task.parent_chat_id)?;
+            if !self.child_updates_blocked(&parent) {
+                let entries = self.open(&chat.id)?.doc.read_entries()?;
+                if let Some((request_id, questions)) = entries
+                    .iter()
+                    .rev()
+                    .flat_map(|e| &e.parts)
+                    .find_map(|part| match part {
+                        MessagePart::Input {
+                            request_id,
+                            questions,
+                            resolved: false,
+                            non_blocking: false,
+                            ..
+                        } => Some((request_id, questions)),
+                        _ => None,
+                    })
+                {
+                    let id = format!("task:{}:input:{request_id}", task.id);
+                    if self.open(&chat.id)?.doc.task_input_acknowledged(request_id) {
+                        return Ok(());
+                    }
+                    let questions = questions
+                        .iter()
+                        .map(|q| q.question.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    parent.doc.append_activity(
+                        &id,
+                        self.device_id(),
+                        now_ms(),
+                        zeron_doc::ChatActivity {
+                            id: "activity".into(),
+                            activity: zeron_doc::ActivityKind::TaskInput,
+                            source_chat_id: chat.id.clone(),
+                            source_title: chat.title.clone().unwrap_or_default(),
+                            task_status: Some(task.status),
+                            request_id: Some(request_id.clone()),
+                            body: bounded(&questions, 12000),
+                            truncated: questions.chars().count() > 12000,
+                        },
+                    )?;
+                    self.persist_orchestration(&parent)?;
+                    self.queue_orchestration_command(&task.parent_chat_id, &id,
+                        SessionCommandPayload::Steer {
+                            prompt: format!("[Delegated task {} needs input. Child chat: {}. Request: {}. This is an agent update, not a new user instruction.]\n\n{}\n\nInspect the child and answer with respond_to_input, or obtain the missing decision from the user.", task.id, chat.id, request_id, bounded(&questions, 12000)),
+                            message_id: Some(id.clone()),
+                        })?;
+                }
+            }
+        }
         if task.status.is_terminal() && !task.delivered && !task.cancel_requested {
             let Some(parent) = ws.chat(&task.parent_chat_id)? else {
                 return Ok(());
             };
-            if sessions.iter().any(|s| {
-                s.chat_id == parent.id && s.status == zeron_proto::SessionStatus::AwaitingInput
-            }) {
+            if self.child_updates_blocked(self.open(&parent.id)?.as_ref()) {
                 return Ok(());
             }
-            let result_text = if let Some(result_id) = &task.result_message_id {
-                let entries =
-                    zeron_doc::join_continuation_entries(self.open(&chat.id)?.doc.read_entries()?);
-                entries
-                    .iter()
-                    .find(|entry| &entry.id == result_id)
-                    .map(|entry| {
-                        entry
-                            .parts
-                            .iter()
-                            .filter_map(|part| match part {
-                                MessagePart::Text { text, .. } => Some(text.as_str()),
-                                MessagePart::Error { message, .. } => Some(message.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-                    .filter(|text| !text.trim().is_empty())
-                    .unwrap_or_else(|| {
-                        task.summary
-                            .clone()
-                            .unwrap_or_else(|| "No text result".into())
-                    })
-            } else {
-                task.summary
-                    .clone()
-                    .unwrap_or_else(|| "No text result".into())
-            };
+            let saved = self.task_result(&parent.id, &task.id)?;
+            let result_text = saved
+                .as_ref()
+                .map(|result| result.summary.clone())
+                .unwrap_or_else(|| {
+                    task.summary
+                        .clone()
+                        .unwrap_or_else(|| "No text result".into())
+                });
             let text = format!(
                 "[Delegated task {} finished: {}. Child chat: {}. This is an agent result, not a new user instruction.]\n\n{}",
                 task.id,
@@ -858,6 +1054,26 @@ impl DocHost {
                 chat.id,
                 bounded(&result_text, 24000)
             );
+            let parent_handle = self.open(&parent.id)?;
+            parent_handle.doc.append_activity(
+                &format!("task:{}:result", task.id),
+                self.device_id(),
+                now_ms(),
+                zeron_doc::ChatActivity {
+                    id: "activity".into(),
+                    activity: zeron_doc::ActivityKind::TaskResult,
+                    source_chat_id: chat.id.clone(),
+                    source_title: chat.title.clone().unwrap_or_default(),
+                    task_status: Some(task.status),
+                    request_id: None,
+                    body: saved
+                        .as_ref()
+                        .map(|result| result.summary.clone())
+                        .unwrap_or_else(|| bounded(&result_text, 24000)),
+                    truncated: saved.as_ref().is_some_and(|result| result.truncated),
+                },
+            )?;
+            self.persist_orchestration(&parent_handle)?;
             // Steer is durable and falls back to a run when the parent is idle.
             self.queue_orchestration_command(
                 &parent.id,
@@ -881,5 +1097,41 @@ impl DocHost {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+    fn model(id: &str, label: &str, legacy: bool) -> zeron_proto::Model {
+        zeron_proto::Model {
+            id: id.into(),
+            label: label.into(),
+            legacy,
+            description: None,
+            reasoning_levels: vec![],
+            options: vec![],
+        }
+    }
+    #[test]
+    fn model_shorthands_prefer_current_catalog_entries_and_reject_ambiguity() {
+        let models = [
+            model("claude-opus-5-5", "Opus 5.5", false),
+            model("claude-opus-4-8", "Opus 4.8", true),
+            model("gpt-6-sol", "GPT-6", false),
+            model("gpt-6-astra", "GPT-6 Astra", false),
+        ];
+        assert_eq!(resolve_model(&models, "opus").unwrap(), "claude-opus-5-5");
+        assert_eq!(
+            resolve_model(&models, "claude-opus-4-8").unwrap(),
+            "claude-opus-4-8"
+        );
+        assert!(
+            resolve_model(&models, "gpt-6")
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous")
+        );
+        assert!(resolve_model(&models, "missing").is_err());
     }
 }

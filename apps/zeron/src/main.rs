@@ -30,6 +30,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Manage chats and managed child tasks through the running engine.
+    Chat {
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        command: zeron_mcp::cli::ChatCommand,
+    },
+    Harness {
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        command: zeron_mcp::cli::HarnessCommand,
+    },
+    Model {
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        command: zeron_mcp::cli::ModelCommand,
+    },
+    /// Read the injected orchestration instructions or a command guide chapter.
+    Guide { topic: Option<String> },
     /// Run the engine without a UI (local-only unless a saved session enables sync).
     Headless,
     /// Sign in and enable sync on the next engine start.
@@ -250,6 +271,19 @@ fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
+        Some(Command::Chat { command, json }) => {
+            tokio::runtime::Runtime::new()?.block_on(zeron_mcp::cli::run_chat(command, json))
+        }
+        Some(Command::Harness { command, json }) => {
+            tokio::runtime::Runtime::new()?.block_on(zeron_mcp::cli::run_harness(command, json))
+        }
+        Some(Command::Model { command, json }) => {
+            tokio::runtime::Runtime::new()?.block_on(zeron_mcp::cli::run_model(command, json))
+        }
+        Some(Command::Guide { topic }) => {
+            println!("{}", zeron_mcp::cli::guide(topic.as_deref())?);
+            Ok(())
+        }
         Some(Command::Headless) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {

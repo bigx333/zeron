@@ -132,6 +132,7 @@ impl PiHarness {
         // Process group plus the same env scrubbing the ACP launch applied.
         crate::process::owned::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
+        crate::orchestration::apply_env(&mut cmd, mcp);
         if let Some(dir) = &self.agent_dir {
             cmd.env("PI_CODING_AGENT_DIR", dir);
         }

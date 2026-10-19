@@ -24,6 +24,8 @@ pub(crate) struct Ctx<'a> {
     /// Canvas area the current row's formulas take, in points² (reset per
     /// row): a row is one backing store, so its formulas share a budget.
     pub math_area: f32,
+    /// Chats `@chat:` references and reports resolve against.
+    pub chats: &'a super::chats::ChatDirectory,
 }
 
 /// Formulas zatex rejected, so preparing their rows again (a rebuild, a
@@ -353,10 +355,54 @@ pub(crate) fn prepare_runs(ctx: &mut Ctx, runs: &[InlineRun], kind: TextKind, mu
     let mut paints = Vec::with_capacity(runs.len());
     let mut links: Vec<String> = Vec::new();
     let mut math = Vec::new();
+    let mut badges = Vec::new();
+    // A chat pill: the harness mark in a well at its start, the title, a
+    // tap that opens the chat. Same pill as a sent message's mention chip.
+    let pill_h = chip_h;
+    let pill_pad = (1.0 + (pill_h - 2.0) + ctx.typo.px(5.0), ctx.typo.px(6.0));
     for run in runs {
         let s = &run.style;
         if s.task.is_some() {
             continue; // Lists draw task markers as checkboxes.
+        }
+        if let Some(written) = s.chat.as_deref().filter(|_| s.link.is_none()) {
+            let start = text.len();
+            match ctx.chats.resolve(written) {
+                Some(chat) => {
+                    text.push_str(chat.display_title());
+                    let url = chat.link();
+                    let link = links.iter().position(|l| *l == url).unwrap_or_else(|| {
+                        links.push(url);
+                        links.len() - 1
+                    }) as u16;
+                    let style = ctx.typo.style(Family::Sans, Weight::Medium.max(base_weight), false, size);
+                    badges.push((spans.len(), chat.icon()));
+                    spans.push(Span {
+                        pad_start: pill_pad.0,
+                        pad_end: pill_pad.1,
+                        atomic: true,
+                        ..Span::new(start..text.len(), style.id)
+                    });
+                    paints.push(SpanPaint {
+                        color: ColorRole::Text,
+                        decoration: Decoration::None,
+                        link: Some(link),
+                        chip: false,
+                    });
+                }
+                // A chat this device doesn't know keeps its written token.
+                None => {
+                    text.push_str(&run.text);
+                    spans.push(Span::new(start..text.len(), body.id));
+                    paints.push(SpanPaint {
+                        color: ColorRole::TextSecondary,
+                        decoration: Decoration::None,
+                        link: None,
+                        chip: false,
+                    });
+                }
+            }
+            continue;
         }
         let (content, link) = match &s.image {
             Some(img) => (
@@ -461,7 +507,7 @@ pub(crate) fn prepare_runs(ctx: &mut Ctx, runs: &[InlineRun], kind: TextKind, mu
         paints,
         links,
         chip: ((lh - chip_h) / 2.0, chip_h),
-        badges: Vec::new(),
+        badges,
         math,
     }
 }

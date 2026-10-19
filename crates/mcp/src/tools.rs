@@ -1488,16 +1488,7 @@ impl Tools {
             Ok(chat) => chat.title,
             Err(_) => None,
         };
-        let label = match title {
-            Some(title) if !title.trim().is_empty() => {
-                format!("{} ({})", title.trim(), short(origin_id))
-            }
-            _ => short(origin_id).to_owned(),
-        };
-        format!(
-            "[Message from Zeron chat {label}. Reply to it with the Zeron `send_message` tool, chat {}.]\n\n{text}",
-            origin_id
-        )
+        zeron_proto::chat_refs::agent_message(title.as_deref(), origin_id, text)
     }
 
     /// Pick and perform the delivery the composer would.
@@ -2079,11 +2070,14 @@ mod tests {
         assert_eq!(params["command"]["kind"], "run");
         let prompt = params["command"]["request"]["prompt"].as_str().unwrap();
         assert!(
-            prompt.starts_with("[Message from Zeron chat Beta (chat-bet)"),
+            prompt.starts_with("[Message from Zeron chat Beta (@chat:chat-beta-2)"),
             "{prompt}"
         );
         assert!(prompt.ends_with("please review"));
-        assert!(prompt.contains("tool, chat chat-beta-2.]"), "{prompt}");
+        assert!(
+            prompt.contains("zeron chat tell chat-beta-2 <message>"),
+            "{prompt}"
+        );
         assert_eq!(params["command"]["request"]["cwd"], "/repo/comet");
         assert_eq!(params["command"]["request"]["harness"], "claude-code");
         assert_eq!(params["command"]["request"]["model"], "opus");
@@ -2132,13 +2126,10 @@ mod tests {
             let prompt = writes.last().unwrap().1["command"]["request"]["prompt"]
                 .as_str()
                 .unwrap();
-            prompt
-                .split_once("tool, chat ")
+            zeron_proto::chat_refs::parse_agent_message(prompt)
                 .unwrap()
-                .1
-                .split_once(".]\n\n")
+                .sender_chat_id
                 .unwrap()
-                .0
                 .to_owned()
         };
         assert_eq!(reply_id, second);

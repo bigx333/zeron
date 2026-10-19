@@ -16,9 +16,9 @@
 //! another device POSTs a durable nudge to that device's room (§7 cold-chat delivery);
 //! the host's relay receives it and warm-opens the doc, which drains the queue.
 
-pub(crate) mod orchestration;
 mod history;
 mod history_files;
+pub(crate) mod orchestration;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -854,6 +854,26 @@ impl ChatDocHandle {
         created_at: i64,
     ) -> Result<(), DocError> {
         if self.doc.read_entries()?.iter().any(|e| e.id == message_id) {
+            return Ok(());
+        }
+        if let Some(message) = zeron_proto::chat_refs::parse_agent_message(text)
+            && let Some(sender) = message.sender_chat_id
+        {
+            self.doc.append_activity(
+                message_id,
+                &self.device_id,
+                created_at,
+                zeron_doc::ChatActivity {
+                    id: "activity".into(),
+                    activity: zeron_doc::ActivityKind::Message,
+                    source_chat_id: sender.into(),
+                    source_title: message.sender_label.into(),
+                    task_status: None,
+                    request_id: None,
+                    body: message.body.into(),
+                    truncated: false,
+                },
+            )?;
             return Ok(());
         }
         self.doc.push_message(&SessionMessageEntry {
@@ -4166,6 +4186,7 @@ impl DocHost {
             };
             let earlier_prompt = commands[..at].iter().any(|c| {
                 c.status == SessionCommandStatus::Pending
+                    && !orchestration::is_task_notification(&c.id)
                     && matches!(
                         c.payload,
                         SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
@@ -4723,6 +4744,17 @@ impl DocHost {
         } else {
             None
         };
+        let _child_update_guard = if orchestration::is_task_notification(&entry.id) {
+            self.await_earlier_controls(&handle, &entry.id).await;
+            Some(handle.drain_lock.lock().await)
+        } else {
+            None
+        };
+        if _child_update_guard.is_some() && self.child_updates_blocked(&handle) {
+            return Err(EngineError::Other(
+                "Child updates are held until the parent is available".into(),
+            ));
+        }
         let commands = handle.doc.read_commands()?;
         let messages = handle.doc.read_entries().unwrap_or_default();
         let current_turn_id = messages.last().map(|m| m.id.clone());
@@ -5083,6 +5115,18 @@ impl DocHost {
                 }
                 return;
             };
+            // Serialize automatic delivery with Stop's queue lock, BEFORE the
+            // processed claim. A held update remains retryable after a restart.
+            let _child_update_guard = if orchestration::is_task_notification(&entry.id) {
+                self.await_earlier_controls(handle, &entry.id).await;
+                Some(handle.drain_lock.lock().await)
+            } else {
+                None
+            };
+            if _child_update_guard.is_some() && self.child_updates_blocked(handle) {
+                skipped.insert(entry.id.clone());
+                continue;
+            }
             let messages = handle.doc.read_entries().unwrap_or_default();
             let current_turn_id = messages.last().map(|m| m.id.clone());
             let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
@@ -5327,6 +5371,9 @@ impl DocHost {
         handle: &Arc<ChatDocHandle>,
         entry: &SessionCommandEntry,
     ) -> Option<String> {
+        if orchestration::is_task_notification(&entry.id) {
+            return None; // held, rather than discarded, by a manual Stop
+        }
         let message_id = match &entry.payload {
             SessionCommandPayload::Run { message_id, .. } => message_id.clone(),
             SessionCommandPayload::Steer { message_id, .. } => {
@@ -5348,6 +5395,14 @@ impl DocHost {
         entry: &SessionCommandEntry,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
+        if orchestration::is_task_notification(&entry.id)
+            && self.task_notification_obsolete(&entry.id)
+        {
+            return Ok((
+                SessionCommandStatus::Applied,
+                Some("Child update no longer needs a response".into()),
+            ));
+        }
         if let Some(message_id) = self.cancelled_by_stop(handle, entry) {
             // Still the user's message: it stays in the transcript, unrun.
             let prompt = match &entry.payload {
@@ -5492,16 +5547,25 @@ impl DocHost {
                 Ok((SessionCommandStatus::Applied, None))
             }
             SessionCommandPayload::Steer { prompt, message_id } => {
-                self.deliver_prompt(
-                    sessions,
-                    handle,
-                    prompt,
-                    message_id.clone(),
-                    entry.issued_at,
-                )
-                .await
+                let outcome = self
+                    .deliver_prompt(
+                        sessions,
+                        handle,
+                        prompt,
+                        message_id.clone(),
+                        entry.issued_at,
+                    )
+                    .await?;
+                if !orchestration::is_task_notification(&entry.id)
+                    && !prompt.starts_with("[Message from Zeron chat ")
+                    && outcome.0 == SessionCommandStatus::Applied
+                {
+                    self.pause_child_updates(chat_id, false)?;
+                }
+                Ok(outcome)
             }
             SessionCommandPayload::Interrupt {} => {
+                self.pause_child_updates(chat_id, true)?;
                 self.await_earlier_prompts(sessions, handle, &entry.id)
                     .await;
                 *lock(&handle.stopped_by) = Some(entry.id.clone());
@@ -5512,7 +5576,10 @@ impl DocHost {
                 {
                     let earlier = commands[..at]
                         .iter()
-                        .filter(|c| c.status == SessionCommandStatus::Pending)
+                        .filter(|c| {
+                            c.status == SessionCommandStatus::Pending
+                                && !orchestration::is_task_notification(&c.id)
+                        })
                         .filter_map(|c| match &c.payload {
                             SessionCommandPayload::Run { message_id, .. } => {
                                 Some(message_id.clone())

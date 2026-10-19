@@ -52,6 +52,9 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
@@ -251,7 +254,8 @@ private fun RowHost(
             .pointerTaps(model, d, actions, onLongPress = {
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 menuAt = it
-            }),
+            })
+            .chatLinkActions(model, actions),
     ) {
         model.display.scrollers.forEachIndexed { i, s ->
             val scroll = rememberScrollState()
@@ -274,6 +278,32 @@ private fun RowHost(
         menuAt?.let { at -> RowMenu(state, frame, p, model, at, actions) { menuAt = null } }
     }
 }
+
+/** TalkBack reaches the chats a row names (pills, report sources) as actions. */
+private fun Modifier.chatLinkActions(model: RowModel, actions: TranscriptActions): Modifier {
+    val d = model.display
+    val chats = d.links.filter { it.url.startsWith("zeron-chat:") }.distinctBy { it.url }
+    if (chats.isEmpty()) return this
+    return semantics {
+        customActions = chats.map { l ->
+            CustomAccessibilityAction("Open ${paintedText(d, l).ifEmpty { "chat" }}") {
+                actions.openUrl(l.url)
+                true
+            }
+        }
+    }
+}
+
+/** The text painted inside a link's hit rect (a pill's title). */
+private fun paintedText(d: uniffi.zeron_core.RowDisplay, l: uniffi.zeron_core.LinkHit): String =
+    d.runs
+        .filter { r ->
+            r.scroller == l.scroller &&
+                r.x + 0.5f in (l.x - 1f)..(l.x + l.w + 1f) &&
+                r.baseline - 1f in (l.y - 1f)..(l.y + l.h + 1f)
+        }
+        .joinToString("") { r -> d.text.substring(r.start.toInt(), (r.start + r.len).toInt()) }
+        .trim()
 
 /** Link taps (row coordinates) and the long-press menu. */
 private fun Modifier.pointerTaps(model: RowModel, d: Float, actions: TranscriptActions, onLongPress: (Offset) -> Unit) =

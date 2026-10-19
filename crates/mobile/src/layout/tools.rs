@@ -54,6 +54,8 @@ pub(crate) struct ToolLine {
     pub key: u64,
     pub open: bool,
     pub body: Vec<DetailBlock>,
+    /// A delegation's card opens its child chat.
+    pub link: Option<String>,
 }
 
 pub(crate) struct ToolGroup {
@@ -120,6 +122,13 @@ fn group_summary(thoughts: usize, calls: &[(ToolCall, bool)]) -> String {
         out.replace_range(0..1, &up);
     }
     out
+}
+
+/// A call that starts a child the reader wants in sight: the provider's
+/// subagent spawn, or a managed delegation (`delegate_task`, `zeron chat
+/// spawn`). These share the spawn group's cards (desktop genus).
+pub(crate) fn is_spawn(call: &ToolCall) -> bool {
+    call.is_subagent_spawn() || zeron_proto::chat_refs::delegate_call(call).is_some()
 }
 
 fn tool_icon(call: &ToolCall) -> &'static str {
@@ -794,6 +803,38 @@ impl RowBuilder {
             for (i, part) in parts.iter().enumerate() {
                 let dkey = row_key(&format!("{id}/{}", part.id()));
                 match part {
+                    MessagePart::Tool { call, is_error, resolved, .. } if agents && zeron_proto::chat_refs::delegate_call(call).is_some() => {
+                        // A managed delegation names its child: the live
+                        // title, its status, a tap into it.
+                        let delegate = zeron_proto::chat_refs::delegate_call(call).unwrap_or_default();
+                        let unique = !*is_error
+                            && delegate.title.as_deref().is_some_and(|t| self.delegate_titles.get(t.trim()) == Some(&1));
+                        let child = self
+                            .chat_id
+                            .as_deref()
+                            .and_then(|parent| ctx.chats.delegated(parent, &delegate, unique))
+                            .cloned();
+                        let failed = *is_error || child.as_ref().is_some_and(|c| c.status == super::chats::ChatStatus::Failed);
+                        let running = child.as_ref().map_or(!*resolved && !*is_error, |c| c.status == super::chats::ChatStatus::Working);
+                        let title = child
+                            .as_ref()
+                            .map(|c| c.display_title().to_owned())
+                            .or(delegate.title.clone())
+                            .unwrap_or_else(|| "Task".into());
+                        let color = if failed { ColorRole::Danger } else { ColorRole::TextSecondary };
+                        lines.push(ToolLine {
+                            icon: child.as_ref().map_or_else(|| "tool-bot".to_owned(), super::chats::ChatLabel::icon),
+                            label: prepare_plain(ctx, "Delegated", medium, st.lh, color, WhiteSpace::Pre),
+                            detail: Some(prepare_plain(ctx, &title, medium, st.lh, if failed { ColorRole::Danger } else { ColorRole::Text }, WhiteSpace::Pre)),
+                            badge: None,
+                            failed,
+                            running,
+                            key: dkey,
+                            open: false,
+                            body: Vec::new(),
+                            link: child.map(|c| c.link()),
+                        });
+                    }
                     MessagePart::Tool { call, is_error, resolved, subagent_ref, subagent_status, .. } => {
                         let (label, detail) = zeron_proto::view::tool_chip_content(call);
                         // Subagent lifecycle is distinct from `resolved`: under
@@ -832,6 +873,7 @@ impl RowBuilder {
                             key: dkey,
                             open,
                             body,
+                            link: None,
                         });
                     }
                     MessagePart::Reasoning { text, .. } => {
@@ -859,6 +901,7 @@ impl RowBuilder {
                             key: dkey,
                             open,
                             body,
+                            link: None,
                         });
                     }
                     _ => {}
@@ -1117,6 +1160,16 @@ fn place_agents(t: &ToolGroup, px: Px, x: f32, y: f32, cw: f32, mut out: Option<
         if line.running {
             let s = d(px, 14.0);
             o.widget(WidgetKind::Spinner, (x + cw - d(px, 8.0) - s, card_y + (card_h - s) / 2.0, s, s), None);
+        }
+        if let Some(url) = &line.link {
+            o.links.push(super::display::LinkHit {
+                x,
+                y: card_y,
+                w: cw,
+                h: card_h,
+                url: url.clone(),
+                scroller: o.scroller,
+            });
         }
     }
     h

@@ -5768,12 +5768,14 @@ impl Shell {
                     .sidebar_show_harness
                     .then(|| chat.config.as_ref().map(|c| c.harness))
                     .flatten();
+                // Its tasks and side chats ride under the row, inside its slot.
+                let tree = self.sidebar_tree_block(&chat.id, theme, cx);
                 let height = sidebar_row_height(
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
                     branch.is_some(),
                     change_request.is_some(),
-                );
+                ) + tree.as_ref().map_or(0.0, |(height, _)| *height);
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
                 let jump_slot = visible_slots.get(&chat.id).copied();
@@ -5839,6 +5841,16 @@ impl Shell {
                     theme,
                     cx,
                 );
+                let element = match tree {
+                    Some((_, block)) => div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(element)
+                        .child(block)
+                        .into_any_element(),
+                    None => element,
+                };
                 // The source slot shrinks when its vacancy moves across sections.
                 // Its zero-height anchor still tracks the live activity position.
                 let element = if let Some(origin) = origin {
@@ -6103,12 +6115,13 @@ impl Shell {
                         .sidebar_show_harness
                         .then(|| chat.config.as_ref().map(|c| c.harness))
                         .flatten();
+                    let tree = self.sidebar_tree_block(&chat.id, theme, cx);
                     let height = sidebar_row_height(
                         self.settings.sidebar_compact,
                         self.settings.sidebar_show_project_label,
                         branch.is_some(),
                         change_request.is_some(),
-                    );
+                    ) + tree.as_ref().map_or(0.0, |(height, _)| *height);
                     let jump_label: Option<SharedString> = if jump_hints
                         && let Some(slot) = visible_slots.get(&chat.id).copied()
                     {
@@ -6139,6 +6152,16 @@ impl Shell {
                         theme,
                         cx,
                     );
+                    let element = match tree {
+                        Some((_, block)) => div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .child(element)
+                            .child(block)
+                            .into_any_element(),
+                        None => element,
+                    };
                     let element = div()
                         .id(SharedString::from(format!("session-slot-{}", chat.id)))
                         .debug_selector({

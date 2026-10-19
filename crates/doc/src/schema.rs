@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
-use crate::parts::{MessagePart, MessageStatus, SubagentStatus};
+use crate::parts::{ActivityKind, ChatActivity, MessagePart, MessageStatus, SubagentStatus};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
@@ -100,6 +100,21 @@ struct DocPartJson {
     source_chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_title: Option<String>,
+    /// Orchestration activity (`kind: "activity"`, additive): what happened
+    /// (`taskResult` / `taskInput` / `message`), the source chat in
+    /// `sourceChatId`/`sourceTitle`, the task's status at delivery, the
+    /// pending question's id and the Markdown body. Never `text`, so old
+    /// readers render nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activity_body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    truncated: Option<bool>,
     /// Tool output summary (additive — absent on old rows and old writers;
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,6 +251,22 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             source_title: Some(source_title.clone()),
             ..Default::default()
         },
+        MessagePart::Activity(activity) => DocPartJson {
+            id: activity.id.clone(),
+            kind: "activity".into(),
+            activity: Some(activity.activity.as_str().to_owned()),
+            source_chat_id: Some(activity.source_chat_id.clone()),
+            source_title: Some(activity.source_title.clone()),
+            task_status: activity
+                .task_status
+                .map(serde_json::to_value)
+                .transpose()?
+                .and_then(|value| value.as_str().map(str::to_owned)),
+            request_id: activity.request_id.clone(),
+            activity_body: Some(activity.body.clone()),
+            truncated: activity.truncated.then_some(true),
+            ..Default::default()
+        },
     })
 }
 
@@ -302,6 +333,29 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             id: p.id,
             source_chat_id: p.source_chat_id.unwrap_or_default(),
             source_title: p.source_title.unwrap_or_default(),
+        },
+        // An activity this build can't name, or one without a source, is an
+        // empty text part: garbage never renders as an attributed row.
+        "activity" => match (
+            p.activity.as_deref().and_then(ActivityKind::parse),
+            p.source_chat_id.filter(|id| !id.is_empty()),
+        ) {
+            (Some(activity), Some(source_chat_id)) => MessagePart::Activity(ChatActivity {
+                id: p.id,
+                activity,
+                source_chat_id,
+                source_title: p.source_title.unwrap_or_default(),
+                task_status: p
+                    .task_status
+                    .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok()),
+                request_id: p.request_id,
+                body: p.activity_body.unwrap_or_default(),
+                truncated: p.truncated.unwrap_or(false),
+            }),
+            _ => MessagePart::Text {
+                id: p.id,
+                text: String::new(),
+            },
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -437,6 +491,51 @@ impl SessionDoc {
         }
         self.doc.commit();
         Ok(())
+    }
+
+    /// Cheap existence check by entry id: reads each message's `id` scalar,
+    /// never materializing the transcript.
+    pub fn has_message(&self, message_id: &str) -> bool {
+        let messages = self.doc.get_list("messages");
+        (0..messages.len()).any(|i| {
+            matches!(
+                messages.get(i),
+                Some(loro::ValueOrContainer::Container(loro::Container::Map(map)))
+                    if matches!(
+                        map.get("id"),
+                        Some(loro::ValueOrContainer::Value(LoroValue::String(s)))
+                            if s.as_str() == message_id
+                    )
+            )
+        })
+    }
+
+    /// Append orchestration activity as one complete `System` entry with id
+    /// `entry_id`: the notification's deterministic command/message id
+    /// (`task:{id}:result`, `task:{id}:input:{requestId}`, …), so the hidden
+    /// prompt that carries the same news never also lands as a user bubble.
+    /// Idempotent: `Ok(false)` when any entry already has that id.
+    pub fn append_activity(
+        &self,
+        entry_id: &str,
+        device_id: &str,
+        created_at: i64,
+        activity: ChatActivity,
+    ) -> Result<bool, DocError> {
+        if self.has_message(entry_id) {
+            return Ok(false);
+        }
+        self.push_message(&SessionMessageEntry {
+            id: entry_id.to_owned(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Activity(activity)],
+            created_at,
+            device_id: device_id.to_owned(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })?;
+        Ok(true)
     }
 
     /// Replace a conversation in one committed CRDT transaction. The host
@@ -914,10 +1013,17 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     for (key, value) in [
         ("sourceChatId", &doc_part.source_chat_id),
         ("sourceTitle", &doc_part.source_title),
+        ("activity", &doc_part.activity),
+        ("taskStatus", &doc_part.task_status),
+        ("requestId", &doc_part.request_id),
+        ("activityBody", &doc_part.activity_body),
     ] {
         if let Some(value) = value {
             map.insert(key, value.as_str())?;
         }
+    }
+    if let Some(truncated) = doc_part.truncated {
+        map.insert("truncated", truncated)?;
     }
     if let Some(output) = &doc_part.output {
         map.insert("output", output.as_str())?;
@@ -1483,6 +1589,95 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, MessageRole::System);
         assert_eq!(entries[0].parts, vec![seam]);
+    }
+
+    fn task_activity() -> ChatActivity {
+        ChatActivity {
+            id: "activity".into(),
+            activity: ActivityKind::TaskResult,
+            source_chat_id: "child".into(),
+            source_title: "Review the merge RPC".into(),
+            task_status: Some(zeron_proto::orchestration::TaskStatus::WaitingForChildren),
+            request_id: None,
+            body: "All **green**.".into(),
+            truncated: true,
+        }
+    }
+
+    #[test]
+    fn activity_appends_once_and_round_trips_through_the_doc() {
+        let doc = SessionDoc::init("parent").unwrap();
+        let activity = task_activity();
+        assert!(
+            doc.append_activity("task:child:result", "dev", 7, activity.clone())
+                .unwrap()
+        );
+        // The deterministic id makes a retry, or the hidden prompt's own
+        // user-message write, a no-op.
+        assert!(
+            !doc.append_activity("task:child:result", "dev", 8, activity.clone())
+                .unwrap()
+        );
+        assert!(doc.has_message("task:child:result"));
+        assert!(!doc.has_message("task:other:result"));
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, MessageRole::System);
+        assert_eq!(entries[0].created_at, 7);
+        assert_eq!(entries[0].parts, vec![MessagePart::Activity(activity.clone())]);
+        // The doc field names are the additive contract; `text` stays absent
+        // so old readers render an empty part.
+        let json = serde_json::to_value(to_doc_part(&MessagePart::Activity(activity)).unwrap())
+            .unwrap();
+        assert_eq!(json["kind"], "activity");
+        assert_eq!(json["activity"], "taskResult");
+        assert_eq!(json["sourceChatId"], "child");
+        assert_eq!(json["taskStatus"], "waiting_for_children");
+        assert_eq!(json["activityBody"], "All **green**.");
+        assert_eq!(json["truncated"], true);
+        assert!(json.get("text").is_none());
+        // A question row keeps its request id.
+        let input = ChatActivity {
+            activity: ActivityKind::TaskInput,
+            task_status: Some(zeron_proto::orchestration::TaskStatus::Waiting),
+            request_id: Some("req-1".into()),
+            truncated: false,
+            ..task_activity()
+        };
+        doc.append_activity("task:child:input:req-1", "dev", 9, input.clone())
+            .unwrap();
+        assert_eq!(
+            doc.read_entries().unwrap()[1].parts,
+            vec![MessagePart::Activity(input)]
+        );
+    }
+
+    #[test]
+    fn unknown_or_sourceless_activity_degrades_to_empty_text() {
+        for bad in [
+            serde_json::json!({"kind":"activity","id":"x","activity":"taskResult"}),
+            serde_json::json!({"kind":"activity","id":"x","activity":"taskResult","sourceChatId":""}),
+            serde_json::json!({"kind":"activity","id":"x","activity":"vanished","sourceChatId":"c"}),
+        ] {
+            assert!(matches!(
+                from_doc_part(serde_json::from_value(bad).unwrap()),
+                MessagePart::Text { ref text, .. } if text.is_empty()
+            ));
+        }
+        // An unknown status still renders the row, without a status.
+        let part = from_doc_part(
+            serde_json::from_value(serde_json::json!({
+                "kind":"activity","id":"x","activity":"message","sourceChatId":"c",
+                "taskStatus":"evaporated","activityBody":"hi"
+            }))
+            .unwrap(),
+        );
+        let MessagePart::Activity(activity) = part else {
+            panic!("expected activity");
+        };
+        assert_eq!(activity.task_status, None);
+        assert_eq!(activity.body, "hi");
+        assert!(activity.agent_text().starts_with("Message from chat \"c\" (c)."));
     }
     use zeron_proto::{AgentEvent, ToolCall};
 

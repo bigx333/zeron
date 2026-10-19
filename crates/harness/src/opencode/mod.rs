@@ -661,6 +661,7 @@ impl Server {
             }
         }
         crate::compose_child_path(&mut cmd, exe);
+        crate::orchestration::apply_env(&mut cmd, mcp);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }

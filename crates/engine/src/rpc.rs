@@ -1710,6 +1710,55 @@ where
 /// The transcript watch as delta frames (`zeron_doc::transcript_delta`): a
 /// full `reset` first, then only changed entries per commit — the whole-Vec
 /// serialization here was the per-tick cost that scaled with transcript size.
+fn legacy_activity_frame(
+    frame: &mut serde_json::Value,
+    lengths: &mut std::collections::HashMap<(String, String), usize>,
+) {
+    if frame.get("reset").is_some() {
+        lengths.clear();
+    }
+    for key in ["reset", "upsert"] {
+        let Some(entries) = frame.get_mut(key).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for row in entries {
+            let entry = if key == "upsert" {
+                &mut row["entry"]
+            } else {
+                row
+            };
+            let entry_id = entry["id"].as_str().unwrap_or_default().to_owned();
+            let Some(parts) = entry["parts"].as_array_mut() else {
+                continue;
+            };
+            for part in parts {
+                if part["kind"] != "activity" {
+                    continue;
+                }
+                let id = part["id"].as_str().unwrap_or("activity").to_owned();
+                let text = serde_json::from_value::<zeron_doc::ChatActivity>(part.clone())
+                    .map(|activity| activity.agent_text())
+                    .unwrap_or_default();
+                lengths.insert((entry_id.clone(), id.clone()), text.len());
+                *part = serde_json::json!({"kind":"text","id":id,"text":text});
+            }
+        }
+    }
+    if let Some(entries) = frame
+        .get_mut("replayBaseline")
+        .and_then(|v| v.get_mut("entries"))
+        .and_then(|v| v.as_object_mut())
+    {
+        for ((entry, part), length) in lengths {
+            if let Some(parts) = entries.get_mut(entry).and_then(|v| v.as_object_mut())
+                && let Some(value) = parts.get_mut(part)
+            {
+                *value = serde_json::json!(length);
+            }
+        }
+    }
+}
+
 fn doc_messages_stream(
     rx: watch::Receiver<crate::doc_host::TranscriptSnapshot>,
     doc: std::sync::Arc<zeron_doc::SessionDoc>,
@@ -2408,6 +2457,10 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::WATCH_DOC_MESSAGES => {
+                let activity_v1 = params
+                    .get("activityV1")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 // Opt-in: older viewports retain the full-reset contract.
                 let opening_tail = params
                     .get("openingTail")
@@ -2427,10 +2480,14 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                     doc_messages_stream(handle.watch_messages(), handle.doc_arc())
                 };
+                let mut legacy_lengths = std::collections::HashMap::new();
                 Ok(RpcReply::Stream(
                     stream
-                        .map(move |frame| {
+                        .map(move |mut frame| {
                             let _held = &interest;
+                            if !activity_v1 {
+                                legacy_activity_frame(&mut frame, &mut legacy_lengths);
+                            }
                             frame
                         })
                         .boxed(),
@@ -5365,5 +5422,72 @@ mod context_usage_tests {
         remote.clear_context_usage().unwrap();
         tx.send_replace(crate::doc_host::TranscriptSnapshot::default());
         assert!(stream.next().await.unwrap()["contextUsage"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod activity_compat_tests {
+    use super::*;
+    use zeron_doc::{
+        ActivityKind, ChatActivity, MessagePart, MessageRole, MessageStatus, SessionMessageEntry,
+        TranscriptBaseline, TranscriptFrame, TranscriptUpdate,
+    };
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "kind")]
+    enum LegacyPart {
+        #[serde(rename = "text")]
+        Text { id: String, text: String },
+    }
+    fn entry() -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: "report".into(),
+            role: MessageRole::System,
+            created_at: 1,
+            device_id: "host".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+            parts: vec![MessagePart::Activity(ChatActivity {
+                id: "activity".into(),
+                activity: ActivityKind::TaskResult,
+                source_chat_id: "child".into(),
+                source_title: "Review".into(),
+                task_status: Some(zeron_proto::TaskStatus::Completed),
+                request_id: None,
+                body: "Checked the diff".into(),
+                truncated: false,
+            })],
+        }
+    }
+    #[test]
+    fn old_viewers_receive_readable_text_and_compatible_replay_watermarks() {
+        let entry = entry();
+        let mut value = serde_json::to_value(TranscriptUpdate {
+            frame: TranscriptFrame::reset(&[entry.clone()]),
+            context_usage: None,
+            replay_baseline: Some(TranscriptBaseline::capture(&[entry])),
+        })
+        .unwrap();
+        let mut lengths = std::collections::HashMap::new();
+        legacy_activity_frame(&mut value, &mut lengths);
+        let LegacyPart::Text { id, text } =
+            serde_json::from_value(value["reset"][0]["parts"][0].clone()).unwrap();
+        assert_eq!(id, "activity");
+        assert!(text.contains("Checked the diff"));
+        assert_eq!(
+            value["replayBaseline"]["entries"]["report"]["activity"],
+            text.len()
+        );
+        serde_json::from_value::<TranscriptUpdate>(value).unwrap();
+        let mut delta = serde_json::json!({"upsert":[],"append":[],"remove":[],"count":1});
+        legacy_activity_frame(&mut delta, &mut lengths);
+        assert!(delta.get("replayBaseline").is_none());
+        serde_json::from_value::<TranscriptUpdate>(delta).unwrap();
+        let mut backfill = serde_json::json!({"upsert":[],"append":[],"remove":[],"count":1,"replayBaseline":{"entries":{"report":{"activity":0}}}});
+        legacy_activity_frame(&mut backfill, &mut lengths);
+        assert_eq!(
+            backfill["replayBaseline"]["entries"]["report"]["activity"],
+            text.len()
+        );
     }
 }

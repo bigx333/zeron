@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use zeron_proto::{
-    Chat, ChatIndicator, ContextTransfer, DelegatedTask, TaskIsolation, TaskRole, TaskStatus,
+    Chat, ContextTransfer, DelegatedTask, TaskIsolation, TaskRole,
 };
 
 use crate::motion::{self, MotionSpec};
@@ -35,51 +35,8 @@ const SUMMARY_LINES: usize = 4;
 
 // ── Model ──────────────────────────────────────────────────────────────
 
-/// How a task's status reads at a glance — its mark in the icon slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Mark {
-    Queued,
-    Working,
-    WaitingOnTasks,
-    NeedsInput,
-    Stopping,
-    /// Completed, result not yet sent to the parent.
-    Ready,
-    /// Completed and its result sent.
-    Sent,
-    Failed,
-    Cancelled,
-    Interrupted,
-}
-
-impl Mark {
-    fn terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Ready | Self::Sent | Self::Failed | Self::Cancelled | Self::Interrupted
-        )
-    }
-}
-
-/// `stopping`: a stop this window asked for that no chats frame has
-/// confirmed yet.
-pub(super) fn mark_for(task: &DelegatedTask, stopping: bool) -> Mark {
-    if (task.cancel_requested || stopping) && !task.status.is_terminal() {
-        return Mark::Stopping;
-    }
-    match task.status {
-        TaskStatus::Queued => Mark::Queued,
-        TaskStatus::Running => Mark::Working,
-        TaskStatus::Waiting => Mark::NeedsInput,
-        TaskStatus::WaitingForChildren => Mark::WaitingOnTasks,
-        // A stop suppresses delivery: nothing is owed any more.
-        TaskStatus::Completed if task.delivered || task.cancel_requested => Mark::Sent,
-        TaskStatus::Completed => Mark::Ready,
-        TaskStatus::Failed => Mark::Failed,
-        TaskStatus::Cancelled => Mark::Cancelled,
-        TaskStatus::Interrupted => Mark::Interrupted,
-    }
-}
+pub(super) use crate::chat_pill::{Mark, mark_for};
+use crate::chat_pill::{mark_element, mark_tone};
 
 /// The status word in the detail.
 pub(super) fn status_text(task: &DelegatedTask, stopping: bool) -> &'static str {
@@ -390,72 +347,6 @@ impl TaskLaneState {
 }
 
 // ── Elements ───────────────────────────────────────────────────────────
-
-fn dot(color: gpui::Hsla) -> AnyElement {
-    div()
-        .size(px(6.0))
-        .rounded_full()
-        .bg(color)
-        .into_any_element()
-}
-
-fn mark_element(
-    key: String,
-    mark: Mark,
-    view: gpui::EntityId,
-    theme: &Theme,
-    cx: &mut App,
-) -> AnyElement {
-    match mark {
-        Mark::Queued => div()
-            .size(px(7.0))
-            .rounded_full()
-            .border_1()
-            .border_color(theme.text_muted.opacity(0.7))
-            .into_any_element(),
-        Mark::Working => {
-            loaders::mini_glyph_spinner(format!("{key}-working"), 2.0, theme.glyph, view, cx)
-                .into_any_element()
-        }
-        Mark::WaitingOnTasks => {
-            loaders::mini_mono_spinner(format!("{key}-children"), 2.0, theme.text_muted, view, cx)
-                .into_any_element()
-        }
-        Mark::Stopping => {
-            loaders::mini_mono_spinner(format!("{key}-stopping"), 2.0, theme.warning, view, cx)
-                .into_any_element()
-        }
-        Mark::NeedsInput => dot(spaces::status_dot_color(
-            ChatIndicator::AwaitingInput,
-            theme,
-        )),
-        Mark::Ready => icon(icons::CHECK)
-            .size(px(12.0))
-            .text_color(spaces::status_dot_color(ChatIndicator::Completed, theme))
-            .into_any_element(),
-        Mark::Sent => icon(icons::CHECK)
-            .size(px(12.0))
-            .text_color(theme.text_muted)
-            .into_any_element(),
-        Mark::Failed => dot(spaces::status_dot_color(ChatIndicator::Errored, theme)),
-        Mark::Cancelled => icon(icons::CLOSE)
-            .size(px(10.0))
-            .text_color(theme.text_faint)
-            .into_any_element(),
-        Mark::Interrupted => dot(theme.warning.opacity(0.7)),
-    }
-}
-
-/// The status tone of the detail's status word.
-fn mark_tone(mark: Mark, theme: &Theme) -> gpui::Hsla {
-    match mark {
-        Mark::NeedsInput => theme.accent,
-        Mark::Ready => theme.success,
-        Mark::Failed => theme.danger,
-        Mark::Stopping | Mark::Interrupted => theme.warning,
-        _ => theme.text_muted,
-    }
-}
 
 /// The settle's wash, by how the task ended.
 fn settle_tone(mark: Mark, theme: &Theme) -> gpui::Hsla {
@@ -1717,6 +1608,7 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_proto::TaskStatus;
 
     fn task(status: TaskStatus) -> DelegatedTask {
         serde_json::from_value(serde_json::json!({

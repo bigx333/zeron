@@ -333,6 +333,82 @@ Shared by the native apps:
 - `CoreClient.cancelTask(parentChatId:taskId:)`, `mergeChat(sourceChatId:) -> transferId`,
   `forkSession(sourceChatId:) -> chatId`.
 
+## Transcript activity, chat pills and the sidebar tree
+
+PR #608's presentation, carried onto the task engine: who is speaking in a parent's
+transcript is never ambiguous, every chat the transcript names is one tap away, and a
+parent's work is visible from the sidebar without children taking top-level rows. Captures:
+`docs/screenshots/orchestration-activity/`.
+
+**Data.** The engine writes a task's result and question, and a message from another chat's
+agent, as a typed `role: System` entry carrying `MessagePart::Activity(ChatActivity)`
+(`crates/doc/src/parts.rs`): `activity` (`taskResult` / `taskInput` / `message`),
+`sourceChatId`, `sourceTitle` (fallback only), `taskStatus`, `requestId`, `body` (Markdown),
+`truncated`. `SessionDoc::append_activity` is idempotent on the notification's deterministic
+id. Doc fields never use `text`, so old readers show nothing. Transcripts from older hosts
+keep their text headers (`[Delegated task … finished: …]`, `[Message from Zeron chat …]`);
+`zeron_proto::chat_refs` parses them, and every surface draws them as the same rows.
+
+**Chat pills.** `@chat:<id>` in prose — a full id, or at least 8 hex digits, optionally
+followed by `…` — resolves exactly, then by a unique case-insensitive prefix. A known chat
+draws as a pill: harness mark, live title (a trailing "(Codex)" naming its own harness is
+dropped), live status mark on desktop. An unknown chat keeps its written token on mobile and
+reads "Unknown chat" on desktop; neither opens anything. Code spans that are exactly one
+reference upgrade; link text and fences never do. Copy and selection read the written token.
+- Desktop (`markdown/chat_pills.rs`): the pill is reserved slot spaces around the title, so
+  the shaped line fixes its geometry. An overlay paints the mark and status and takes the
+  click. A title, harness or resolution change re-flattens; a status change only repaints.
+- Mobile: the pill is the mention-chip badge (`brand-<harness>` icon well) with a
+  `zeron-chat:<full id>` link. The layout thread resolves from the workspace snapshot, which
+  it hears about through a Rust-side tap on `WorkspaceChanged`. Rows rebuild only when what
+  their references resolve to changed. No FFI changed.
+
+**Reports.** One report row: the activity glyph, the source's pill, and what it did
+("finished", "failed", "was stopped", "was interrupted", "asked a question", "wrote"). A
+one-line preview sits under it while folded. Unfolded: the Markdown body (at most 40 lines or
+6 KB; the source chat holds the rest) on a rail hanging off the glyph, then `Open task` /
+`Open chat`, and "Shortened…" when cut. On desktop, adjacent reports merge into one row under
+a summary ("2 tasks finished · 1 question asked · 1 message"). On mobile, reports stay
+separate rows and fold like tool groups, so platforms reuse the disclosure animation.
+
+*Questions.* A question row never says "needs an answer" and never offers "Answer". Clients
+can't see which request a task is blocked on: a later question may wait before its report
+reaches this transcript. So no evidence supports "this row is the open question". The row
+says what happened. Whether the task waits for input now is live elsewhere: the desktop
+pill's status mark, the sidebar tree, and the lanes card or tasks sheet. `Open task` leads to
+the child, where the waiting question is.
+
+**Spawn groups.** Zeron's `delegate_task` (any harness's MCP spelling) and `zeron chat spawn`
+join the provider's subagent spawns as one always-visible group. Each delegation names its
+child with the live pill (desktop: "Delegated [pill] Research · Own worktree · model ↗";
+mobile: a card with the harness mark and a spinner while the child works). A call links its
+child only on evidence that names exactly one:
+1. its request key, which is authoritative (a keyed call whose child isn't there stays
+   unlinked);
+2. otherwise, a title that exactly one of the parent's tasks and exactly one keyless,
+   unfailed call carry.
+
+Order is never evidence. The doc keeps the call's title, request key, role, isolation and
+target harness/model (`sanitize_tool_call`), never the brief.
+
+**Sidebar tree (desktop).** A chat with live children gets a slim line under its row: "3
+tasks, 1 side chat", the sidebar's running pill with the count of working descendants, and an
+accent dot with the count waiting for input. It unfolds (the sidebar's `COLLAPSE` disclosure)
+into child rows: status mark, harness mark, fading title, and the time or a status word.
+Nested tasks indent under the task that delegated them, to four levels. Rows open the chat.
+
+**Navigation.** Desktop opens a task or side chat beside the conversation and any other chat
+in the main view (⌘ forces the main view). iOS pushes the chat (`openRelated`), and Android
+navigates to it. The child's lineage row leads back up, and the lanes card or tasks sheet is
+the inspectable tree.
+
+**Accessibility and motion.**
+- iOS: a pill's link speaks its title, with the hint "Opens the chat".
+- Android: chat links are TalkBack custom actions ("Open {title}").
+- Desktop: report disclosures tween with `TOOL_FOLD` from the measured body height, and new
+  reports ease in once with `FADE_IN`. History replays never animate, and all of it snaps
+  under reduced motion.
+
 ## Motion (desktop catalog, reduced motion snaps)
 
 | Moment | Spec | Mechanics |

@@ -11,7 +11,7 @@ registry, document command queue, harness events and native clients.
 | Standalone and batch sessions, cross-provider messaging, waits, interrupt | Existing `create_chat(s)`, `send_message(s)`, `wait_for_turn`, `wait_for_any`, `interrupt_chat`. |
 | Questions and approvals | Existing `list_pending_inputs`, `get_chat`, `respond_to_input`; task waits return when a child needs input. |
 | Managed delegated work | `delegate_task`, `task_status`, `task_cancel`, `list_tasks`; role, inherited provider/model/options/permissions, shared or isolated checkout. |
-| Async completion | Child host publishes an immutable result and queues an attributed parent notification with a deterministic command/message id. Parent can be active or idle. |
+| Async completion | Child host publishes an immutable result and queues an attributed parent notification with a deterministic command/message id. Delivery waits until the parent is between turns and honors Stop. |
 | Completion barriers | Child tool/subagent completion never completes a root turn. Managed tasks wait for root completion and their managed descendants and result-delivery turns. |
 | Idempotent task creation | Parent-scoped `client_request_id`, deterministic task id, fingerprint conflict detection, deterministic launch/result commands. |
 | Cancellation | Stop child and managed descendants, pause queued work, preserve transcripts and worktrees; suppress completion delivery. |
@@ -28,18 +28,64 @@ registry, document command queue, harness events and native clients.
 T3 combines MCP tool schemas with shared provider instructions in
 [`orchestrationInstructions.ts`](https://github.com/pingdotgg/t3code/blob/9077e818d836ec6e9cc373d7469034cccc593a5a/packages/provider-core/src/server/orchestrationInstructions.ts).
 Zeron similarly shares [one instruction source](../crates/proto/src/orchestration_instructions.md)
-between MCP initialization and the engine. The engine includes it on the first
-normal prompt of each runtime, including a resumed runtime, for every harness.
-It is app context rather than stored user text. Idle and native-command starts
-leave guidance pending for the first normal warm send; subsequent warm sends
-do not repeat it. Hosts without an injected Zeron MCP server do not advertise
-unavailable tools. User delegation restrictions remain authoritative.
+between MCP initialization and the engine. Claude Code receives it through
+`--append-system-prompt`; Codex receives `developerInstructions` on both start
+and resume. Other harnesses receive app context on the first normal prompt of
+each runtime, including a resumed runtime. Idle and native-command starts leave
+that fallback pending. User text stored in the transcript stays unchanged.
+The engine also exposes its CLI path, originating chat/device and IPC port to
+agent processes; Codex's sandboxed shell receives explicit environment overrides.
+MCP remains available alongside the CLI. User delegation restrictions remain
+authoritative.
 
 Guidance distinguishes managed tasks from ordinary conversations, live model
 discovery, shared/worktree isolation, async completion, bounded waits, pending
 questions, retry IDs, and checkpoint recovery. Each delegated review round uses
 a new task with the original brief and previous findings, rather than messaging
 the backing child chat and treating its frozen result as a new review result.
+
+## Agent integration
+
+The integration borrows selected ideas from [PR #608](https://github.com/zeronsh/zeron/pull/608)
+at `0b5418d85213bb59382d5dd75d9860e78850527a`, retaining Zeron's managed-task,
+provider-continuity and checkpoint engine.
+
+Automatic child reports and blocking-question updates wait until the parent is
+between turns. A manual Stop durably pauses them until an explicit user send is
+accepted; process restart or unarchiving does not lift the pause. An archived
+parent stays archived, and automatic commands never unarchive it. A blocking
+question has a deterministic notification id per request. Parent-scoped task
+reads and waits acknowledge questions they return, so completing the parent's
+turn does not generate a second wake for an already-observed blocker. A question
+answered or acknowledged while its update is held cannot later wake the parent.
+
+A report is a typed `MessagePart::Activity` in a System transcript entry, paired
+with a hidden runtime prompt using the same message id. Retries cannot duplicate
+the row. Agent messages carry full sender ids and use the same attributed row.
+Activity text is retained in portable provider handoffs and MCP transcript reads.
+Transcript watches opt into structured activity with `activityV1: true`; older
+readers receive attributed plain text, including compatible replay watermarks.
+The final published task body freezes before delivery, including when the
+parent is stopped; later edits or rewinds cannot replace the result.
+
+The host admits at most eight nonterminal tasks per parent, counting queued and
+archived-but-running children. Admission is serialized with creation, and retry
+receipts are checked before the cap, so a successful request remains retryable
+at capacity. Model shorthands resolve against the live catalog: exact ids win;
+otherwise a unique current model wins over legacy matches. Ambiguous names fail
+with candidate ids. `orchestration-activity-v1` advertises these host behaviors;
+capability discovery reports the child limit only for hosts advertising it.
+
+`zeron chat spawn --prompt 'self-contained brief' --request-id <key>` invokes the
+same managed-delegation implementation as MCP. `chat task`, `tasks`, `cancel`,
+`wait`, `output`, `tell`, `show`, `log`, `list`, `answer`, `interrupt`, `archive`,
+`fork`, `merge`, `checkpoints`, `checkpoint` and `restore` share the existing tool
+and engine policy. Managed operations require the injected parent origin;
+ordinary chat inspection works from a terminal. Waits on an owned task include
+its managed descendants, while ordinary chat waits observe the current turn.
+`--json` emits structured output; timeouts are nonzero exits and never cancel
+work. `--prompt-file -` and `--message-file -` read bounded input from stdin.
+`zeron guide [chats|environments|notifications|history]` explains the contracts.
 
 ## Task lifecycle and ownership
 
@@ -78,8 +124,8 @@ checkout; dirty files remain in the parent checkout.
 
 ## Portable context policy
 
-Only visible user/assistant text is transferred. Reasoning, raw tool inputs and
-outputs, approval state and provider-native session state are not
+Visible user/assistant text and attributed orchestration activity are transferred.
+Other System metadata, reasoning, raw tool inputs and outputs, approval state and provider-native session state are not
 copied into portable artifacts. Local attachments remain owned by their host.
 The recent conversation is bounded to 48,000 characters, on Unicode boundaries,
 and records truncation. Native slash commands retain their leading command and
@@ -180,7 +226,8 @@ Rust libraries. iOS source parsing
 passes; a Mac Catalyst UIKit type-check reports no diagnostics in the new UI,
 but unrelated voice dependencies prevent a clean whole-app check. This machine
 has command-line tools rather than full Xcode, so no iOS simulator/device run was
-performed. Android device/runtime validation is also still outstanding.
+performed. At that migration checkpoint Android runtime validation was also
+outstanding; the PR #608 review captures now include an Android emulator run.
 
 `crates/engine/tests/history.rs` additionally covers lazy native forks at an older
 selected turn, provider reactivation with only missing context after restart,
@@ -191,7 +238,7 @@ a shared checkout, including parked background work in an idle chat.
 JSON-RPC adapter against a control-only fixture, including a paginated native
 fork and rejection of a missing source boundary without starting a process.
 
-The reviewed migration passes 12 history integration tests, all 12
+The reviewed migration passes 12 history integration tests, all 18
 orchestration and 7 side-chat regressions, 15 session unit tests, 39 Codex adapter
 tests (4 ignored), and 3 native-history adapter tests. Document (153), protocol
 (85), client (26) and MCP (42) unit suites also pass. History checks include first-turn
@@ -207,8 +254,8 @@ download failure in the unchanged installer fixture; it passes in the clean
 review checkout. The full desktop
 suite's attachment-test abort also remains. These runs are not reported as clean.
 Android's final debug APK builds with both native ABIs. iOS parsing and the
-limited UIKit check pass for the edited sources; full Xcode and device/emulator
-runtime verification are still unavailable.
+limited UIKit check pass for the edited sources; full Xcode and iOS runtime
+verification are still unavailable.
 
 The review loop additionally checks native resume fallback context, exclusion of
 queued future messages from bootstraps, completed native boundaries across
@@ -227,3 +274,14 @@ point remains available in History.
 Undo expiry compares checkpoint timestamps from the host only. It waits until the
 returned recovery point is present, then retires Undo after a newer non-recovery
 checkpoint; clock skew on a viewer cannot prematurely hide the receipt.
+
+The PR #608 integration adds regressions for Stop across restart, an idle Stop
+with a held report, blocking-question delivery and read acknowledgment, archived
+parents, concurrent admission at the child limit, shorthand ambiguity, native
+instruction channels, agent CLI routing, activity handoff and old transcript
+readers. Its backend review run passes 593 engine unit tests (5 ignored), 18
+orchestration integration tests and 45 MCP unit tests. The question-read test also
+covers acknowledgment before the coalesced input part reaches the document.
+`cargo check --workspace --tests --locked --offline` and a full desktop binary
+build pass. Eight CLI smoke checks exercise help, guide chapters and failures,
+bounded waits, and refusal to spawn a managed task without an injected origin.

@@ -34,7 +34,16 @@ pub(crate) struct DemoChat {
     pub seen: bool,
     pub archived: bool,
     pub parent: Option<&'static str>,
+    /// A managed task: its status, role, and whether its result was sent.
+    pub task: Option<(zeron_proto::TaskStatus, zeron_proto::TaskRole, bool)>,
 }
+
+/// The orchestration scenario: a parent that delegated three tasks — one
+/// reported, one asking, one at work — and names them in its reply.
+pub(crate) const ORCH_PARENT: &str = "6a1e0c2d-5b7f-4c1e-9d0a-3f2b1c4d5e60";
+pub(crate) const ORCH_AUDIT: &str = "a0d17b55-1c2e-4f3a-8b9c-0d1e2f3a4b5c";
+pub(crate) const ORCH_REVIEW: &str = "7e71e3a9-2b3c-4d5e-8f60-718293a4b5c6";
+pub(crate) const ORCH_DESIGN: &str = "de5197c0-3c4d-4e5f-9061-728394a5b6c7";
 
 const MIN: i64 = 60_000;
 const HOUR: i64 = 60 * MIN;
@@ -61,7 +70,9 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         seen: true,
         archived: false,
         parent: None,
+        task: None,
     };
+    use zeron_proto::{TaskRole, TaskStatus};
     vec![
         DemoChat {
             branch: Some("veil-fade"),
@@ -241,6 +252,67 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 VPS,
                 "Presence beat coalescing",
                 "Batched to one beat per 25s.",
+            )
+        },
+        // Orchestration: last, so the pinned and sectioned demo keeps its order.
+        DemoChat {
+            last_ago_ms: 4 * MIN,
+            created_ago_ms: 3 * HOUR,
+            seen: false,
+            model: "claude-opus-5",
+            ..chat(
+                ORCH_PARENT,
+                Some("space-zeron"),
+                MAC,
+                "Port PR 608 presentation",
+                "Two tasks reported; the review is asking about receipts.",
+            )
+        },
+        DemoChat {
+            parent: Some(ORCH_PARENT),
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            last_ago_ms: 30 * MIN,
+            created_ago_ms: 2 * HOUR,
+            task: Some((TaskStatus::Completed, TaskRole::Research, true)),
+            ..chat(
+                ORCH_AUDIT,
+                Some("space-zeron"),
+                MAC,
+                "Audit the handoff budget",
+                "The budget holds at 24,000 characters.",
+            )
+        },
+        DemoChat {
+            parent: Some(ORCH_PARENT),
+            status: Some(SessionStatus::AwaitingInput),
+            last_ago_ms: 12 * MIN,
+            created_ago_ms: 2 * HOUR,
+            task: Some((TaskStatus::Waiting, TaskRole::Review, false)),
+            ..chat(
+                ORCH_REVIEW,
+                Some("space-zeron"),
+                MAC,
+                "Review the merge receipts",
+                "Should a restore write a receipt too?",
+            )
+        },
+        DemoChat {
+            parent: Some(ORCH_PARENT),
+            status: Some(SessionStatus::Working),
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            last_ago_ms: MIN,
+            created_ago_ms: 2 * HOUR,
+            task: Some((TaskStatus::Running, TaskRole::Design, false)),
+            ..chat(
+                ORCH_DESIGN,
+                Some("space-zeron"),
+                MAC,
+                "Design the mobile report rows",
+                "Folding reports like tool groups.",
             )
         },
     ]
@@ -441,7 +513,26 @@ pub(crate) fn seed(
             last_seen_at: Some(ms(if demo.seen { last } else { last - MIN })),
             room_gen: Some(2),
             parent_chat_id: demo.parent.map(str::to_owned),
-            orchestration: None,
+            orchestration: demo.task.map(|(status, role, delivered)| zeron_proto::ChatOrchestration {
+                task: Some(zeron_proto::DelegatedTask {
+                    id: demo.id.into(),
+                    parent_chat_id: demo.parent.unwrap_or_default().into(),
+                    role,
+                    isolation: zeron_proto::TaskIsolation::Worktree,
+                    base_ref: None,
+                    status,
+                    prompt: demo.title.into(),
+                    request_fingerprint: demo.id.into(),
+                    created_at: now - demo.created_ago_ms,
+                    updated_at: now - demo.last_ago_ms,
+                    summary: status.is_terminal().then(|| demo.preview.into()),
+                    summary_truncated: false,
+                    result_message_id: None,
+                    delivered,
+                    cancel_requested: false,
+                }),
+                fork: None,
+            }),
         };
         doc.upsert_chat(&chat)?;
         if let Some(status) = demo.status {

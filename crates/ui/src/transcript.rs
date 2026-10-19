@@ -55,6 +55,10 @@ use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::theme::Theme;
 use zeron_syntax::LanguageId as Lang;
 
+mod activity;
+mod spawns;
+pub use activity::ActivityItem;
+
 // ---------------------------------------------------------------------------
 // Constants (mugen ports)
 // ---------------------------------------------------------------------------
@@ -389,8 +393,11 @@ pub struct ToolItem {
 /// every driver decodes its spawn tool into. These stay out of the
 /// collapsible "Called N tools" wrap so a running subagent is visible
 /// without opening the fold.
+///
+/// Managed delegations (`delegate_task`, `zeron chat spawn`) belong to the
+/// same genus: they start a child the reader wants in sight.
 fn is_agent_call(call: &ToolCall) -> bool {
-    call.is_subagent_spawn()
+    call.is_subagent_spawn() || zeron_proto::chat_refs::delegate_call(call).is_some()
 }
 
 /// The chip's GENUS is the call itself, never the ref: docs written before
@@ -1105,6 +1112,11 @@ pub enum RowKind {
         source_chat_id: SharedString,
         source_title: SharedString,
     },
+    /// Orchestration reports: a task's result or question, another chat's
+    /// message. Adjacent reports share one row (see [`activity`]).
+    Activity {
+        items: Arc<Vec<ActivityItem>>,
+    },
 }
 
 fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
@@ -1360,6 +1372,11 @@ pub fn rows_for_entry(
         // Lifted before the mention projection, so a comment body's own
         // Markdown never lands in the bubble.
         let (body, badges) = crate::badges::split(&parsed.text);
+        // An orchestration report an older host wrote as a user message: the
+        // task or chat is reporting, not the person speaking.
+        if let Some(item) = ActivityItem::from_legacy_text(&entry.id, &body, parse) {
+            return vec![activity::activity_row(entry, item, Some(entry.created_at))];
+        }
         let body = agent_message_display(&body);
         // Chips stand in for their attachments: those leave the strip, and a
         // chip carries its upload's path for its progress and, for an image,
@@ -1735,6 +1752,10 @@ pub fn rows_for_entry(
                             compact_fold: None,
                         });
                     }
+                    MessagePart::Activity(activity) => {
+                        let item = ActivityItem::from_activity(&entry.id, activity, parse);
+                        rows.push(activity::activity_row(entry, item, None));
+                    }
                     // Tools and thoughts are grouped by the outer arms;
                     // nothing reaches here.
                     MessagePart::Tool { .. } | MessagePart::Reasoning { .. } => {}
@@ -1822,7 +1843,10 @@ pub fn rows_for_entry(
         && !matches!(last.kind, RowKind::ForkMarker { .. })
     {
         last.timestamp = Some(entry.created_at);
-        last.copy_text = assistant_copy_text(entry);
+        // A report copies its own body.
+        if !matches!(last.kind, RowKind::Activity { .. }) {
+            last.copy_text = assistant_copy_text(entry);
+        }
         last.version ^= 1 << 62;
     }
     rows
@@ -3622,6 +3646,27 @@ pub struct Transcript {
     /// recently (click "Show full output" after a diff → see the output).
     blob_fetch_order: HashMap<SharedString, u64>,
     blob_fetch_counter: u64,
+    /// Every chat id the rows name (pills, report sources), sorted.
+    chat_refs: Vec<String>,
+    /// `AppState::link_roots_revision` the pill layout was last checked at.
+    chat_refs_revision: u64,
+    /// The rows' references changed since the last check.
+    chat_refs_dirty: bool,
+    /// What the references resolved to (ids, titles, harnesses) when pills
+    /// were last flattened.
+    chat_refs_fingerprint: u64,
+    /// Measured natural heights of report bodies and report groups, written
+    /// by paint probes; disclosure tweens read them as endpoints.
+    activity_heights: HashMap<SharedString, Rc<Cell<f32>>>,
+    /// Reports already on screen in this attach, and when live ones arrived.
+    activity_seen: HashSet<SharedString>,
+    activity_arrivals: HashMap<SharedString, Instant>,
+    /// This frame's pill wiring, built once per render for every row.
+    frame_chat_ui: Option<crate::markdown::chat_pills::ChatUi>,
+    /// Delegation tool parts → their child chats ([`spawns`]), and the
+    /// (rows, chats) revisions they were paired at.
+    delegate_links: HashMap<String, SharedString>,
+    delegate_links_key: Option<(u64, u64, usize)>,
     _observe: Subscription,
     _text_changes: Subscription,
 }
@@ -3647,6 +3692,10 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// A chat named in the transcript (a pill, a report's source, a spawn
+    /// line): open it beside this one, or in the main view when asked
+    /// (⌘-click).
+    OpenChat { chat_id: String, main_view: bool },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -3918,6 +3967,16 @@ impl Transcript {
             blob_details: HashMap::new(),
             blob_fetch_order: HashMap::new(),
             blob_fetch_counter: 0,
+            chat_refs: Vec::new(),
+            chat_refs_revision: 0,
+            chat_refs_dirty: false,
+            chat_refs_fingerprint: 0,
+            activity_heights: HashMap::new(),
+            activity_seen: HashSet::new(),
+            activity_arrivals: HashMap::new(),
+            frame_chat_ui: None,
+            delegate_links: HashMap::new(),
+            delegate_links_key: None,
             _observe: observe,
             _text_changes: text_changes,
         };
@@ -5003,6 +5062,9 @@ impl Transcript {
             self.historical_markdown.clear();
             self.user_folds.clear();
             self.user_heights.clear();
+            self.activity_heights.clear();
+            self.activity_seen.clear();
+            self.activity_arrivals.clear();
             self.compact_fold_heights.clear();
             self.compact_fold_settle = None;
             self.user_hold_token = self.user_hold_token.wrapping_add(1);
@@ -5091,6 +5153,7 @@ impl Transcript {
                     .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
             )
         };
+        activity::merge_activity_rows(&mut new_rows);
 
         let baseline = self
             .chat_id
@@ -5191,6 +5254,12 @@ impl Transcript {
         // live tool group; treating it as history prevents a whole existing
         // task tree from reanimating on every chat switch.
         let replay_baseline = self.veil_attach_pending && !entries_empty;
+        self.track_activity_arrivals(&new_rows, replay_baseline || entries_empty);
+        let chat_refs = Self::collect_chat_refs(&new_rows);
+        if chat_refs != self.chat_refs {
+            self.chat_refs = chat_refs;
+            self.chat_refs_dirty = true;
+        }
         if replay_baseline {
             // Retain explicit user pins, but never resume an old arrival or
             // closing animation when revisiting the retained transcript.
@@ -7670,6 +7739,7 @@ impl Transcript {
                     workspace_root: workspace_root.clone(),
                     code,
                     math: crate::settings::math_style(cx),
+                    chats: self.frame_chat_ui.clone(),
                 };
                 let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
                 render::render_block(
@@ -7741,6 +7811,7 @@ impl Transcript {
                     workspace_root: workspace_root.clone(),
                     code,
                     math: crate::settings::math_style(cx),
+                    chats: self.frame_chat_ui.clone(),
                 };
                 if seed_history && let Some(veil) = &veil {
                     let historical = &self.historical_markdown[&row.id];
@@ -7823,6 +7894,9 @@ impl Transcript {
             }
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
+            RowKind::Activity { items } => {
+                self.render_activity(&row.id, items, &theme, window, cx)
+            }
         };
         // Diagram fences this row just requested start rendering after layout.
         self.ensure_diagram_worker(cx);
@@ -8286,7 +8360,7 @@ impl Transcript {
                 // Spawn chips never expand — the subagent doc is the record
                 // of what the tool did, and an inline body would only repeat
                 // it. The whole chip is the "open that doc" click instead.
-                if is_spawn_link(tool) {
+                if is_spawn_link(tool) || spawns::delegation(tool).is_some() {
                     return None;
                 }
                 // Among fetched blobs, the most recently REQUESTED one wins —
@@ -8308,7 +8382,11 @@ impl Transcript {
         // always answers "what exactly was this call?", output or not.
         let invocations: Vec<Option<Arc<ToolDetail>>> = tools
             .iter()
-            .map(|tool| tool.invocation.clone().filter(|_| !is_spawn_link(tool)))
+            .map(|tool| {
+                tool.invocation
+                    .clone()
+                    .filter(|_| !is_spawn_link(tool) && spawns::delegation(tool).is_none())
+            })
             .collect();
         // Fetch affordance under each open detail whose full payload is still
         // sidecar-only: `(ref, label)`. Diff offered first (the richer
@@ -8637,6 +8715,17 @@ impl Transcript {
                 let continuation_reveal =
                     tool_connector_continuation(connector_progress.get(ix + 1).copied());
                 let row_height = row_heights[ix];
+                // A managed delegation names its child with the live pill;
+                // the line opens the child beside this chat.
+                if !collapses && let Some(call) = spawns::delegation(tool) {
+                    return self.render_delegation(
+                        tool,
+                        &call,
+                        SharedString::from(format!("{row_id}#t{ix}")),
+                        theme,
+                        cx,
+                    );
+                }
                 // Spawn chips are LINKS, not accordions: the click opens the
                 // subagent's transcript as a right-pane tab (the shell hosts
                 // the surface — the chip only announces which doc it indexes).
@@ -10410,6 +10499,9 @@ impl Render for Transcript {
             .borrow_mut()
             .retain_rows(&self.rendered_rows);
         self.rendered_rows.clear();
+        self.refresh_chat_ref_layout(cx);
+        self.refresh_delegate_links(cx);
+        self.frame_chat_ui = self.chat_ui(cx);
         let compact_mode = crate::settings::transcript_compact_mode(cx);
         if self.compact_mode != compact_mode {
             self.compact_mode = compact_mode;

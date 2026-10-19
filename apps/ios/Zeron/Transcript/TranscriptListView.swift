@@ -124,6 +124,9 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     /// An attachment's picture, for an image chip or host-path link opened
     /// full size. Throws why it can't be shown.
     var imageFetcher: ((String) async throws -> UIImage)?
+    /// A chat the transcript names (a pill, a report's source, "Open task"):
+    /// the session navigates to it.
+    var openChat: ((String) -> Void)?
 
     // MARK: Runway (desktop transcript.rs `OwnTurnAnchor`)
     //
@@ -675,6 +678,13 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
 
     func rowView(_ view: RowView, open url: URL) {
         guard let vc = findViewController() else { return }
+        if url.scheme == "zeron-chat" {
+            let id = String(url.absoluteString.dropFirst("zeron-chat:".count))
+            guard !id.isEmpty else { return }
+            UISelectionFeedbackGenerator().selectionChanged()
+            openChat?(id)
+            return
+        }
         // An image chip opens its upload full size, as its thumbnail did.
         if url.scheme == "zeron-preview" {
             guard let reference = URLComponents(url: url, resolvingAgainstBaseURL: false)?

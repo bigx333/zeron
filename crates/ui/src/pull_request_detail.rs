@@ -1251,6 +1251,7 @@ fn rich_text(
         workspace_root: None,
         code: None,
         math,
+        chats: None,
         copy: Some(crate::markdown::render::CopyUi {
             handler: Rc::new(|_, code, _, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()))

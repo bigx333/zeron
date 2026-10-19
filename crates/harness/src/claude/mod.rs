@@ -232,6 +232,9 @@ impl ClaudeHarness {
         ]
         .map(str::to_owned)
         .into();
+        if let Some(instructions) = crate::orchestration::instructions(request.mcp.as_ref()) {
+            args.extend(["--append-system-prompt".into(), instructions.into()]);
+        }
         if let Some(model) = model_arg(request) {
             args.push("--model".into());
             args.push(model);
@@ -271,6 +274,7 @@ impl ClaudeHarness {
     fn build_command(&self, exe: &PathBuf, request: &RunRequest) -> Command {
         let mut cmd = Command::new(exe);
         crate::compose_child_path(&mut cmd, exe);
+        crate::orchestration::apply_env(&mut cmd, request.mcp.as_ref());
         cmd.args(Self::launch_args(request));
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
@@ -1556,6 +1560,43 @@ mod tests {
 #[cfg(test)]
 mod mcp_injection_tests {
     use super::*;
+
+    #[test]
+    fn app_guidance_uses_the_native_instruction_channel_on_start_and_resume() {
+        let mut request = RunRequest {
+            prompt: "user text".into(),
+            harness: Some(HarnessId::ClaudeCode),
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            cwd: "/tmp".into(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            resume: None,
+            attachments: vec![],
+            worktree: None,
+            mcp: Some(zeron_proto::McpServer {
+                name: "zeron".into(),
+                ..Default::default()
+            }),
+        };
+        for resume in [None, Some("saved-session".into())] {
+            request.resume = resume;
+            let args = ClaudeHarness::launch_args(&request);
+            let index = args
+                .iter()
+                .position(|arg| arg == "--append-system-prompt")
+                .unwrap();
+            assert_eq!(args[index + 1], zeron_proto::ORCHESTRATION_INSTRUCTIONS);
+            assert_eq!(request.prompt, "user text");
+        }
+        request.mcp = None;
+        assert!(
+            !ClaudeHarness::launch_args(&request)
+                .iter()
+                .any(|arg| arg == "--append-system-prompt")
+        );
+    }
 
     #[test]
     fn mcp_config_arg_spells_the_server_the_way_the_cli_reads_it() {

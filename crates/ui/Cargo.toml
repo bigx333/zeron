@@ -76,6 +76,10 @@ required-features = ["account-pool-fixture"]
 name = "task-lanes-fixture"
 required-features = ["appshots-fixture"]
 
+[[example]]
+name = "orchestration-activity-fixture"
+required-features = ["appshots-fixture"]
+
 [dependencies]
 zeron-voice-media.workspace = true
 zeron-voice-session.workspace = true

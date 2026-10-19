@@ -262,7 +262,7 @@ fn formula_with(
 }
 
 /// The advance of Geist's NBSP in ems: the unit a slot is measured in.
-fn nbsp_em() -> f32 {
+pub(crate) fn nbsp_em() -> f32 {
     static NBSP_EM: OnceLock<f32> = OnceLock::new();
     *NBSP_EM.get_or_init(|| {
         crate::typography::bundled_font_faces()
@@ -463,6 +463,7 @@ pub(crate) fn display_flat(
         links: Vec::new(),
         code_ranges: Vec::new(),
         file_glyphs: Vec::new(),
+        chats: Vec::new(),
         math: vec![MathSlot {
             range,
             formula,

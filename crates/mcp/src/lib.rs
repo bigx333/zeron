@@ -17,6 +17,7 @@
 //! environment. Every send from such an agent is then attributed to its
 //! originating chat, and a chat can never message itself.
 
+pub mod cli;
 mod http;
 mod jsonrpc;
 pub use http::{HttpConfig, run as run_http, serve_http};

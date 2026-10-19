@@ -1920,6 +1920,7 @@ impl SkillsPage {
             workspace_root: None,
             code: None,
             math: crate::settings::math_style(cx),
+            chats: None,
             copy: Some(crate::markdown::render::CopyUi {
                 handler: Rc::new(|_, code, _, cx| {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()))

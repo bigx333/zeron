@@ -95,6 +95,8 @@ pub(crate) enum Content {
     Working { since_ms: Option<i64>, streaming: bool },
     /// An agent visual: its height comes from its worker.
     Visual(Arc<crate::visual::VisualSlot>),
+    /// An orchestration report (see [`super::activity`]).
+    Activity(super::activity::ActivityRow),
 }
 
 /// A width-independent row: identity, top gap class and prepared content.
@@ -173,6 +175,9 @@ struct EntryState {
     entry: Arc<SessionMessageEntry>,
     sig: u64,
     rows: Vec<Placed>,
+    /// Chat ids the entry names (reports, `@chat:` references): its rows
+    /// rebuild when what those resolve to changes.
+    refs: Arc<Vec<String>>,
 }
 
 /// Builds rows incrementally across snapshots.
@@ -191,6 +196,33 @@ pub(crate) struct RowBuilder {
     /// Visual rows' links to their workers, by visual id (kept across
     /// rebuilds: the worker holds the same slot).
     pub visual_slots: HashMap<String, Arc<crate::visual::VisualSlot>>,
+    /// Text parts that read differently once their chats resolve
+    /// differently: a reparse can't be skipped on equal source alone.
+    chat_parts: HashMap<String, u64>,
+    /// The chat this transcript is, so a delegation finds its child.
+    pub chat_id: Option<String>,
+    /// How many keyless, unfailed delegation calls carry each title: a
+    /// title two calls share names neither.
+    pub(crate) delegate_titles: HashMap<String, usize>,
+}
+
+/// Keyless, unfailed delegation calls per title, across the transcript.
+fn delegate_titles(entries: &[Arc<SessionMessageEntry>]) -> HashMap<String, usize> {
+    let mut titles = HashMap::new();
+    for entry in entries {
+        for part in &entry.parts {
+            let MessagePart::Tool { call, is_error: false, .. } = part else {
+                continue;
+            };
+            if let Some(call) = zeron_proto::chat_refs::delegate_call(call)
+                && call.request_id.is_none()
+                && let Some(title) = call.title
+            {
+                *titles.entry(title.trim().to_owned()).or_default() += 1;
+            }
+        }
+    }
+    titles
 }
 
 pub(crate) fn quick_hash(s: &str) -> u64 {
@@ -207,13 +239,40 @@ impl RowBuilder {
     /// Rows for `input`, reusing every row whose source is unchanged.
     pub fn build(&mut self, ctx: &mut Ctx, input: &TranscriptInput) -> Vec<Placed> {
         let mut out: Vec<Placed> = Vec::with_capacity(self.entries.len() * 2 + 4);
+        self.delegate_titles = delegate_titles(&input.entries);
+        let titles_sig = {
+            use std::hash::{Hash, Hasher};
+            let mut titles: Vec<(&String, &usize)> = self.delegate_titles.iter().collect();
+            titles.sort();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            titles.hash(&mut h);
+            h.finish()
+        };
         let mut live_entries: HashSet<&str> = HashSet::with_capacity(input.entries.len());
         let mut live_parts: HashSet<String> = HashSet::new();
         let mut prev_role: Option<MessageRole> = None;
         for entry in &input.entries {
             live_entries.insert(entry.id.as_str());
             let first = out.is_empty();
-            let sig = self.entry_sig(entry, first, prev_role);
+            let refs = self
+                .entries
+                .get(&entry.id)
+                .filter(|s| Arc::ptr_eq(&s.entry, entry))
+                .map(|s| s.refs.clone())
+                .unwrap_or_else(|| Arc::new(super::chats::entry_chat_refs(entry)));
+            let mut chat_sig = if refs.is_empty() {
+                0
+            } else {
+                ctx.chats.fingerprint(refs.iter().map(String::as_str))
+            };
+            // Delegation cards name their children: they follow this chat's
+            // children as they arrive, rename and settle.
+            if let Some(parent) = self.chat_id.as_deref()
+                && entry.parts.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if zeron_proto::chat_refs::delegate_call(call).is_some()))
+            {
+                chat_sig ^= (ctx.chats.children_fingerprint(parent) ^ titles_sig).rotate_left(17) | 1;
+            }
+            let sig = self.entry_sig(entry, first, prev_role) ^ chat_sig.rotate_left(3);
             let reuse = self
                 .entries
                 .get(&entry.id)
@@ -229,6 +288,16 @@ impl RowBuilder {
                     rows
                 }
                 None => {
+                    // A text part naming chats re-prepares when they read
+                    // differently, though its source didn't move.
+                    if chat_sig != 0 {
+                        for part in &entry.parts {
+                            let pkey = format!("{}#{}", entry.id, part.id());
+                            if self.chat_parts.insert(pkey.clone(), chat_sig).is_some_and(|old| old != chat_sig) {
+                                self.parts.remove(&pkey);
+                            }
+                        }
+                    }
                     let rows = self.entry_rows(ctx, entry, first, prev_role, &mut live_parts);
                     self.entries.insert(
                         entry.id.clone(),
@@ -236,6 +305,7 @@ impl RowBuilder {
                             entry: entry.clone(),
                             sig,
                             rows: rows.clone(),
+                            refs,
                         },
                     );
                     rows
@@ -248,6 +318,7 @@ impl RowBuilder {
         }
         self.entries.retain(|id, _| live_entries.contains(id.as_str()));
         self.parts.retain(|id, _| live_parts.contains(id));
+        self.chat_parts.retain(|id, _| live_entries.contains(id.split('#').next().unwrap_or_default()));
         self.thoughts.retain(|id, _| live_parts.contains(id));
 
         // Optimistic sends not yet echoed by the host.
@@ -343,6 +414,12 @@ impl RowBuilder {
                 .collect::<Vec<_>>()
                 .join("\n");
             let gap = if first { Gap::First } else { Gap::Turn };
+            // A report an older host wrote as a user message: the task or
+            // chat is reporting, not the person speaking.
+            if let Some(report) = super::activity::Report::from_legacy(&text) {
+                rows.push(Placed { core: Arc::new(self.activity_row(ctx, &entry.id, "legacy", &report)), gap });
+                return rows;
+            }
             rows.push(Placed { core: Arc::new(self.user_row(ctx, &entry.id, &text, false)), gap });
             return rows;
         }
@@ -356,7 +433,7 @@ impl RowBuilder {
             let id = format!("{}#g{}", entry.id, group_ix);
             *group_ix += 1;
             let gap = gap_for(rows, false);
-            let agents = tools.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if call.is_subagent_spawn()));
+            let agents = tools.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if super::tools::is_spawn(call)));
             let row = this.tool_row(ctx, &entry.id, &id, tools, streaming && tail, agents);
             rows.push(Placed { core: Arc::new(row), gap });
             tools.clear();
@@ -367,9 +444,9 @@ impl RowBuilder {
                 // Consecutive tools and thoughts share a group; subagent
                 // spawns never share one with ordinary tools (desktop genus).
                 MessagePart::Tool { call, .. } => {
-                    let spawn = call.is_subagent_spawn();
+                    let spawn = super::tools::is_spawn(call);
                     let genus_flip = tools.iter().any(|p| match p {
-                        MessagePart::Tool { call, .. } => call.is_subagent_spawn() != spawn,
+                        MessagePart::Tool { call, .. } => super::tools::is_spawn(call) != spawn,
                         _ => spawn,
                     });
                     if genus_flip {
@@ -378,7 +455,7 @@ impl RowBuilder {
                     tools.push(part);
                 }
                 MessagePart::Reasoning { text, .. } if !text.trim().is_empty() => {
-                    if tools.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if call.is_subagent_spawn())) {
+                    if tools.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if super::tools::is_spawn(call))) {
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                     }
                     live_parts.insert(format!("{}#{}", entry.id, part.id()));
@@ -446,6 +523,11 @@ impl RowBuilder {
                             let text = format!("Forked from {source_title}");
                             rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "arrow.triangle.branch", ColorRole::TextTertiary, &text)), gap });
                         }
+                        MessagePart::Activity(activity) => {
+                            let gap = gap_for(&rows, false);
+                            let report = super::activity::Report::from_activity(activity);
+                            rows.push(Placed { core: Arc::new(self.activity_row(ctx, &entry.id, &activity.id, &report)), gap });
+                        }
                         _ => {}
                     }
                 }
@@ -500,6 +582,22 @@ impl RowBuilder {
         }
         state.blocks = next.clone();
         next
+    }
+
+    /// One report row. It folds like a tool group (`RowKind::Tools`, so
+    /// platforms animate its disclosure the same way).
+    fn activity_row(&mut self, ctx: &mut Ctx, entry_id: &str, part_id: &str, report: &super::activity::Report) -> RowCore {
+        let key = row_key(&format!("{entry_id}#{part_id}"));
+        let expanded = self.expanded.contains(&key);
+        let live = ctx.chats.resolve(report.source).cloned();
+        RowCore {
+            key,
+            version: next_version(),
+            kind: RowKind::Tools,
+            entry_id: Arc::from(entry_id),
+            content: Content::Activity(super::activity::prepare(ctx, report, expanded)),
+            copy_text: super::activity::spoken(report, live.as_ref()),
+        }
     }
 
     fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool) -> RowCore {
@@ -595,7 +693,7 @@ fn image_preview_link(reference: &str) -> String {
 /// files and folders (`zeron-file:`), skills and commands (`zeron-invoke:`),
 /// and attachments (`zeron-image:` / `zeron-attachment:`), in text order.
 /// `previews` pairs image chip numbers with the uploads they open.
-fn user_chips(body: &str, previews: &[(u32, String)]) -> Vec<UserChip> {
+fn user_chips(body: &str, previews: &[(u32, String)], chats: &super::chats::ChatDirectory) -> Vec<UserChip> {
     let mut chips: Vec<UserChip> = zeron_proto::file_mentions::file_mention_links(body)
         .into_iter()
         .map(|link| UserChip {
@@ -620,6 +718,26 @@ fn user_chips(body: &str, previews: &[(u32, String)]) -> Vec<UserChip> {
             .map(|(_, reference)| image_preview_link(reference)),
         label: mention.label,
     }));
+    // Chats: chips dragged in from the sidebar, and `@chat:` references
+    // this device can name. Each opens its chat.
+    chips.extend(zeron_proto::chat_mentions::chat_mention_links(body).into_iter().map(|link| {
+        let chat = chats.resolve(&link.chat_id);
+        UserChip {
+            range: link.range,
+            icon: chat.map_or_else(|| "tool-chat-round-line".to_owned(), super::chats::ChatLabel::icon),
+            open: Some(format!("{}{}", super::chats::CHAT_LINK_SCHEME, chat.map_or(link.chat_id.as_str(), |c| c.id.as_str()))),
+            label: chat.map_or(link.title.clone(), |c| c.display_title().to_owned()),
+        }
+    }));
+    chips.extend(zeron_proto::chat_refs::chat_refs(body).into_iter().filter_map(|r| {
+        let chat = chats.resolve(r.chat_id)?;
+        Some(UserChip {
+            range: r.range,
+            icon: chat.icon(),
+            open: Some(chat.link()),
+            label: chat.display_title().to_owned(),
+        })
+    }));
     chips.sort_by_key(|chip| chip.range.start);
     // Links never nest; drop any overlap rather than paint two chips at once.
     let mut end = 0;
@@ -636,7 +754,7 @@ fn user_chips(body: &str, previews: &[(u32, String)]) -> Vec<UserChip> {
 /// User prompt text with its canonical links shown as atomic chips: the
 /// desktop's soft pill with an icon well, the label in the body font.
 fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, lh: f32, previews: &[(u32, String)]) -> PText {
-    let chips = user_chips(body, previews);
+    let chips = user_chips(body, previews, ctx.chats);
     if chips.is_empty() {
         return prepare_plain(ctx, body, style, lh, ColorRole::Text, WhiteSpace::PreWrap);
     }
@@ -753,6 +871,7 @@ pub(crate) fn place_row(
         Content::Block(b) => place(b, px, x, top, cw, out),
         Content::User(u) => place_user(u, px, x, top, cw, out),
         Content::Tools(t) => place_tools(t, px, x, top, cw, out),
+        Content::Activity(a) => super::activity::place(a, px, x, top, cw, out),
         Content::Chip(c) => {
             let h = px.v(CHIP_LINE);
             if let Some(out) = out.as_deref_mut() {
@@ -927,6 +1046,11 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
     }
     match content {
         Content::Block(b) => block(b),
+        Content::Activity(a) => {
+            a.header.p.heap_bytes()
+                + a.preview.as_ref().map_or(0, |t| t.p.heap_bytes())
+                + a.body.iter().map(block).sum::<usize>()
+        }
         Content::User(u) => u.text.p.heap_bytes() + u.more.p.heap_bytes() + u.files.iter().map(|(_, n)| n.p.heap_bytes()).sum::<usize>(),
         Content::Tools(t) => super::tools::heap_bytes(t),
         Content::Chip(c) => c.text.p.heap_bytes(),
