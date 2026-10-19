@@ -286,17 +286,26 @@ covers acknowledgment before the coalesced input part reaches the document.
 build pass. Eight CLI smoke checks exercise help, guide chapters and failures,
 bounded waits, and refusal to spawn a managed task without an injected origin.
 
-The combined candidate also passes 1,884 desktop UI tests with the 35 known
-attachment tests excluded, all 91 protocol tests, 37 engine integrations
+The final validation candidate also passes 1,898 desktop UI tests with the 33 known
+`attachments::` tests excluded, all 92 protocol tests, 37 engine integrations
 (18 orchestration, 12 history, 7 side chats), and 45 MCP tests. Shared document
-(156), Markdown (106), mobile layout (89, one ignored) and client unit (26)
-suites pass. Android builds with fresh ARM64 and x86_64 libraries and was exercised
-on an emulator: report disclosure, chat and delegation links, and the tasks sheet.
+(157 unit tests and one doctest), Markdown (106), mobile layout (94, one ignored)
+and client unit (26) suites pass. Android builds with fresh ARM64 and x86_64
+libraries and was exercised on an emulator: report disclosure, chat and
+delegation links, and the tasks sheet.
 The [activity gallery](screenshots/orchestration-activity/README.md) includes four
 desktop and four Android captures. iOS parsing and the limited Catalyst check
 cover the edited sources; unrelated voice dependencies prevent a whole-app
 type-check, and no iOS runtime was available. Generated Swift is byte-identical
 to the binding generator's output.
+
+The final correction pass adds regressions for task-only delegation links,
+opaque request keys, pinned tree drag geometry, per-row chat-reference layout,
+report cache and code-fence retention, keyboard activation, interruptible folds
+and historical replay. Android's three painted-link accessibility tests pass;
+the final APK includes the rebuilt native libraries and the accessibility fixes.
+The workspace test-target check, desktop binary build and eight CLI smoke checks
+also pass after these corrections.
 
 The existing harness suite has a Devin catalog timeout fixture that fails in a
 full run (339 passed, one failed) and passes alone. Earlier parallel runs also
