@@ -1069,7 +1069,7 @@ impl Shell {
         // The record keeps a bounded summary; say when it was cut.
         let shortened = (task.summary_truncated && summary.is_some()).then(|| {
             note(
-                "Summary shortened. Open the task to read the full result.",
+                "Summary shortened. Open the task for its conversation.",
                 theme.text_faint,
             )
         });

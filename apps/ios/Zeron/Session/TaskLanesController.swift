@@ -122,6 +122,17 @@ extension AppModel {
         return try await client.forkSession(sourceChatId: sourceChatId)
     }
 
+    /// The host's durable merge receipts into `chatId`; nil when the host
+    /// predates them (the rows then show no merge history).
+    func mergeReceipts(_ chatId: String) async throws -> [MergeReceiptView]? {
+        guard let client else { throw CoreError.Closed }
+        do {
+            return try await client.chatMergeReceipts(chatId: chatId)
+        } catch CoreError.Unsupported, CoreError.NotImplemented {
+            return nil
+        }
+    }
+
     @discardableResult
     func mergeChat(_ sourceChatId: String) async throws -> String {
         guard let client else { throw CoreError.Closed }
@@ -194,7 +205,11 @@ final class TaskLanesController: UIViewController {
     private var requested: Set<String> = []
     private var errors: [String: String] = [:]
     private var merging: Set<String> = []
-    private var merged: Set<String> = []
+    /// Each fork's latest merge into this chat (ms), read from the host's
+    /// durable receipts; history, not a lock — a newer response merges again.
+    private var lastMerged: [String: Int64] = [:]
+    private var receiptsReadFor: Int64?
+    private var readingReceipts = false
     private var marks: [String: TaskMark] = [:]
     private var forking = false
     // Rows that persist across frames, so VoiceOver focus and layout stay put.
@@ -274,6 +289,7 @@ final class TaskLanesController: UIViewController {
 
     private func reload(animated: Bool) {
         let row = app.row(chatId)
+        refreshMergeReceipts(row)
         let children = app.children(of: chatId)
         let lane = TaskLane(children)
         let sides = children.filter { $0.task == nil }
@@ -388,7 +404,7 @@ final class TaskLanesController: UIViewController {
             canMerge: row.fork != nil && row.deviceId == parentDevice,
             busy: busy,
             merging: merging.contains(row.id),
-            merged: merged.contains(row.id)
+            lastMerged: lastMerged[row.id]
         )
         return view
     }
@@ -457,8 +473,38 @@ final class TaskLanesController: UIViewController {
         }
     }
 
+    /// Merges arrive in this chat as messages (from here, the desktop or an
+    /// agent), so the receipts are read again when its activity moves — not
+    /// on a fork's own streaming.
+    private func refreshMergeReceipts(_ chat: SessionRow?) {
+        guard let chat, !readingReceipts, receiptsReadFor != chat.lastActivityMs else { return }
+        receiptsReadFor = chat.lastActivityMs
+        readingReceipts = true
+        let origin = chatId
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let receipts = (try? await self.app.mergeReceipts(origin)) ?? nil
+            self.readingReceipts = false
+            // A sheet only ever shows its own chat; the guard keeps it so.
+            guard origin == self.chatId else { return }
+            if let receipts {
+                var latest: [String: Int64] = [:]
+                for receipt in receipts { latest[receipt.sourceChatId] = max(latest[receipt.sourceChatId] ?? 0, receipt.createdAtMs) }
+                if latest != self.lastMerged {
+                    self.lastMerged = latest
+                    self.reload(animated: true)
+                }
+            }
+            // Activity that moved (or a merge that invalidated the read)
+            // while this read was in flight gets one follow-up read; a
+            // failure stays settled on its key, so errors never loop.
+            self.refreshMergeReceipts(self.app.row(self.chatId))
+        }
+    }
+
     private func confirmMerge(_ id: String, from anchor: UIView) {
-        let sheet = UIAlertController(title: "Merge into this chat?", message: "Sends the fork's latest response here as context.", preferredStyle: .actionSheet)
+        let last = lastMerged[id].map { " It was last merged \(HistoryAgo.phrase($0))." } ?? ""
+        let sheet = UIAlertController(title: "Merge into this chat?", message: "Sends the fork's latest response here as context." + last, preferredStyle: .actionSheet)
         sheet.addAction(UIAlertAction(title: "Merge", style: .default) { [weak self] _ in self?.merge(id) })
         sheet.addAction(UIAlertAction(title: "Not now", style: .cancel))
         sheet.popoverPresentationController?.sourceView = anchor
@@ -473,7 +519,8 @@ final class TaskLanesController: UIViewController {
             guard let self else { return }
             do {
                 try await self.app.mergeChat(id)
-                self.merged.insert(id)
+                // Read the receipts again for the recorded time.
+                self.receiptsReadFor = nil
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 Toast.show("Merged into this chat", in: self.view.window)
             } catch {
@@ -813,7 +860,7 @@ private final class TaskRowView: UIView {
         LaneType.apply(shortened, .sans, 13)
         shortened.textColor = Palette.tertiary
         shortened.numberOfLines = 0
-        shortened.text = "Summary shortened. Open the task to read the full result."
+        shortened.text = "Summary shortened. Open the task for its conversation."
         for v in [status, facts, summary, shortened, note, delivery, error, actions] { detail.addArrangedSubview(v) }
         detail.axis = .vertical
         detail.spacing = 8
@@ -1002,9 +1049,12 @@ private final class SideChatRowView: LaneRowControl {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(row: SessionRow, canMerge: Bool, busy: Bool, merging: Bool, merged: Bool) {
+    func configure(row: SessionRow, canMerge: Bool, busy: Bool, merging: Bool, lastMerged: Int64?) {
         title.text = row.title
-        time.text = merged ? "Merged" : row.timeLabel
+        // A merge is history: "Merged 5m" until the fork moves on; Merge
+        // stays available for its newer responses.
+        let merged = lastMerged.map { "Merged \(HistoryAgo.short($0))" }
+        time.text = merged ?? row.timeLabel
         harness.image = BrandMarks.image(forModel: row.model, harness: row.harness, side: 15)
         harness.isHidden = harness.image == nil
         forkMark.isHidden = row.fork == nil
@@ -1021,7 +1071,7 @@ private final class SideChatRowView: LaneRowControl {
         mergeButton.accessibilityHint = busy ? "Finish the fork's turn first" : nil
         // The row reads as one element; Merge stays its own button.
         let open = UIAccessibilityElement(accessibilityContainer: self)
-        open.accessibilityLabel = [row.fork == nil ? "Side chat" : "Fork", row.title, row.timeLabel].joined(separator: ", ")
+        open.accessibilityLabel = ([row.fork == nil ? "Side chat" : "Fork", row.title, row.timeLabel] + (lastMerged.map { ["last merged \(HistoryAgo.phrase($0))"] } ?? [])).joined(separator: ", ")
         open.accessibilityTraits = .button
         open.accessibilityFrameInContainerSpace = bounds
         accessibilityElements = canMerge ? [open, mergeButton] : [open]

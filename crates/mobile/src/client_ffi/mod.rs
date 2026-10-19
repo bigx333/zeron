@@ -269,6 +269,19 @@ impl CoreClient {
         on_runtime(async move { client.merge_chat(&source_chat_id).await }).await
     }
 
+    pub async fn chat_merge_receipts(&self, chat_id: String) -> CoreResult<Vec<MergeReceiptView>> {
+        let client = self.client.clone();
+        let transfers =
+            on_runtime(async move { client.chat_merge_receipts(&chat_id).await }).await?;
+        Ok(transfers
+            .into_iter()
+            .map(|transfer| MergeReceiptView {
+                source_chat_id: transfer.source_chat_id,
+                created_at_ms: transfer.created_at,
+            })
+            .collect())
+    }
+
     pub async fn fork_session(&self, source_chat_id: String) -> CoreResult<String> {
         let client = self.client.clone();
         on_runtime(async move { client.fork_session(&source_chat_id).await }).await

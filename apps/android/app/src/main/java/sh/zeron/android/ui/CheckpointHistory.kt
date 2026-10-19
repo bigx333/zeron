@@ -35,6 +35,7 @@ import sh.zeron.android.design.ZIcons
 import uniffi.zeron_core.ChatIndicator
 import uniffi.zeron_core.CoreClient
 import uniffi.zeron_core.CoreException
+import uniffi.zeron_core.DelegatedTaskView
 import uniffi.zeron_core.RunCheckpointView
 import uniffi.zeron_core.SessionRow
 
@@ -59,14 +60,37 @@ internal fun restoreBlurb(point: RunCheckpointView): String = when {
     else -> "The conversation goes back to just after this turn; no files were saved here, so the checkout stays as it is. Where you are now is saved as a recovery point."
 }
 
-/** Why Restore can't run right now, the core's word last. `sharedTasks`: a task still works in this checkout. */
-internal fun restoreBlocked(point: RunCheckpointView, chat: SessionRow, sharedTasks: Boolean): String? = when {
+/** Why Restore can't run right now, the core's word last. `tasksBusy`: a managed task under this chat is unsettled. */
+internal fun restoreBlocked(point: RunCheckpointView, chat: SessionRow, tasksBusy: Boolean): String? = when {
     !chat.deviceOnline -> "Its device is offline."
     chat.indicator == ChatIndicator.WORKING || chat.indicator == ChatIndicator.AWAITING_INPUT -> "Finish or stop the current turn first."
-    sharedTasks -> "Stop tasks working in this checkout first."
+    tasksBusy -> "Finish or stop this chat's tasks first."
     !point.restorable -> point.blockedReason ?: "This point can't be restored."
     else -> null
 }
+
+/**
+ * The managed tasks under [chatId] at any depth (up to 4), archived ones
+ * included: the core's restore gate counts them.
+ */
+internal fun descendantTasks(core: CoreClient, chatId: String): List<Pair<String, DelegatedTaskView>> {
+    val found = mutableListOf<Pair<String, DelegatedTaskView>>()
+    var frontier = listOf(chatId)
+    repeat(4) {
+        if (frontier.isEmpty()) return found
+        val next = mutableListOf<String>()
+        for (parent in frontier) for (child in core.childSessions(parentId = parent)) {
+            val task = child.task ?: continue
+            found += child.id to task
+            next += child.id
+        }
+        frontier = next
+    }
+    return found
+}
+
+/** Settled: ended and owing this chat nothing (sent, or stopped). */
+internal fun DelegatedTaskView.settled(): Boolean = terminal && (delivered || cancelRequested)
 
 private fun filesFact(point: RunCheckpointView): String = when {
     !point.filesAvailable -> "Conversation only"
@@ -95,7 +119,7 @@ private data class Receipt(val title: String, val recovery: String, val undone: 
  * is saved then), after a save, and after a restore.
  */
 @Composable
-fun CheckpointHistory(core: CoreClient, chat: SessionRow, children: List<SessionRow>, reduced: Boolean) {
+fun CheckpointHistory(core: CoreClient, chat: SessionRow, workspaceRevision: ULong, reduced: Boolean) {
     var reload by remember(chat.id) { mutableIntStateOf(0) }
     var load by remember(chat.id) { mutableStateOf<HistoryLoad>(HistoryLoad.Loading) }
     var receipt by remember(chat.id) { mutableStateOf<Receipt?>(null) }
@@ -114,8 +138,13 @@ fun CheckpointHistory(core: CoreClient, chat: SessionRow, children: List<Session
     val busy = chat.indicator == ChatIndicator.WORKING || chat.indicator == ChatIndicator.AWAITING_INPUT
     var readKey by remember(chat.id) { mutableLongStateOf(chat.lastActivityMs) }
     LaunchedEffect(busy, chat.lastActivityMs) { if (!busy) readKey = chat.lastActivityMs }
-    val sharedTasks = children.any { row -> row.task?.let { !it.terminal && it.isolation == "shared" } == true }
-    LaunchedEffect(chat.id, readKey, reload) {
+    // Tasks settling (status, delivery, stop — never their times) read again
+    // too: a restore they blocked may be allowed now.
+    // Re-walked per workspace frame: a grandchild settling changes no direct row.
+    val tasks = remember(chat.id, workspaceRevision) { descendantTasks(core, chat.id) }
+    val availability = tasks.map { (id, task) -> "$id:${task.status}:${task.delivered}:${task.cancelRequested}" }.sorted().joinToString(",")
+    val tasksBusy = tasks.any { !it.second.settled() }
+    LaunchedEffect(chat.id, readKey, availability, reload) {
         load = try {
             val points = core.chatCheckpoints(chatId = chat.id)
             // The chat moved on after the restore: Undo would now mean something else.
@@ -226,7 +255,7 @@ fun CheckpointHistory(core: CoreClient, chat: SessionRow, children: List<Session
                 }
                 points.take(shown).forEach { point ->
                     key(point.id) {
-                        CheckpointRow(point, chat, sharedTasks, reduced, restoring, errors[point.id], onRestore = { confirm = point })
+                        CheckpointRow(point, chat, tasksBusy, reduced, restoring, errors[point.id], onRestore = { confirm = point })
                     }
                 }
                 if (points.size > shown) {
@@ -246,7 +275,7 @@ fun CheckpointHistory(core: CoreClient, chat: SessionRow, children: List<Session
                     }
                     if (recoveryOpen) recovery.forEach { point ->
                         key(point.id) {
-                            CheckpointRow(point, chat, sharedTasks, reduced, restoring, errors[point.id], onRestore = { confirm = point })
+                            CheckpointRow(point, chat, tasksBusy, reduced, restoring, errors[point.id], onRestore = { confirm = point })
                         }
                     }
                 }
@@ -271,14 +300,14 @@ fun CheckpointHistory(core: CoreClient, chat: SessionRow, children: List<Session
 private fun CheckpointRow(
     point: RunCheckpointView,
     chat: SessionRow,
-    sharedTasks: Boolean,
+    tasksBusy: Boolean,
     reduced: Boolean,
     restoring: String?,
     error: String?,
     onRestore: () -> Unit,
 ) {
     var expanded by remember(point.id) { mutableStateOf(false) }
-    val blocked = restoreBlocked(point, chat, sharedTasks)
+    val blocked = restoreBlocked(point, chat, tasksBusy)
     val busy = restoring == point.id
     val motion = if (reduced) Modifier else Modifier.animateContentSize(tween(220))
     val wash by animateFloatAsState(if (expanded) 0.05f else 0f, if (reduced) tween(0) else tween(200), label = "checkpoint-wash")

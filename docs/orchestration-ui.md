@@ -224,7 +224,9 @@ the lanes card; on mobile, the last section of the tasks sheet.
 - Blocked reasons, in priority order:
   1. Its device is offline.
   2. Finish or stop the current turn first. (live status, Working or AwaitingInput)
-  3. The engine's `blockedReason`, for example "Stop tasks working in this checkout first."
+  3. Finish or stop this chat's tasks first. Shown while any managed task under the chat
+     (any depth, archived included) is unsettled, matching the engine's gate.
+  4. The engine's `blockedReason`.
 - In flight: Restoring…
 - Failure: Couldn't restore. {reason} → `Try again`. The same `clientRequestId` is reused
   until the restore succeeds, so a retry dedupes.
@@ -429,3 +431,36 @@ The History UI also compiles: `:app:compileDebugKotlin -PzeronSkipCore --offline
 --no-configuration-cache` passes against the regenerated Kotlin bindings. No Android
 screenshots were taken: no AVD is configured, and the demo backend has no tasks or
 checkpoints, so the sheet would render without the new sections.
+
+## Review pass: state freshness and races
+
+- **Async origin guards.** Stop, merge, restore, save, history reads and transfer reads apply
+  their results only to the chat they were started from. On desktop that's the lanes card's
+  chat id; mobile sheets are per chat. A restore finishing after you switch chats can no
+  longer put an Undo on the wrong chat.
+- **History refresh key.** The key is the chat's last activity plus a *task availability
+  fingerprint*.
+  - The fingerprint is each managed descendant's `status:delivered:cancelRequested`, sorted
+    by id, never its times. It walks up to 4 levels and includes archived tasks.
+  - Activity re-reads only while the chat is idle, since checkpoints land at turn end.
+  - Task availability changes re-read even when the parent didn't change. This covers a
+    cancelled task, or a nested task settling after its parent was marked Cancelled.
+- **Follow-up reads.**
+  - A read skipped while another was in flight gets one follow-up read after it completes,
+    including a manual invalidation after a merge, save or restore.
+  - Failures stay settled on their key, so errors never loop.
+- **Receipts.** The "Restored to … Undo" receipt retires once a newer non-recovery
+  checkpoint appears, because the chat moved on and Undo would then mean something else.
+- **Merge history.**
+  - "Merged" is history, not a lock: Merge stays available for a fork's newer responses and
+    after a parent rollback.
+  - Desktop reads `ChatTransfers` again whenever a message lands in the parent.
+  - Mobile reads `chatMergeReceipts(chatId)` on parent activity, not on a fork's streaming.
+- **Truncated summaries.** When `summaryTruncated` is set, the row says "Summary shortened.
+  Open the task for its conversation." That wording doesn't promise the full result,
+  because a restored task chat may no longer show its published response; the frozen result
+  stays available to agents.
+- **Settle (Android).** The wash takes the outcome's tone (success / error / neutral). The
+  completion haptic is kept under reduced motion.
+- **No churn (iOS).** The lineage row and separators persist, and a frame that changes
+  nothing doesn't restack.

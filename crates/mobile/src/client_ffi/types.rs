@@ -512,6 +512,12 @@ pub struct DelegatedTaskView {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MergeReceiptView {
+    pub source_chat_id: String,
+    pub created_at_ms: i64,
+}
 impl From<&zc::DelegatedTaskView> for DelegatedTaskView {
     fn from(r: &zc::DelegatedTaskView) -> Self {
         Self {

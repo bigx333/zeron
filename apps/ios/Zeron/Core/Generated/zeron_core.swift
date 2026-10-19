@@ -1041,10 +1041,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func assignSection(chatId: String, sectionId: String?) throws 
     
-    func cancelTask(parentChatId: String, taskId: String) async throws
-
+    func cancelTask(parentChatId: String, taskId: String) async throws 
+    
     func chatCheckpoints(chatId: String) async throws  -> [RunCheckpointView]
-
+    
+    func chatMergeReceipts(chatId: String) async throws  -> [MergeReceiptView]
+    
     /**
      * Side chats / subagent chats of `parent_id`, recency order.
      */
@@ -1063,7 +1065,7 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func connectivity()  -> Connectivity
     
     func createChatCheckpoint(chatId: String) async throws  -> RunCheckpointView
-
+    
     /**
      * Create (or find) the project for `path` on `device_id`. Returns its id.
      */
@@ -1098,7 +1100,7 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      * Devices that can run sessions (new-session / new-project pickers).
      */
     func executionDevices()  -> [DeviceView]
-
+    
     func forkSession(sourceChatId: String) async throws  -> String
     
     /**
@@ -1134,7 +1136,7 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func markSeen(chatId: String) 
     
     func mergeChat(sourceChatId: String) async throws  -> String
-
+    
     /**
      * Reorder a pin between neighbours (`None` at either end).
      */
@@ -1204,7 +1206,7 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func renameSession(chatId: String, title: String) throws 
     
     func rollbackChat(chatId: String, checkpointId: String, clientRequestId: String?) async throws  -> String
-
+    
     func search(query: String, limit: UInt32)  -> [SearchHit]
     
     /**
@@ -1418,7 +1420,7 @@ open func assignSection(chatId: String, sectionId: String?)throws   {try rustCal
     )
 }
 }
-
+    
 open func cancelTask(parentChatId: String, taskId: String)async throws   {
     return
         try  await uniffiRustCallAsync(
@@ -1434,7 +1436,7 @@ open func cancelTask(parentChatId: String, taskId: String)async throws   {
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
-
+    
 open func chatCheckpoints(chatId: String)async throws  -> [RunCheckpointView]  {
     return
         try  await uniffiRustCallAsync(
@@ -1447,6 +1449,22 @@ open func chatCheckpoints(chatId: String)async throws  -> [RunCheckpointView]  {
             completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
             freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypeRunCheckpointView.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func chatMergeReceipts(chatId: String)async throws  -> [MergeReceiptView]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_chat_merge_receipts(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeMergeReceiptView.lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
@@ -1519,7 +1537,7 @@ open func createChatCheckpoint(chatId: String)async throws  -> RunCheckpointView
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
-
+    
     /**
      * Create (or find) the project for `path` on `device_id`. Returns its id.
      */
@@ -1640,7 +1658,7 @@ open func executionDevices() -> [DeviceView]  {
     )
 })
 }
-
+    
 open func forkSession(sourceChatId: String)async throws  -> String  {
     return
         try  await uniffiRustCallAsync(
@@ -1797,7 +1815,7 @@ open func mergeChat(sourceChatId: String)async throws  -> String  {
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
-
+    
     /**
      * Reorder a pin between neighbours (`None` at either end).
      */
@@ -2014,7 +2032,7 @@ open func renameSession(chatId: String, title: String)throws   {try rustCallWith
     )
 }
 }
-
+    
 open func rollbackChat(chatId: String, checkpointId: String, clientRequestId: String?)async throws  -> String  {
     return
         try  await uniffiRustCallAsync(
@@ -6769,9 +6787,9 @@ public struct DelegatedTaskView: Equatable, Hashable {
         self.updatedAtMs = updatedAtMs
     }
 
+    
 
-
-
+    
 }
 
 #if compiler(>=6)
@@ -6785,20 +6803,20 @@ public struct FfiConverterTypeDelegatedTaskView: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DelegatedTaskView {
         return
             try DelegatedTaskView(
-                id: FfiConverterString.read(from: &buf),
-                parentChatId: FfiConverterString.read(from: &buf),
-                status: FfiConverterString.read(from: &buf),
-                statusLabel: FfiConverterString.read(from: &buf),
-                terminal: FfiConverterBool.read(from: &buf),
-                stopping: FfiConverterBool.read(from: &buf),
-                cancelRequested: FfiConverterBool.read(from: &buf),
-                roleLabel: FfiConverterOptionString.read(from: &buf),
-                isolationLabel: FfiConverterString.read(from: &buf),
-                isolation: FfiConverterString.read(from: &buf),
-                summary: FfiConverterOptionString.read(from: &buf),
-                summaryTruncated: FfiConverterBool.read(from: &buf),
-                delivered: FfiConverterBool.read(from: &buf),
-                createdAtMs: FfiConverterInt64.read(from: &buf),
+                id: FfiConverterString.read(from: &buf), 
+                parentChatId: FfiConverterString.read(from: &buf), 
+                status: FfiConverterString.read(from: &buf), 
+                statusLabel: FfiConverterString.read(from: &buf), 
+                terminal: FfiConverterBool.read(from: &buf), 
+                stopping: FfiConverterBool.read(from: &buf), 
+                cancelRequested: FfiConverterBool.read(from: &buf), 
+                roleLabel: FfiConverterOptionString.read(from: &buf), 
+                isolationLabel: FfiConverterString.read(from: &buf), 
+                isolation: FfiConverterString.read(from: &buf), 
+                summary: FfiConverterOptionString.read(from: &buf), 
+                summaryTruncated: FfiConverterBool.read(from: &buf), 
+                delivered: FfiConverterBool.read(from: &buf), 
+                createdAtMs: FfiConverterInt64.read(from: &buf), 
                 updatedAtMs: FfiConverterInt64.read(from: &buf)
         )
     }
@@ -7321,9 +7339,9 @@ public struct ForkLineageView: Equatable, Hashable {
         self.strategy = strategy
     }
 
+    
 
-
-
+    
 }
 
 #if compiler(>=6)
@@ -7337,9 +7355,9 @@ public struct FfiConverterTypeForkLineageView: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ForkLineageView {
         return
             try ForkLineageView(
-                sourceChatId: FfiConverterString.read(from: &buf),
-                sourceMessageId: FfiConverterString.read(from: &buf),
-                createdAtMs: FfiConverterInt64.read(from: &buf),
+                sourceChatId: FfiConverterString.read(from: &buf), 
+                sourceMessageId: FfiConverterString.read(from: &buf), 
+                createdAtMs: FfiConverterInt64.read(from: &buf), 
                 strategy: FfiConverterString.read(from: &buf)
         )
     }
@@ -8202,6 +8220,60 @@ public func FfiConverterTypeLiveStatus_lift(_ buf: RustBuffer) throws -> LiveSta
 #endif
 public func FfiConverterTypeLiveStatus_lower(_ value: LiveStatus) -> RustBuffer {
     return FfiConverterTypeLiveStatus.lower(value)
+}
+
+
+public struct MergeReceiptView: Equatable, Hashable {
+    public var sourceChatId: String
+    public var createdAtMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sourceChatId: String, createdAtMs: Int64) {
+        self.sourceChatId = sourceChatId
+        self.createdAtMs = createdAtMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MergeReceiptView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMergeReceiptView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MergeReceiptView {
+        return
+            try MergeReceiptView(
+                sourceChatId: FfiConverterString.read(from: &buf), 
+                createdAtMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MergeReceiptView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sourceChatId, into: &buf)
+        FfiConverterInt64.write(value.createdAtMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMergeReceiptView_lift(_ buf: RustBuffer) throws -> MergeReceiptView {
+    return try FfiConverterTypeMergeReceiptView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMergeReceiptView_lower(_ value: MergeReceiptView) -> RustBuffer {
+    return FfiConverterTypeMergeReceiptView.lower(value)
 }
 
 
@@ -9734,9 +9806,9 @@ public struct RunCheckpointView: Equatable, Hashable {
         self.blockedReason = blockedReason
     }
 
+    
 
-
-
+    
 }
 
 #if compiler(>=6)
@@ -9750,15 +9822,15 @@ public struct FfiConverterTypeRunCheckpointView: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RunCheckpointView {
         return
             try RunCheckpointView(
-                id: FfiConverterString.read(from: &buf),
-                messageId: FfiConverterOptionString.read(from: &buf),
-                title: FfiConverterString.read(from: &buf),
-                createdAtMs: FfiConverterInt64.read(from: &buf),
-                recovery: FfiConverterBool.read(from: &buf),
-                providerStrategy: FfiConverterString.read(from: &buf),
-                filesAvailable: FfiConverterBool.read(from: &buf),
-                filesChanged: FfiConverterOptionUInt32.read(from: &buf),
-                restorable: FfiConverterBool.read(from: &buf),
+                id: FfiConverterString.read(from: &buf), 
+                messageId: FfiConverterOptionString.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                createdAtMs: FfiConverterInt64.read(from: &buf), 
+                recovery: FfiConverterBool.read(from: &buf), 
+                providerStrategy: FfiConverterString.read(from: &buf), 
+                filesAvailable: FfiConverterBool.read(from: &buf), 
+                filesChanged: FfiConverterOptionUInt32.read(from: &buf), 
+                restorable: FfiConverterBool.read(from: &buf), 
                 blockedReason: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -10172,7 +10244,7 @@ public struct SessionRow: Equatable, Hashable {
          */snoozeLabel: String?, pinned: Bool, sectionId: String?, pullRequest: PullRequest?, 
         /**
          * Oldest unadopted send from this device (open sessions only).
-         */sendState: SendState?, parentChatId: String?, task: DelegatedTaskView?, fork: ForkLineageView?,
+         */sendState: SendState?, parentChatId: String?, task: DelegatedTaskView?, fork: ForkLineageView?, 
         /**
          * 2 = chat2; 1 = legacy (not dialable).
          */roomGen: UInt32) {
@@ -10261,8 +10333,8 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 pullRequest: FfiConverterOptionTypePullRequest.read(from: &buf), 
                 sendState: FfiConverterOptionTypeSendState.read(from: &buf), 
                 parentChatId: FfiConverterOptionString.read(from: &buf), 
-                task: FfiConverterOptionTypeDelegatedTaskView.read(from: &buf),
-                fork: FfiConverterOptionTypeForkLineageView.read(from: &buf),
+                task: FfiConverterOptionTypeDelegatedTaskView.read(from: &buf), 
+                fork: FfiConverterOptionTypeForkLineageView.read(from: &buf), 
                 roomGen: FfiConverterUInt32.read(from: &buf)
         )
     }
@@ -17477,6 +17549,31 @@ fileprivate struct FfiConverterSequenceTypeLinkHit: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeMergeReceiptView: FfiConverterRustBuffer {
+    typealias SwiftType = [MergeReceiptView]
+
+    public static func write(_ value: [MergeReceiptView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeMergeReceiptView.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MergeReceiptView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [MergeReceiptView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeMergeReceiptView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeModelInfo: FfiConverterRustBuffer {
     typealias SwiftType = [ModelInfo]
 
@@ -18601,6 +18698,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_chat_checkpoints() != 47115) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_chat_merge_receipts() != 32517) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_child_sessions() != 10159) {

@@ -63,6 +63,14 @@ finds them.
 
 ### Injection
 
+MCP exposes the operations and their schemas; the engine also supplies shared
+[orchestration guidance](../crates/proto/src/orchestration_instructions.md) on
+each runtime's first normal prompt, including resumes. This follows T3's shared
+provider-instruction approach. Native slash commands remain unwrapped; an idle
+or command-only start leaves guidance pending for the first normal warm send.
+It is app context and does not change stored user messages. No manual prompt or
+repository `AGENTS.md` change is needed.
+
 The host engine stamps this server onto every run it drives
 (`RunRequest.mcp`, additive): the same `zeron` binary with `args: ["mcp"]`
 and the three variables above, pointed at the port the engine itself serves

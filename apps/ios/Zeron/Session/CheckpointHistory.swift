@@ -29,12 +29,12 @@ extension RunCheckpointView {
     }
 
     /// Why Restore can't run right now, the core's word last.
-    /// `sharedTasks`: a task of this chat still works in its checkout.
-    func blocked(by chat: SessionRow?, sharedTasks: Bool) -> String? {
+    /// `tasksBusy`: a managed task under this chat is still unsettled.
+    func blocked(by chat: SessionRow?, tasksBusy: Bool) -> String? {
         guard let chat else { return "This chat isn't available." }
         if !chat.deviceOnline { return "Its device is offline." }
         if chat.indicator == .working || chat.indicator == .awaitingInput { return "Finish or stop the current turn first." }
-        if sharedTasks { return "Stop tasks working in this checkout first." }
+        if tasksBusy { return "Finish or stop this chat's tasks first." }
         if !restorable { return blockedReason ?? "This point can't be restored." }
         return nil
     }
@@ -83,6 +83,26 @@ extension AppModel {
         _ = try await client.createChatCheckpoint(chatId: chatId)
     }
 
+    /// The managed tasks under `chatId` at any depth (up to 4), archived
+    /// ones included: the core's restore gate counts them.
+    func descendantTasks(of chatId: String) -> [(String, DelegatedTaskView)] {
+        guard let client else { return [] }
+        var found: [(String, DelegatedTaskView)] = []
+        var frontier = [chatId]
+        for _ in 0..<4 where !frontier.isEmpty {
+            var next: [String] = []
+            for parent in frontier {
+                for child in client.childSessions(parentId: parent) {
+                    guard let task = child.task else { continue }
+                    found.append((child.id, task))
+                    next.append(child.id)
+                }
+            }
+            frontier = next
+        }
+        return found
+    }
+
     /// Restore; returns the recovery checkpoint the core kept.
     func rollback(_ chatId: String, to checkpointId: String, request: String) async throws -> String {
         guard let client else { throw CoreError.Closed }
@@ -116,7 +136,8 @@ final class HistorySection {
     private weak var host: UIViewController?
     private let onChange: () -> Void
     private var load: Load = .loading
-    private var readFor: Int64?
+    /// The activity and task availability the list was read at.
+    private var readFor: String?
     private var reading = false
     private var receipt: Receipt?
     private var restoring: String?
@@ -185,10 +206,14 @@ final class HistorySection {
 
     /// Read again once per finished turn (a new checkpoint is saved then) —
     /// not while the turn runs, whose activity ticks would poll.
-    private func refreshIfNeeded(_ chat: SessionRow?) {
-        guard let chat, load != .unsupported, !reading, readFor != chat.lastActivityMs else { return }
+    /// Tasks settling (status, delivery, stop — never their times) read it
+    /// again too: a restore blocked by them may be allowed now.
+    private func refreshIfNeeded(_ chat: SessionRow?, availability: String) {
+        guard let chat, load != .unsupported, !reading else { return }
+        let key = "\(chat.lastActivityMs)|\(availability)"
+        guard readFor != key else { return }
         if readFor != nil, chat.indicator == .working || chat.indicator == .awaitingInput { return }
-        readFor = chat.lastActivityMs
+        readFor = key
         read()
     }
 
@@ -222,9 +247,14 @@ final class HistorySection {
     /// The rows to stack under the sheet's other sections; empty when the
     /// host can't keep checkpoints.
     func views(chat: SessionRow?, animated: Bool) -> [UIView] {
-        refreshIfNeeded(chat)
+        let tasks = app.descendantTasks(of: chatId)
+        let availability = tasks
+            .map { "\($0.0):\($0.1.status):\($0.1.delivered):\($0.1.cancelRequested)" }
+            .sorted()
+            .joined(separator: ",")
+        refreshIfNeeded(chat, availability: availability)
         if load == .unsupported { return [] }
-        let sharedTasks = app.children(of: chatId).contains { $0.task.map { !$0.terminal && $0.isolation == "shared" } ?? false }
+        let tasksBusy = tasks.contains { !$0.1.settled }
         var views: [UIView] = [header]
         header.configure(saving: saving, enabled: chat?.deviceOnline ?? false)
         if let saveError { views.append(HistoryNoteView(saveError, color: Palette.danger)) }
@@ -251,7 +281,7 @@ final class HistorySection {
                 status.configure(.empty)
                 views.append(status)
             }
-            for point in points.prefix(shown) { views.append(row(point, chat: chat, sharedTasks: sharedTasks, animated: animated)) }
+            for point in points.prefix(shown) { views.append(row(point, chat: chat, tasksBusy: tasksBusy, animated: animated)) }
             if points.count > shown {
                 (more.viewWithTag(1) as? UILabel)?.text = "Show \(min(10, points.count - shown)) more"
                 more.accessibilityLabel = "Show \(min(10, points.count - shown)) more checkpoints"
@@ -260,13 +290,13 @@ final class HistorySection {
             if !recovery.isEmpty {
                 recoveryFold.set(count: recovery.count, open: recoveryOpen, noun: "recovery point")
                 views.append(recoveryFold)
-                if recoveryOpen { for point in recovery { views.append(row(point, chat: chat, sharedTasks: sharedTasks, animated: animated)) } }
+                if recoveryOpen { for point in recovery { views.append(row(point, chat: chat, tasksBusy: tasksBusy, animated: animated)) } }
             }
         }
         return views
     }
 
-    private func row(_ point: RunCheckpointView, chat: SessionRow?, sharedTasks: Bool, animated: Bool) -> CheckpointRowView {
+    private func row(_ point: RunCheckpointView, chat: SessionRow?, tasksBusy: Bool, animated: Bool) -> CheckpointRowView {
         let fresh = rows[point.id] == nil
         let view = rows[point.id] ?? {
             let view = CheckpointRowView()
@@ -284,7 +314,7 @@ final class HistorySection {
         }
         view.configure(
             point: point,
-            blocked: point.blocked(by: chat, sharedTasks: sharedTasks),
+            blocked: point.blocked(by: chat, tasksBusy: tasksBusy),
             restoring: restoring == point.id,
             busyElsewhere: restoring != nil && restoring != point.id,
             error: errors[point.id],

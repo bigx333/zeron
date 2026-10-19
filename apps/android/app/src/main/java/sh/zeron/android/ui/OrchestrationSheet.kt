@@ -51,6 +51,7 @@ fun OrchestrationSheet(
     children: List<SessionRow>,
     onDismiss: () -> Unit,
     onOpen: (String) -> Unit,
+    workspaceRevision: ULong = 0u,
 ) {
     val reduced = rememberOrchestrationReducedMotion()
     var finishedOpen by remember(chat?.id) { mutableStateOf(false) }
@@ -60,6 +61,19 @@ fun OrchestrationSheet(
         .sortedByDescending { it.task?.updatedAtMs }
     val sideChats = children.filter { it.task == null && !it.archived }
     val scope = rememberCoroutineScope()
+    // Each fork's latest merge into this chat, from the host's durable
+    // receipts: history, not a lock. Merges land here as messages, so this
+    // chat's activity (not a fork's streaming) is what re-reads them.
+    var lastMerged by remember(chat?.id) { mutableStateOf<Map<String, Long>>(emptyMap()) }
+    var receiptReload by remember(chat?.id) { mutableIntStateOf(0) }
+    LaunchedEffect(chat?.id, chat?.lastActivityMs, receiptReload) {
+        val origin = chat?.id ?: return@LaunchedEffect
+        val receipts = try { core.chatMergeReceipts(chatId = origin) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { null }
+        // Keyed on the chat: a sheet moved to another chat restarts this effect.
+        if (receipts != null) lastMerged = receipts.groupBy { it.sourceChatId }.mapValues { (_, list) -> list.maxOf { it.createdAtMs } }
+    }
     var forking by remember { mutableStateOf(false) }
     var forkError by remember { mutableStateOf<String?>(null) }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
@@ -100,7 +114,7 @@ fun OrchestrationSheet(
                 }
             }
             item { LaneHeading("Side chats") }
-            items(sideChats, key = { "side-${it.id}" }) { row -> SideChatRow(core, row, chat?.deviceId, reduced, onOpen) }
+            items(sideChats, key = { "side-${it.id}" }) { row -> SideChatRow(core, row, chat?.deviceId, lastMerged[row.id], reduced, onOpen, onMerged = { receiptReload++ }) }
             if (sideChats.isEmpty()) {
                 item {
                     Text("Fork this conversation to explore another direction. Your current chat stays here.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -131,7 +145,7 @@ fun OrchestrationSheet(
                 item { Text("Delegated work will appear here when an agent starts a task.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
             // The checkpoints each finished turn left, restorable in place.
-            chat?.let { current -> item(key = "history-${current.id}") { CheckpointHistory(core, current, children, reduced) } }
+            chat?.let { current -> item(key = "history-${current.id}") { CheckpointHistory(core, current, workspaceRevision, reduced) } }
         }
     }
 }
@@ -203,7 +217,7 @@ private fun TaskDetailRow(core: CoreClient, row: SessionRow, reduced: Boolean, o
                 task.summary?.takeIf { it.isNotBlank() }?.let {
                     Text(it, style = MaterialTheme.typography.bodyMedium, maxLines = 4, overflow = TextOverflow.Ellipsis)
                     // The record keeps a bounded summary; say when it was cut.
-                    if (task.summaryTruncated) Text("Summary shortened. Open the task to read the full result.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (task.summaryTruncated) Text("Summary shortened. Open the task for its conversation.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (task.status == "waiting") Text("It's waiting on an answer. Open it to reply.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                 if (task.status == "waiting_for_children") Text("Waiting for its own tasks to finish.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -245,11 +259,9 @@ private fun TaskMark(status: String, stopping: Boolean, reduced: Boolean, tone: 
 }
 
 @Composable
-private fun SideChatRow(core: CoreClient, row: SessionRow, parentDevice: String?, reduced: Boolean, onOpen: (String) -> Unit) {
+private fun SideChatRow(core: CoreClient, row: SessionRow, parentDevice: String?, lastMerged: Long?, reduced: Boolean, onOpen: (String) -> Unit, onMerged: () -> Unit) {
     var confirming by remember(row.id) { mutableStateOf(false) }
     var pending by remember(row.id) { mutableStateOf(false) }
-    // Kept for the sheet's life: the fork's own activity doesn't undo a merge.
-    var sent by remember(row.id) { mutableStateOf(false) }
     var error by remember(row.id) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val busy = row.hostIndicator == ChatIndicator.WORKING || row.hostIndicator == ChatIndicator.AWAITING_INPUT
@@ -263,8 +275,15 @@ private fun SideChatRow(core: CoreClient, row: SessionRow, parentDevice: String?
             }
             ZIcon(ZIcons.ChevronRight, null, Modifier.size(18.dp))
         }
-        if (row.fork != null && row.deviceId == parentDevice) TextButton(onClick = { confirming = true }, enabled = !pending && !busy && row.deviceOnline && !sent, modifier = Modifier.padding(start = 28.dp).heightIn(min = 48.dp)) {
-            Text(if (pending) "Sending result…" else if (sent) "Merged into this chat" else if (busy) "Finish its turn before merging" else "Merge into this chat")
+        if (row.fork != null && row.deviceId == parentDevice) {
+            // A past merge is shown as history; Merge stays open for newer responses.
+            TextButton(onClick = { confirming = true }, enabled = !pending && !busy && row.deviceOnline, modifier = Modifier.padding(start = 28.dp).heightIn(min = 48.dp)) {
+                Text(if (pending) "Merging…" else if (busy) "Finish its turn before merging" else "Merge into this chat")
+            }
+            lastMerged?.let { at ->
+                val ago = uniffi.zeron_core.relativeTimeLabel(atMs = at, nowMs = System.currentTimeMillis()).let { if (it == "now") "just now" else "$it ago" }
+                Text("Last merged $ago", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 40.dp))
+            }
         }
         error?.let { ErrorNote(it) }
     }
@@ -273,7 +292,7 @@ private fun SideChatRow(core: CoreClient, row: SessionRow, parentDevice: String?
         confirmButton = { TextButton(onClick = {
             confirming = false; pending = true; error = null
             scope.launch {
-                try { core.mergeChat(sourceChatId = row.id); sent = true }
+                try { core.mergeChat(sourceChatId = row.id); onMerged() }
                 catch (cancelled: CancellationException) { throw cancelled }
                 catch (failure: Exception) { error = "Couldn't merge. ${failure.message.orEmpty()}" }
                 finally { pending = false }

@@ -4,6 +4,30 @@ use serde_json::json;
 use zeron_rpc::methods;
 
 impl Client {
+    pub async fn chat_merge_receipts(
+        &self,
+        chat_id: &str,
+    ) -> Result<Vec<zeron_proto::ContextTransfer>> {
+        let row = self
+            .workspace()
+            .session(chat_id)
+            .cloned()
+            .ok_or_else(|| ClientError::NotFound("Chat no longer exists".into()))?;
+        let reply = self
+            .inner
+            .host_rpc(
+                &row.device_id,
+                methods::CHAT_TRANSFERS,
+                json!({"chatId":chat_id,"targetDeviceId":row.device_id}),
+            )
+            .await?;
+        let transfers: Vec<zeron_proto::ContextTransfer> =
+            serde_json::from_value(reply).map_err(|e| ClientError::Internal(e.to_string()))?;
+        Ok(transfers
+            .into_iter()
+            .filter(|transfer| transfer.kind == "merge")
+            .collect())
+    }
     pub async fn chat_checkpoints(&self, chat_id: &str) -> Result<Vec<zeron_proto::RunCheckpoint>> {
         let row = self
             .workspace()

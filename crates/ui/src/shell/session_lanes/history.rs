@@ -95,15 +95,16 @@ pub(super) fn restore_blurb(checkpoint: &Checkpoint) -> &'static str {
 struct RestoreGate {
     status: ChatIndicator,
     online: bool,
-    shared_tasks: bool,
+    /// A managed task under this chat (any depth) still owes it a result.
+    tasks_busy: bool,
 }
 
-/// `shared_tasks`: a task of this chat still works in its checkout.
+/// `tasks_busy`: a managed task under this chat is still unsettled.
 pub(super) fn blocked_reason(
     checkpoint: &Checkpoint,
     status: ChatIndicator,
     online: bool,
-    shared_tasks: bool,
+    tasks_busy: bool,
 ) -> Option<String> {
     if !online {
         return Some("Its device is offline.".into());
@@ -114,8 +115,8 @@ pub(super) fn blocked_reason(
     ) {
         return Some("Finish or stop the current turn first.".into());
     }
-    if shared_tasks {
-        return Some("Stop tasks working in this checkout first.".into());
+    if tasks_busy {
+        return Some("Finish or stop this chat's tasks first.".into());
     }
     (!checkpoint.restorable).then(|| {
         checkpoint
@@ -123,6 +124,57 @@ pub(super) fn blocked_reason(
             .clone()
             .unwrap_or_else(|| "This point can't be restored.".into())
     })
+}
+
+/// How deep managed delegation goes; the walk stops there.
+const TASK_DEPTH: usize = 4;
+
+/// The managed tasks under `chat_id`, at any depth up to [`TASK_DEPTH`],
+/// archived ones included (the engine's restore gate counts them).
+pub(super) fn descendant_tasks(
+    state: &AppState,
+    chat_id: &str,
+) -> Vec<(String, zeron_proto::DelegatedTask)> {
+    let mut found = Vec::new();
+    let mut frontier = vec![chat_id.to_owned()];
+    for _ in 0..TASK_DEPTH {
+        let mut next = Vec::new();
+        for chat in &state.chats {
+            let Some(parent) = chat.parent_chat_id.as_deref() else {
+                continue;
+            };
+            // Archived tasks count: archiving neither stops their work nor
+            // waives an undelivered result.
+            if !frontier.iter().any(|id| id == parent) {
+                continue;
+            }
+            if let Some(task) = chat.orchestration.as_ref().and_then(|o| o.task.as_ref()) {
+                found.push((chat.id.clone(), task.clone()));
+                next.push(chat.id.clone());
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    found
+}
+
+/// What decides whether a restore may run — each task's status, delivery and
+/// stop — sorted by id. Never its times: streaming must not re-read.
+pub(super) fn availability(tasks: &[(String, zeron_proto::DelegatedTask)]) -> String {
+    let mut parts: Vec<String> = tasks
+        .iter()
+        .map(|(id, task)| {
+            format!(
+                "{id}:{:?}:{}:{}",
+                task.status, task.delivered, task.cancel_requested
+            )
+        })
+        .collect();
+    parts.sort();
+    parts.join(",")
 }
 
 fn ago(ms: i64, now: DateTime<Utc>) -> String {
@@ -157,8 +209,9 @@ struct Receipt {
 /// History's view state, inside [`LaneState`] so it follows the open chat.
 #[derive(Default)]
 pub(in crate::shell) struct HistoryState {
-    /// The chat and turn the list was read for; a finished turn reads again.
-    key: Option<(String, Option<DateTime<Utc>>)>,
+    /// The chat, its last message, and its tasks' availability the list
+    /// was read at: a finished turn or a task settling reads it again.
+    key: Option<(String, Option<DateTime<Utc>>, String)>,
     load: Load,
     /// Ids seen once listed, so a checkpoint arriving later fades in.
     seen: HashSet<String>,
@@ -194,11 +247,15 @@ impl Shell {
     /// Read the open chat's checkpoints once per visit and again after each
     /// finished turn (a new one is saved then).
     fn ensure_history(&mut self, chat: &Chat, cx: &mut Context<Self>) {
-        let key = (chat.id.clone(), chat.last_message_at);
+        let tasks = availability(&descendant_tasks(self.state.read(cx), &chat.id));
+        let key = (chat.id.clone(), chat.last_message_at, tasks);
         let history = &mut self.session_lanes.history;
         if history.key.as_ref() == Some(&key)
             || matches!(history.load, Load::Loading | Load::Unsupported)
-                && history.key.as_ref().is_some_and(|(id, _)| *id == chat.id)
+                && history
+                    .key
+                    .as_ref()
+                    .is_some_and(|(id, _, _)| *id == chat.id)
         {
             return;
         }
@@ -286,14 +343,11 @@ impl Shell {
             RestoreGate {
                 status: state.display_status_for(chat, now),
                 online: state.device_online(&chat.device_id, now),
-                // A task sharing this checkout would have its files moved
-                // under it; the engine refuses too, this says so up front.
-                shared_tasks: super::tasks::task_rows(state, &chat.id, now)
+                // The engine refuses while managed work under this chat is
+                // unsettled (any depth); this says so up front.
+                tasks_busy: descendant_tasks(state, &chat.id)
                     .iter()
-                    .any(|row| {
-                        !row.task.status.is_terminal()
-                            && row.task.isolation == zeron_proto::TaskIsolation::Shared
-                    }),
+                    .any(|(_, task)| !super::tasks::settled(task)),
             }
         };
         let online = gate.online;
@@ -655,7 +709,7 @@ impl Shell {
             motion::COLLAPSE,
             reduced,
         );
-        let blocked = blocked_reason(&checkpoint, gate.status, gate.online, gate.shared_tasks);
+        let blocked = blocked_reason(&checkpoint, gate.status, gate.online, gate.tasks_busy);
         let accent = theme.accent;
 
         // Hover or focus reveals Restore beside the time.
@@ -1089,7 +1143,9 @@ impl Shell {
         history.seen.extend(list.iter().map(|c| c.id.clone()));
         history.first_listed = true;
         history.load = Load::Ready(list);
-        history.key = Some((chat.id.clone(), chat.last_message_at));
+        let tasks = availability(&descendant_tasks(self.state.read(cx), &chat.id));
+        let history = &mut self.session_lanes.history;
+        history.key = Some((chat.id.clone(), chat.last_message_at, tasks));
         history.open = open.iter().map(|id| (*id).to_owned()).collect();
         history.confirm = confirm.map(str::to_owned);
         history.errors.clear();
@@ -1157,11 +1213,67 @@ mod tests {
             blocked_reason(&c, ChatIndicator::Completed, true, false),
             None
         );
-        // A live task in this checkout blocks before the engine is asked.
+        // Unsettled managed work blocks before the engine is asked.
         assert_eq!(
             blocked_reason(&c, ChatIndicator::Idle, true, true).as_deref(),
-            Some("Stop tasks working in this checkout first.")
+            Some("Finish or stop this chat's tasks first.")
         );
+    }
+
+    #[test]
+    fn nested_task_settling_changes_the_availability_key() {
+        let task = |parent: &str, status: &str, extra: serde_json::Value| {
+            let mut t = serde_json::json!({
+                "id": "t", "parentChatId": parent, "role": "general", "isolation": "worktree",
+                "status": status, "prompt": "", "requestFingerprint": "f",
+                "createdAt": 0, "updatedAt": 0,
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                t[k] = v.clone();
+            }
+            t
+        };
+        let chat = |id: &str, parent: Option<&str>, task: Option<serde_json::Value>| -> Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "dev", "archived": false, "createdAt": Utc::now(),
+                "parentChatId": parent, "orchestration": task.map(|t| serde_json::json!({"task": t})),
+            }))
+            .unwrap()
+        };
+        let mut state = AppState::new();
+        // Cancelled parent task, grandchild still running.
+        state.apply_chats(vec![
+            chat("main", None, None),
+            chat(
+                "a",
+                Some("main"),
+                Some(task(
+                    "main",
+                    "cancelled",
+                    serde_json::json!({"cancelRequested": true}),
+                )),
+            ),
+            chat(
+                "b",
+                Some("a"),
+                Some(task("a", "running", serde_json::json!({}))),
+            ),
+        ]);
+        let before = descendant_tasks(&state, "main");
+        assert_eq!(before.len(), 2, "the grandchild counts");
+        assert!(
+            before
+                .iter()
+                .any(|(_, t)| !crate::shell::session_lanes::tasks::settled(t))
+        );
+        let key = availability(&before);
+        // Its timestamps moving changes nothing; its settling does.
+        let mut later = before.clone();
+        later[1].1.updated_at = 99;
+        assert_eq!(availability(&later), key);
+        later[1].1.status = zeron_proto::TaskStatus::Cancelled;
+        later[1].1.cancel_requested = true;
+        assert_ne!(availability(&later), key);
     }
 
     #[test]

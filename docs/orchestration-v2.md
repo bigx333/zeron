@@ -190,19 +190,35 @@ a shared checkout. `crates/harness/tests/history.rs` exercises the real Codex
 JSON-RPC adapter against a control-only fixture, including a paginated native
 fork and rejection of a missing source boundary without starting a process.
 
-The completed history follow-up passes 10 history integration tests, all 11
-orchestration and 6 side-chat regressions, 13 session unit tests, 39 Codex adapter
-tests (4 ignored), and 2 native-history adapter tests. Document (153), protocol
-(85) and MCP (41) unit suites also pass. History checks include first-turn
+The reviewed migration passes 11 history integration tests, all 12
+orchestration and 7 side-chat regressions, 15 session unit tests, 39 Codex adapter
+tests (4 ignored), and 3 native-history adapter tests. Document (153), protocol
+(85), client (26) and MCP (42) unit suites also pass. History checks include first-turn
 baseline recovery, interrupted retry recovery with intervening edits, executable
 modes, symlinks, file/directory transitions, frozen task results and merge receipt
-revisions. Desktop lane coverage is now 14 tests; the four new History captures
+revisions. Desktop lane coverage is now 15 tests; the four new History captures
 were visually reviewed in dark and light. `cargo check --workspace` passes.
 
-The broader engine run reports 587 passed, 2 failed and 5 ignored: the unchanged
-installer fixture cannot download from its loopback server, and a workspace
-search test fails in the full parallel run but passes alone. The full desktop
+The latest broader engine run from a clean review checkout reports 590 passed,
+1 failed and 5 ignored: an unchanged workspace-search test fails in the full
+parallel run but passes alone. An earlier run also encountered a loopback
+download failure in the unchanged installer fixture; it passes in the clean
+review checkout. The full desktop
 suite's attachment-test abort also remains. These runs are not reported as clean.
 Android's final debug APK builds with both native ABIs. iOS parsing and the
 limited UIKit check pass for the edited sources; full Xcode and device/emulator
 runtime verification are still unavailable.
+
+The review loop additionally checks native resume fallback context, exclusion of
+queued future messages from bootstraps, completed native boundaries across
+continuation entries, bounded cancellation previews with full stored reasons,
+async UI callbacks after navigation, and nested/archived task availability.
+Mobile merge history now reads durable host receipts; recorded merges remain
+history rather than preventing a newer result from merging. The checked-in Swift
+binding matches the generator byte for byte, as required by CI.
+
+History eligibility refreshes when this chat or its managed descendants change.
+Other chats sharing the checkout are always checked by the engine at restore;
+their status alone does not refresh an open History list. Closing a mobile sheet
+during a restore can lose its immediate Undo receipt, while the durable recovery
+point remains available in History.

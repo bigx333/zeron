@@ -290,7 +290,7 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenCha
     if (pickingWake) SnoozeDateTimeDialogs(onDismiss = { pickingWake = false }) { model.snooze(chatId, it) }
 
     if (orchestration) {
-        OrchestrationSheet(core, row, related, onDismiss = { orchestration = false }, onOpen = { target -> orchestration = false; onOpenChat(target) })
+        OrchestrationSheet(core, row, related, onDismiss = { orchestration = false }, onOpen = { target -> orchestration = false; onOpenChat(target) }, workspaceRevision = workspace?.revision ?: 0u)
     }
     sheet?.let { s ->
         ModalBottomSheet(onDismissRequest = { sheet = null }) {

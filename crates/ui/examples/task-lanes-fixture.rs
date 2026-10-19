@@ -93,9 +93,9 @@ fn main() -> anyhow::Result<()> {
                     chat("t-audit", "Audit the T3 handoff budget", Some("main"), "codex", "gpt-5.3-codex",
                         task("audit", "main", "running", "research", "worktree", 14, 1, serde_json::json!({}))),
                     chat("t-review", "Review the merge RPC contract", Some("main"), "claude-code", "claude-sonnet-5-5",
-                        task("review", "main", "waiting", "review", "shared", 11, 2, serde_json::json!({}))),
+                        task("review", "main", "waiting", "review", "worktree", 11, 2, serde_json::json!({}))),
                     chat("t-icons", "Port lineage icons to the lanes card", Some("main"), "codex", "gpt-5.3-codex",
-                        task("icons", "main", "running", "design", "shared", 9, 0, serde_json::json!({"cancelRequested": true}))),
+                        task("icons", "main", "running", "design", "worktree", 9, 0, serde_json::json!({"cancelRequested": true}))),
                     chat("t-sync", "Profile registry sync under load", Some("main"), "codex", "gpt-5.3-codex",
                         task("sync", "main", "running", "test", "worktree", 7, 3, serde_json::json!({}))),
                     chat("t-cancel", "Draft the cancellation copy", Some("main"), "claude-code", "claude-sonnet-5-5",
@@ -213,6 +213,9 @@ fn main() -> anyhow::Result<()> {
                             {"id": "k2", "title": "Audit the handoff budget", "createdAtMs": ms(70), "providerStrategy": "portable", "filesAvailable": true, "restorable": true},
                             {"id": "r1", "title": "Before restoring \u{201c}Port lineage icons\u{201d}", "createdAtMs": ms(2), "recovery": true, "providerStrategy": "native", "filesAvailable": true, "filesChanged": 9, "restorable": true},
                         ]);
+                        // On a chat with nothing delegated still running, so
+                        // restores aren't held back by unsettled tasks.
+                        select(cx, "t-notes");
                         window.update(cx, |s, _, cx| {
                             s.fixture_task_lanes(&[], false, None, None, None, cx);
                             s.fixture_history(checkpoints.clone(), &["k4", "k3"], Some("k4"), None, None, false, cx);
