@@ -3742,7 +3742,7 @@ fn map_questions(props: &Value) -> Vec<(String, UserInputQuestion)> {
                             header: q
                                 .get("header")
                                 .and_then(Value::as_str)
-                                .unwrap_or("Question")
+                                .unwrap_or_default()
                                 .to_owned(),
                             question: question.to_owned(),
                             options: q

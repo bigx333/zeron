@@ -2280,7 +2280,7 @@ fn async_input_request(item: &Value) -> Option<AgentEvent> {
             }
             Some(UserInputQuestion {
                 id: format!("{id}-{index}"),
-                header: "Codex question".into(),
+                header: String::new(),
                 question: title.into(),
                 options: question
                     .get("options")
@@ -2413,14 +2413,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
             };
             let question = UserInputQuestion {
                 id: new_message_id(),
-                header: {
-                    let h = field(["header", "title", "label"]);
-                    if h.is_empty() {
-                        "Codex question".into()
-                    } else {
-                        h
-                    }
-                },
+                header: field(["header", "title", "label"]),
                 question: field(["question", "prompt", "text"]),
                 options: q
                     .get("options")

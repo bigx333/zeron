@@ -41,8 +41,9 @@ impl Request {
             .iter()
             .map(|q| UserInputQuestion {
                 id: super::new_message_id(),
-                // Grok has no separate header field on this wire.
-                header: "Grok question".into(),
+                // Grok has no separate header field on this wire; an empty
+                // header lets each client fall back to the question itself.
+                header: String::new(),
                 question: q.question.clone(),
                 options: q.options.iter().map(|o| o.label.clone()).collect(),
                 multi_select: q.multi_select.unwrap_or(false),

@@ -905,7 +905,10 @@ async fn models_discovers_visible_catalog_with_pagination() {
         .models()
         .await
         .expect("fallback models");
-    assert!(!fallback.is_empty(), "failed probe must fall back to the curated catalog");
+    assert!(
+        !fallback.is_empty(),
+        "failed probe must fall back to the curated catalog"
+    );
 
     let missing = CodexHarness::new().with_executable("/nonexistent/codex-nowhere");
     // models() requires a resolvable binary… but with_executable trusts the

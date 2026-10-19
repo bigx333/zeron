@@ -5713,17 +5713,32 @@ impl WorkspaceCommand {
                 "Zeron Nova: choose agent, model, and reasoning",
                 false,
             ),
-            (Self::New, "new", "Zeron Nova: start a new conversation", false),
+            (
+                Self::New,
+                "new",
+                "Zeron Nova: start a new conversation",
+                false,
+            ),
             (
                 Self::Resume,
                 "resume",
                 "Zeron Nova: search and open conversations",
                 false,
             ),
-            (Self::Settings, "settings", "Zeron Nova: open settings", false),
+            (
+                Self::Settings,
+                "settings",
+                "Zeron Nova: open settings",
+                false,
+            ),
             (Self::Diff, "diff", "Zeron Nova: open changes", true),
             (Self::Files, "files", "Zeron Nova: open project files", true),
-            (Self::Terminal, "terminal", "Zeron Nova: open a terminal", true),
+            (
+                Self::Terminal,
+                "terminal",
+                "Zeron Nova: open a terminal",
+                true,
+            ),
             (
                 Self::Rename,
                 "rename",
@@ -9972,7 +9987,11 @@ impl Composer {
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(theme.text_muted.opacity(0.6))
                                     .child(SharedString::from(crate::popover::tracked_upper(
-                                        &question.header,
+                                        if question.header.trim().is_empty() {
+                                            "Question"
+                                        } else {
+                                            &question.header
+                                        },
                                     ))),
                             )
                             .when(wizard.questions.len() > 1, |el| {
