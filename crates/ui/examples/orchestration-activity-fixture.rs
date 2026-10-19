@@ -1,8 +1,8 @@
 //! Native review fixture for orchestration in the transcript and sidebar: a
 //! parent that delegated work (a spawn group mixing managed delegations with
 //! a provider's own subagent), live `@chat:` pills in its reply, a task's
-//! result as a single report, a burst of reports (an open question, a
-//! failure, a side chat's message) merged under one summary, a result an
+//! result as a single report, a burst of reports (a question a task asked,
+//! a failure, a side chat's message) merged under one summary, a result an
 //! older host wrote as text, and the parent's tasks nested in the sidebar.
 //!
 //! `cargo run -p zeron-ui --features appshots-fixture --example orchestration-activity-fixture -- <dir>`

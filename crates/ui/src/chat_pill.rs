@@ -320,24 +320,18 @@ pub(crate) fn display_title(title: &str, harness: Option<HarnessId>) -> &str {
     if stripped.is_empty() { title } else { stripped }
 }
 
-/// Hash what changes a pill's LAYOUT — which chat a written id names, its
-/// title and harness. Status is painted live and stays out, so a status
-/// change never remeasures a row.
-pub(crate) fn layout_fingerprint<'a>(
-    state: &AppState,
-    written: impl IntoIterator<Item = &'a str>,
-) -> u64 {
+/// Hash what changes a pill's LAYOUT for one written id — which chat it
+/// names, its title and harness. Status is painted live and stays out, so a
+/// status change never remeasures a row.
+pub(crate) fn layout_key(state: &AppState, written: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for id in written {
-        id.hash(&mut hasher);
-        match resolve_chat(state, id) {
-            Some(chat) => {
-                chat.id.hash(&mut hasher);
-                chat_title(chat).hash(&mut hasher);
-                chat.config.as_ref().map(|c| c.harness as u8).hash(&mut hasher);
-            }
-            None => 0u8.hash(&mut hasher),
+    match resolve_chat(state, written) {
+        Some(chat) => {
+            chat.id.hash(&mut hasher);
+            chat_title(chat).hash(&mut hasher);
+            chat.config.as_ref().map(|c| c.harness as u8).hash(&mut hasher);
         }
+        None => 0u8.hash(&mut hasher),
     }
     hasher.finish()
 }
@@ -351,6 +345,21 @@ pub(crate) fn harness_mark(harness: HarnessId, size: f32, theme: &Theme) -> gpui
         .size(px(size))
         .flex_none()
         .text_color(tint.unwrap_or(theme.text_muted).opacity(0.8))
+}
+
+/// A keyboard stop wearing the accent focus ring on a 1px border the caller
+/// lays out (transparent until focused). Tab reaches it and Enter or Space
+/// activates its click, but a pointer click doesn't focus it: the composer
+/// keeps the keyboard, as it did when these rows weren't focusable.
+pub(crate) fn tab_stop(el: gpui::Stateful<gpui::Div>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let accent = theme.accent;
+    el.tab_index(0)
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .focus_visible(move |style| style.border_color(accent))
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+            window.prevent_default()
+        })
 }
 
 /// Height of a pill inside a row (activity lines, spawn lines).
@@ -481,14 +490,14 @@ mod tests {
     }
 
     #[test]
-    fn the_layout_fingerprint_ignores_status_but_not_titles() {
+    fn the_layout_key_ignores_status_but_not_titles() {
         let mut state = AppState::new();
         state.chats.push(chat("c1c1c1c1-0000", Some("Child")));
-        let base = layout_fingerprint(&state, ["c1c1c1c1"]);
+        let base = layout_key(&state, "c1c1c1c1");
         state.begin_pending_send("c1c1c1c1-0000", "m1", Utc::now());
-        assert_eq!(base, layout_fingerprint(&state, ["c1c1c1c1"]));
+        assert_eq!(base, layout_key(&state, "c1c1c1c1"));
         state.chats[0].title = Some("Renamed".into());
-        assert_ne!(base, layout_fingerprint(&state, ["c1c1c1c1"]));
+        assert_ne!(base, layout_key(&state, "c1c1c1c1"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! Orchestration reports in a parent's transcript, as the desktop draws them:
-//! the source chat's pill and what it did ("finished", "needs an answer",
+//! the source chat's pill and what it did ("finished", "asked a question",
 //! "wrote"), a one-line preview while folded, and the report itself with a
 //! way into the source once unfolded. Rows come from typed activity entries
 //! and from the text headers older hosts wrote into user messages.
@@ -101,7 +101,7 @@ pub(crate) struct ActivityRow {
     pub header: PText,
     pub preview: Option<PText>,
     pub body: Vec<PBlock>,
-    /// "Open task" / "Answer" — a link to the source; `None` when unknown.
+    /// "Open task" / "Open chat" — a link to the source; `None` when unknown.
     pub footer: Option<PText>,
     pub note: Option<PText>,
     pub expanded: bool,

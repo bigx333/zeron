@@ -84,15 +84,27 @@ final class RowView: UIView {
         }
     }
 
-    /// The text painted inside a link's hit rect.
+    /// The text painted inside a link's hit rect: a pill's title, or a
+    /// delegation line's "Delegated" and its task's title. A run that
+    /// continues the previous one (the next characters, on the same line,
+    /// touching it) joins as written; separate pieces get a space, and
+    /// whitespace collapses.
     private static func paintedText(of l: LinkHit, in d: RowDisplay) -> String {
         let ns = d.text as NSString
         let hit = CGRect(x: CGFloat(l.x), y: CGFloat(l.y), width: CGFloat(l.w), height: CGFloat(l.h)).insetBy(dx: -1, dy: -1)
-        return d.runs
-            .filter { $0.scroller == l.scroller && hit.contains(CGPoint(x: CGFloat($0.x) + 0.5, y: CGFloat($0.baseline) - 1)) }
-            .map { ns.substring(with: NSRange(location: Int($0.start), length: Int($0.len))) }
-            .joined()
-            .trimmingCharacters(in: .whitespaces)
+        var joined = ""
+        var previous: TextRun?
+        for r in d.runs where r.scroller == l.scroller && hit.contains(CGPoint(x: CGFloat(r.x) + 0.5, y: CGFloat(r.baseline) - 1)) {
+            if let p = previous {
+                let continues = r.start == p.start &+ p.len
+                    && abs(r.baseline - p.baseline) < 0.5
+                    && abs(r.x - (p.x + p.width)) < 1
+                if !continues { joined += " " }
+            }
+            joined += ns.substring(with: NSRange(location: Int(r.start), length: Int(r.len)))
+            previous = r
+        }
+        return joined.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     /// Link elements where they're painted now (code/table scrollers move).

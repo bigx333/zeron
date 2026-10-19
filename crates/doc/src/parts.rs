@@ -768,6 +768,8 @@ fn spawn_badge(call: &ToolCall) -> Option<serde_json::Value> {
 /// A managed delegation keeps the identifiers that link its chip to the
 /// child chat and label it ([`zeron_proto::chat_refs::DELEGATE_INPUT_KEEP`]
 /// plus the target's harness and model), each capped. Never the brief.
+/// The request key keeps its exact bytes — the engine derives the child's
+/// id from them, padding included — while labels are trimmed.
 /// Re-sanitizing is a fixpoint like [`spawn_badge`].
 fn delegate_badge(call: &ToolCall) -> Option<serde_json::Value> {
     use zeron_proto::chat_refs::{DELEGATE_INPUT_KEEP, DELEGATE_TARGET_KEEP};
@@ -778,9 +780,17 @@ fn delegate_badge(call: &ToolCall) -> Option<serde_json::Value> {
     let keep = |value: &serde_json::Value, keys: &[&str]| {
         keys.iter()
             .filter_map(|key| {
-                let value = value.get(key)?.as_str()?.trim();
+                let value = value.get(key)?.as_str()?;
+                if value.trim().is_empty() {
+                    return None;
+                }
+                let value = if *key == "client_request_id" {
+                    value
+                } else {
+                    value.trim()
+                };
                 let value: String = value.chars().take(512).collect();
-                (!value.is_empty()).then(|| ((*key).to_owned(), serde_json::Value::from(value)))
+                Some(((*key).to_owned(), serde_json::Value::from(value)))
             })
             .collect::<serde_json::Map<String, serde_json::Value>>()
     };
@@ -1182,6 +1192,49 @@ mod tests {
                 input: None,
             }
         );
+    }
+
+    /// The engine derives a child's id from its request key's exact bytes,
+    /// so the doc keeps a padded key as written (labels are still trimmed),
+    /// and re-sanitizing leaves it alone.
+    #[test]
+    fn sanitize_keeps_a_padded_request_key_byte_for_byte() {
+        let padded = " round-1\t";
+        let longest = format!(" {} ", "k".repeat(254));
+        for key in [padded.to_owned(), longest] {
+            let call = ToolCall::Unknown {
+                name: "mcp__zeron__delegate_task".into(),
+                input: Some(serde_json::json!({
+                    "task": "secret brief",
+                    "title": "  Review round 1 ",
+                    "client_request_id": key,
+                })),
+            };
+            let clean = sanitize_tool_call(&call);
+            let ToolCall::Unknown { input: Some(kept), .. } = &clean else {
+                panic!("kept input: {clean:?}");
+            };
+            assert_eq!(kept["client_request_id"], serde_json::json!(key));
+            assert_eq!(kept["title"], "Review round 1");
+            assert!(kept.get("task").is_none());
+            assert_eq!(sanitize_tool_call(&clean), clean, "fixpoint");
+            let link = zeron_proto::chat_refs::delegate_call(&clean).unwrap();
+            assert_eq!(link.request_id.as_deref(), Some(key.as_str()));
+            assert_eq!(
+                zeron_proto::chat_refs::managed_task_id("parent", link.request_id.as_deref().unwrap()),
+                zeron_proto::chat_refs::managed_task_id("parent", &key),
+            );
+        }
+        // A blank key carries no identity and isn't kept.
+        let blank = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "delegate_task".into(),
+            input: Some(serde_json::json!({"client_request_id": "   ", "title": "T"})),
+        };
+        let ToolCall::Mcp { input: Some(kept), .. } = sanitize_tool_call(&blank) else {
+            panic!("title kept");
+        };
+        assert!(kept.get("client_request_id").is_none());
     }
 
     #[test]

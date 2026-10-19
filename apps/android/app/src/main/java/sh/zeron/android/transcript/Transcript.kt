@@ -294,16 +294,55 @@ private fun Modifier.chatLinkActions(model: RowModel, actions: TranscriptActions
     }
 }
 
-/** The text painted inside a link's hit rect (a pill's title). */
+/** The text painted inside a link's hit rect: a pill's title, or a delegation line's "Delegated" and its task's title. */
 private fun paintedText(d: uniffi.zeron_core.RowDisplay, l: uniffi.zeron_core.LinkHit): String =
-    d.runs
-        .filter { r ->
-            r.scroller == l.scroller &&
-                r.x + 0.5f in (l.x - 1f)..(l.x + l.w + 1f) &&
-                r.baseline - 1f in (l.y - 1f)..(l.y + l.h + 1f)
+    joinPainted(
+        d.runs
+            .filter { r ->
+                r.scroller == l.scroller &&
+                    r.x + 0.5f in (l.x - 1f)..(l.x + l.w + 1f) &&
+                    r.baseline - 1f in (l.y - 1f)..(l.y + l.h + 1f)
+            }
+            .map { r ->
+                PaintedRun(d.text.substring(r.start.toInt(), (r.start + r.len).toInt()), r.start.toInt(), r.x, r.width, r.baseline)
+            },
+    )
+
+/** One painted run: its text, where it starts in the row text (UTF-16), and where it sits. */
+internal data class PaintedRun(val text: String, val start: Int, val x: Float, val width: Float, val baseline: Float)
+
+/**
+ * Painted runs as one label. A run that continues the previous one (the next
+ * characters, on the same line, touching it) joins as written; separate pieces
+ * — a label and a title, another line — get a space. Whitespace collapses.
+ */
+internal fun joinPainted(runs: List<PaintedRun>): String {
+    val joined = StringBuilder()
+    var previous: PaintedRun? = null
+    for (r in runs) {
+        val p = previous
+        if (p != null) {
+            val continues = r.start == p.start + p.text.length &&
+                kotlin.math.abs(r.baseline - p.baseline) < 0.5f &&
+                kotlin.math.abs(r.x - (p.x + p.width)) < 1f
+            if (!continues) joined.append(' ')
         }
-        .joinToString("") { r -> d.text.substring(r.start.toInt(), (r.start + r.len).toInt()) }
-        .trim()
+        joined.append(r.text)
+        previous = r
+    }
+    return buildString {
+        var space = false
+        for (c in joined) {
+            if (c.isWhitespace()) {
+                space = isNotEmpty()
+            } else {
+                if (space) append(' ')
+                space = false
+                append(c)
+            }
+        }
+    }
+}
 
 /** Link taps (row coordinates) and the long-press menu. */
 private fun Modifier.pointerTaps(model: RowModel, d: Float, actions: TranscriptActions, onLongPress: (Offset) -> Unit) =

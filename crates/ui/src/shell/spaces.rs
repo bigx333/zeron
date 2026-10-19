@@ -1431,6 +1431,205 @@ mod pinned_session_tests {
         exercise_session_section_drops(cx, false, false);
     }
 
+    /// A pinned row's slot carries its task tree (the summary line, and the
+    /// rows once open — nested ones included — or mid-tween). Hit-testing
+    /// and the drag's vacancy size the row the same way, so a pointer over
+    /// a slot finds that slot and a row dragged out leaves no hole.
+    #[gpui::test]
+    fn a_pinned_rows_task_tree_sizes_its_slot_hit_testing_and_drag(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::*;
+
+        struct SidebarHost(Entity<Shell>);
+        impl Render for SidebarHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    div()
+                        .w(px(280.0))
+                        .h(px(800.0))
+                        .on_drag_move::<SidebarSessionDrag>(
+                            cx.listener(Shell::contain_pinned_session_drag),
+                        )
+                        .on_drop::<SidebarSessionDrag>(
+                            cx.listener(|shell, _, _, cx| {
+                                shell.cancel_sidebar_session_transfer(cx)
+                            }),
+                        )
+                        .child(shell.render_chat_sidebar(&Theme::default(), cx))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            SidebarHost(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                *shell.settings.sidebar_pins_mut("local".into()) = ids(&["parent", "pin2"]);
+                shell.pinned_open = true;
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
+                    let chat = |id: &str, parent: Option<&str>, task: Option<&str>, age: i64| {
+                        serde_json::from_value::<zeron_proto::Chat>(serde_json::json!({
+                            "id": id, "title": id, "deviceId": "local", "archived": false,
+                            "createdAt": Utc::now() - chrono::Duration::minutes(age),
+                            "parentChatId": parent,
+                            "orchestration": task.map(|status| serde_json::json!({"task": {
+                                "id": id, "parentChatId": parent, "role": "general",
+                                "isolation": "shared", "status": status, "prompt": "x",
+                                "requestFingerprint": "f", "createdAt": 1, "updatedAt": 1
+                            }})),
+                        }))
+                        .unwrap()
+                    };
+                    state.chats = vec![
+                        chat("parent", None, None, 10),
+                        chat("pin2", None, None, 9),
+                        chat("plain", None, None, 8),
+                        chat("audit", Some("parent"), Some("running"), 7),
+                        chat("review", Some("parent"), Some("waiting"), 6),
+                        chat("deep", Some("audit"), Some("queued"), 5),
+                    ];
+                });
+                shell
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        let redraw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        };
+        let check = |cx: &mut gpui::VisualTestContext, label: &str| -> (f32, f32) {
+            let parent = cx.debug_bounds("session-slot-parent").unwrap();
+            let pin2 = cx.debug_bounds("session-slot-pin2").unwrap();
+            let heights = shell.read_with(cx, |shell, _| shell.sidebar_pinned_heights.clone());
+            assert_eq!(heights.len(), 2, "{label}");
+            for (slot, height) in [parent, pin2].iter().zip(&heights) {
+                let drawn = f32::from(slot.size.height);
+                assert!((drawn - height).abs() < 0.75, "{label}: drawn {drawn}, hit-tested {height}");
+            }
+            assert!((f32::from(pin2.top() - parent.bottom()) - SIDEBAR_LIST_GAP).abs() < 0.5);
+            // Each slot's whole span finds that slot.
+            for (ix, slot) in [parent, pin2].iter().enumerate() {
+                for y in [slot.top() + px(1.0), slot.bottom() - px(1.0)] {
+                    let rel = f32::from(y - parent.top());
+                    assert_eq!(row_drop_index(rel, &heights, false), Some(ix), "{label}: at {rel}");
+                }
+            }
+            (f32::from(parent.size.height), f32::from(pin2.size.height))
+        };
+
+        redraw(cx);
+        let (folded, bare) = check(cx, "folded");
+        assert_eq!(folded - bare, super::super::sidebar_tree::SUMMARY_HEIGHT);
+
+        // Open: the summary plus every row, the nested task included.
+        let toggle = cx.debug_bounds("sidebar-tree-parent").unwrap().center();
+        cx.simulate_click(toggle, gpui::Modifiers::default());
+        shell.update(cx, |shell, _| shell.sidebar_disclosure_motion.clear());
+        redraw(cx);
+        let (open, _) = check(cx, "open");
+        assert!(open > folded + 2.0 * 26.0, "three rows under the summary: {open}");
+
+        // Closing, caught mid-tween.
+        cx.simulate_click(toggle, gpui::Modifiers::default());
+        shell.update(cx, |shell, _| {
+            shell
+                .sidebar_disclosure_motion
+                .get_mut("tree:parent")
+                .unwrap()
+                .started -= crate::motion::COLLAPSE.total() / 2;
+        });
+        redraw(cx);
+        let (closing, _) = check(cx, "closing");
+        assert!(closing > folded && closing < open, "{folded} < {closing} < {open}");
+        shell.update(cx, |shell, _| shell.sidebar_disclosure_motion.clear());
+        redraw(cx);
+        assert_eq!(check(cx, "folded again").0, folded);
+
+        // Reordered within Pinned: low in the second slot is the second
+        // slot, past the first row's tree.
+        let from = cx.debug_bounds("chat-parent").unwrap().center();
+        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            from + gpui::point(px(8.0), px(0.0)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        let pin2 = cx.debug_bounds("session-slot-pin2").unwrap();
+        let target = gpui::point(pin2.center().x, pin2.bottom() - px(3.0));
+        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.pinned_session_drag.as_ref().map(|drag| drag.over), Some(1));
+        });
+        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
+        shell.update(cx, |shell, cx| {
+            assert_eq!(shell.active_sidebar_pins(cx), ids(&["pin2", "parent"]));
+            shell.sidebar_session_return = None;
+            shell.sidebar_resort.clear();
+            cx.notify();
+        });
+        redraw(cx);
+
+        // Dragged out of Pinned: the vacancy is the whole slot, tree
+        // included, so the source closes without leaving a hole.
+        let from = cx.debug_bounds("chat-parent").unwrap().center();
+        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            from + gpui::point(px(8.0), px(0.0)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        let slot = cx.debug_bounds("session-slot-plain").unwrap();
+        let target = gpui::point(slot.center().x, slot.top() + px(3.0));
+        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
+        shell.update(cx, |shell, cx| {
+            let drag = shell.sidebar_session_transfer.as_mut().unwrap();
+            assert_eq!(drag.row_height, folded);
+            assert_eq!(drag.source_collapse.to, folded + SIDEBAR_LIST_GAP);
+            drag.source_collapse.started -= TAB_SLIDE.total();
+            for gap in drag.section_gaps.values_mut() {
+                gap.started -= TAB_SLIDE.total();
+            }
+            cx.notify();
+        });
+        redraw(cx);
+        assert_eq!(
+            cx.debug_bounds("session-slot-parent").unwrap().size.height,
+            px(0.0),
+            "the source slot left a hole"
+        );
+        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
+    }
+
     fn exercise_session_section_drops(
         cx: &mut gpui::TestAppContext,
         compact: bool,
@@ -5546,6 +5745,8 @@ impl Shell {
             .len();
         let regular_rows = rows.split_off(pinned_count);
         let pinned_rows = rows;
+        // Hit-testing sizes each pinned slot as it renders: the row plus its
+        // task tree, folded, open or mid-tween.
         self.sidebar_pinned_heights = pinned_rows
             .iter()
             .map(|row| {
@@ -5554,7 +5755,7 @@ impl Shell {
                     self.settings.sidebar_show_project_label,
                     row.branch.is_some(),
                     row.change_request.is_some(),
-                )
+                ) + self.sidebar_tree_height(&row.chat.id, cx)
             })
             .collect();
         let visible_pinned_ids = std::sync::Arc::new(
@@ -5622,6 +5823,13 @@ impl Shell {
         sections.extend(regular_groups);
 
         let returning = self.sidebar_session_transfer.is_none();
+        // The moving row's slot includes its task tree, so its vacancy and
+        // the destination gap match what the slot drew.
+        let moving_tree_height = self
+            .sidebar_session_transfer
+            .as_ref()
+            .or(self.sidebar_session_return.as_ref().map(|state| &state.transfer))
+            .map_or(0.0, |drag| self.sidebar_tree_height(&drag.payload.chat_id, cx));
         let transfer = self.sidebar_session_transfer.as_mut().or_else(|| {
             self.sidebar_session_return
                 .as_mut()
@@ -5648,7 +5856,7 @@ impl Shell {
                     self.settings.sidebar_show_project_label,
                     rows[index].branch.is_some(),
                     rows[index].change_request.is_some(),
-                );
+                ) + moving_tree_height;
                 // Move the vacant slot to the destination instead of keeping two
                 // holes. Sample layout and paint with the same reversible easing.
                 let collapse = !returning

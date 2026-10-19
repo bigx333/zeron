@@ -52,11 +52,15 @@ pub(super) struct TreeCounts {
     pub needs_input: usize,
 }
 
+fn is_live_child(chat: &Chat, parent: &str) -> bool {
+    !chat.archived && chat.parent_chat_id.as_deref() == Some(parent)
+}
+
 fn live_children<'a>(state: &'a AppState, parent: &str) -> Vec<&'a Chat> {
     let mut children: Vec<&Chat> = state
         .chats
         .iter()
-        .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(parent))
+        .filter(|chat| is_live_child(chat, parent))
         .collect();
     // Tasks still owed lead (oldest first, as in the lanes card); the rest
     // follow by recent activity.
@@ -107,6 +111,22 @@ pub(super) fn subtree(state: &AppState, parent: &str, now: DateTime<Utc>) -> Vec
     let mut out = Vec::new();
     walk(state, parent, 1, now, &mut out);
     out
+}
+
+/// How many rows [`subtree`] draws under `parent`, without resolving them.
+fn subtree_len(state: &AppState, parent: &str) -> usize {
+    fn walk(state: &AppState, parent: &str, depth: usize) -> usize {
+        if depth > MAX_DEPTH {
+            return 0;
+        }
+        state
+            .chats
+            .iter()
+            .filter(|chat| is_live_child(chat, parent))
+            .map(|chat| 1 + walk(state, &chat.id, depth + 1))
+            .sum()
+    }
+    walk(state, parent, 1)
 }
 
 pub(super) fn counts(nodes: &[TreeNode]) -> TreeCounts {
@@ -165,6 +185,35 @@ pub(super) fn summary(counts: TreeCounts) -> String {
 }
 
 impl Shell {
+    /// The tree body's height under `parent` this frame (mid-tween
+    /// included) for `children` rows, and whether it's moving.
+    fn sidebar_tree_body(&self, parent: &str, children: usize, reduce: bool) -> (f32, bool) {
+        let full = children as f32 * (CHILD_HEIGHT + CHILD_GAP);
+        let tween = self
+            .sidebar_disclosure_motion
+            .get(&format!("tree:{parent}"))
+            .copied()
+            .filter(|motion| motion.animating() && !reduce);
+        let resting = if self.sidebar_open_trees.contains(parent) {
+            full
+        } else {
+            0.0
+        };
+        (tween.map_or(resting, |t| t.current()), tween.is_some())
+    }
+
+    /// Everything `parent`'s tree adds under its sidebar row this frame —
+    /// the summary line and the body, mid-tween included — or zero without
+    /// live children. The row's slot, its drag vacancy and the pinned
+    /// section's hit-testing all size the row with this.
+    pub(super) fn sidebar_tree_height(&self, parent: &str, cx: &gpui::App) -> f32 {
+        let children = subtree_len(self.state.read(cx), parent);
+        if children == 0 {
+            return 0.0;
+        }
+        SUMMARY_HEIGHT + self.sidebar_tree_body(parent, children, motion::reduced_motion(cx)).0
+    }
+
     /// The tree block under `parent`'s row and its height this frame, or
     /// `None` when the chat has no live children.
     pub(super) fn sidebar_tree_block(
@@ -184,90 +233,94 @@ impl Shell {
         let counts = counts(&nodes);
         let open = self.sidebar_open_trees.contains(parent);
         let motion_key = format!("tree:{parent}");
-        let full = nodes.len() as f32 * (CHILD_HEIGHT + CHILD_GAP);
-        let tween = self
-            .sidebar_disclosure_motion
-            .get(&motion_key)
-            .copied()
-            .filter(|motion| motion.animating() && !motion::reduced_motion(cx));
-        let body_height = tween.map_or(if open { full } else { 0.0 }, |t| t.current());
-        let animating = tween.is_some();
+        let (body_height, animating) =
+            self.sidebar_tree_body(parent, nodes.len(), motion::reduced_motion(cx));
         let view = cx.entity_id();
         let toggle_parent = parent.to_owned();
         let chevron = self.sidebar_disclosure_chevron(&motion_key, open, theme);
-        let summary_line = div()
-            .id(SharedString::from(format!("sidebar-tree-{parent}")))
-            .h(px(SUMMARY_HEIGHT))
-            .ml(px(GUIDE_X - 6.0))
-            .pr(px(8.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .rounded(px(Theme::CONTROL_RADIUS))
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted)
-            .hover(|s| s.bg(theme.ink(0.04)).text_color(theme.text))
-            .tooltip(crate::settings::widgets::text_tooltip(summary(counts)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                let key = format!("tree:{toggle_parent}");
-                let was_open = this.sidebar_open_trees.contains(&toggle_parent);
-                let full = {
-                    let state = this.state.read(cx);
-                    subtree(state, &toggle_parent, Utc::now()).len() as f32
-                        * (CHILD_HEIGHT + CHILD_GAP)
-                };
-                this.begin_sidebar_disclosure_motion(
-                    &key,
-                    if was_open { full } else { 0.0 },
-                    if was_open { 0.0 } else { full },
-                );
-                if was_open {
-                    this.sidebar_open_trees.remove(&toggle_parent);
-                } else {
-                    this.sidebar_open_trees.insert(toggle_parent.clone());
-                }
-                cx.notify();
-            }))
-            .child(chevron)
-            .child(
+        let spoken = SharedString::from(summary(counts));
+        let summary_line = crate::chat_pill::tab_stop(
+            div()
+                .id(SharedString::from(format!("sidebar-tree-{parent}")))
+                .debug_selector({
+                    let parent = parent.to_owned();
+                    move || format!("sidebar-tree-{parent}")
+                })
+                .role(gpui::Role::Button)
+                .aria_label(spoken.clone())
+                .aria_expanded(open),
+            theme,
+        )
+        .h(px(SUMMARY_HEIGHT))
+        // The focus ring's border takes a pixel of the margin and padding,
+        // so the line's contents don't move.
+        .ml(px(GUIDE_X - 7.0))
+        .pr(px(7.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .rounded(px(Theme::CONTROL_RADIUS))
+        .cursor_pointer()
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted)
+        .hover(|s| s.bg(theme.ink(0.04)).text_color(theme.text))
+        .tooltip(crate::settings::widgets::text_tooltip(spoken))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            let key = format!("tree:{toggle_parent}");
+            let was_open = this.sidebar_open_trees.contains(&toggle_parent);
+            let full =
+                subtree_len(this.state.read(cx), &toggle_parent) as f32 * (CHILD_HEIGHT + CHILD_GAP);
+            this.begin_sidebar_disclosure_motion(
+                &key,
+                if was_open { full } else { 0.0 },
+                if was_open { 0.0 } else { full },
+            );
+            if was_open {
+                this.sidebar_open_trees.remove(&toggle_parent);
+            } else {
+                this.sidebar_open_trees.insert(toggle_parent.clone());
+            }
+            cx.notify();
+        }))
+        .child(chevron)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(SharedString::from(label(counts))),
+        )
+        // What's live stays counted whether the tree is open or not:
+        // running work as the sidebar's own running pill, open
+        // questions as an accent dot with their count.
+        .when(counts.running > 0, |el| {
+            el.child(crate::running_pill::running_pill(
+                format!("sidebar-tree-{parent}-running"),
+                counts.running as u32,
+                theme,
+            ))
+        })
+        .when(counts.needs_input > 0, |el| {
+            el.child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(SharedString::from(label(counts))),
-            )
-            // What's live stays counted whether the tree is open or not:
-            // running work as the sidebar's own running pill, open
-            // questions as an accent dot with their count.
-            .when(counts.running > 0, |el| {
-                el.child(crate::running_pill::running_pill(
-                    format!("sidebar-tree-{parent}-running"),
-                    counts.running as u32,
-                    theme,
-                ))
-            })
-            .when(counts.needs_input > 0, |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .text_color(theme.accent)
-                        .child(
-                            div().size(px(6.0)).rounded_full().bg(
-                                crate::shell::spaces::status_dot_color(
-                                    zeron_proto::ChatIndicator::AwaitingInput,
-                                    theme,
-                                ),
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .text_color(theme.accent)
+                    .child(
+                        div().size(px(6.0)).rounded_full().bg(
+                            crate::shell::spaces::status_dot_color(
+                                zeron_proto::ChatIndicator::AwaitingInput,
+                                theme,
                             ),
-                        )
-                        .child(SharedString::from(counts.needs_input.to_string())),
-                )
-            });
+                        ),
+                    )
+                    .child(SharedString::from(counts.needs_input.to_string())),
+            )
+        });
         let rows = (body_height > 0.0).then(|| {
             div()
                 .w_full()
@@ -285,67 +338,75 @@ impl Shell {
                         theme,
                         cx,
                     );
-                    div()
-                        .id(SharedString::from(format!("sidebar-tree-row-{}", node.chat_id)))
-                        .h(px(CHILD_HEIGHT))
-                        .flex_none()
-                        .ml(px(GUIDE_X + INDENT * (node.depth - 1) as f32))
-                        .pl(px(6.0))
-                        .pr(px(8.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(7.0))
-                        .rounded(px(Theme::CONTROL_RADIUS))
-                        .cursor_pointer()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(if is_selected { theme.text } else { theme.text_muted })
-                        .when(is_selected, |el| el.bg(theme.ink(0.06)))
-                        .hover(|s| s.bg(theme.ink(0.045)).text_color(theme.text))
-                        .tooltip(crate::settings::widgets::text_tooltip(format!(
-                            "{}, {}",
-                            node.title,
-                            node.mark.label()
-                        )))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.open_chat(chat_id.clone(), cx);
-                        }))
-                        .child(
-                            div()
-                                .flex_none()
-                                .size(px(13.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(mark),
-                        )
-                        .when_some(node.harness, |el, harness| {
-                            el.child(chat_pill::harness_mark(harness, 12.0, theme))
-                        })
-                        .child(super::sidebar_faded_label(
-                            format!("sidebar-tree-title-{}", node.chat_id).into(),
-                            true,
-                            div().line_height(px(16.0)).child(SharedString::from(
-                                chat_pill::display_title(&node.title, node.harness).to_owned(),
-                            )),
-                        ))
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .text_color(match node.mark {
-                                    Mark::NeedsInput => theme.accent,
-                                    Mark::Failed => theme.danger,
-                                    _ => theme.text_faint,
-                                })
-                                .child(match node.mark {
-                                    Mark::NeedsInput => SharedString::from("Input"),
-                                    Mark::Failed => SharedString::from("Failed"),
-                                    Mark::Working => SharedString::from("Working"),
-                                    _ => node.time.clone(),
-                                }),
-                        )
+                    let spoken = SharedString::from(format!(
+                        "{}, {}",
+                        chat_pill::display_title(&node.title, node.harness),
+                        node.mark.label()
+                    ));
+                    chat_pill::tab_stop(
+                        div()
+                            .id(SharedString::from(format!("sidebar-tree-row-{}", node.chat_id)))
+                            .role(gpui::Role::Link)
+                            .aria_label(SharedString::from(format!("Open {spoken}")))
+                            .aria_selected(is_selected),
+                        theme,
+                    )
+                    .h(px(CHILD_HEIGHT))
+                    .flex_none()
+                    .ml(px(GUIDE_X + INDENT * (node.depth - 1) as f32))
+                    // The focus ring's border gives back a pixel each side.
+                    .pl(px(5.0))
+                    .pr(px(7.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(7.0))
+                    .rounded(px(Theme::CONTROL_RADIUS))
+                    .cursor_pointer()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(if is_selected { theme.text } else { theme.text_muted })
+                    .when(is_selected, |el| el.bg(theme.ink(0.06)))
+                    .hover(|s| s.bg(theme.ink(0.045)).text_color(theme.text))
+                    .tooltip(crate::settings::widgets::text_tooltip(spoken))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.open_chat(chat_id.clone(), cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(13.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(mark),
+                    )
+                    .when_some(node.harness, |el, harness| {
+                        el.child(chat_pill::harness_mark(harness, 12.0, theme))
+                    })
+                    .child(super::sidebar_faded_label(
+                        format!("sidebar-tree-title-{}", node.chat_id).into(),
+                        true,
+                        div().line_height(px(16.0)).child(SharedString::from(
+                            chat_pill::display_title(&node.title, node.harness).to_owned(),
+                        )),
+                    ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(match node.mark {
+                                Mark::NeedsInput => theme.accent,
+                                Mark::Failed => theme.danger,
+                                _ => theme.text_faint,
+                            })
+                            .child(match node.mark {
+                                Mark::NeedsInput => SharedString::from("Input"),
+                                Mark::Failed => SharedString::from("Failed"),
+                                Mark::Working => SharedString::from("Working"),
+                                _ => node.time.clone(),
+                            }),
+                    )
                 }))
         });
         let body = div()

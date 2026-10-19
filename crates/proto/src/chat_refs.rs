@@ -286,18 +286,21 @@ pub fn delegate_call(call: &crate::ToolCall) -> Option<DelegateCall> {
             }
             _ => None,
         };
-        let field = |value: Option<&serde_json::Value>, key: &str| {
+        fn raw<'a>(value: Option<&'a serde_json::Value>, key: &str) -> Option<&'a str> {
             value
                 .and_then(|v| v.get(key))
                 .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
+                .filter(|s| !s.trim().is_empty())
+        }
+        let field = |value: Option<&serde_json::Value>, key: &str| {
+            raw(value, key).map(|s| s.trim().to_owned())
         };
         let target = input.and_then(|v| v.get("target"));
         return Some(DelegateCall {
             title: field(input, "title"),
-            request_id: field(input, "client_request_id"),
+            // The engine derives the child's id from the key's exact bytes:
+            // only labels are tidied.
+            request_id: raw(input, "client_request_id").map(str::to_owned),
             role: field(input, "role"),
             isolation: field(input, "isolation"),
             harness: field(target, "harness"),
@@ -646,5 +649,56 @@ mod tests {
         assert_eq!(id, managed_task_id("parent", "review-1"));
         assert_ne!(id, managed_task_id("parent", "review-2"));
         assert!(is_uuid(&id));
+    }
+
+    #[test]
+    fn request_keys_keep_their_exact_bytes() {
+        use crate::ToolCall;
+        // The engine accepts any key that isn't blank and derives the child
+        // from its raw bytes, so a padded key names a different child than
+        // its trimmed spelling. Titles are labels and are tidied.
+        let padded = " round-1 ";
+        let mcp = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "delegate_task".into(),
+            input: Some(serde_json::json!({
+                "client_request_id": padded,
+                "title": "  Review round 1 ",
+                "role": " review ",
+            })),
+        };
+        let call = delegate_call(&mcp).unwrap();
+        assert_eq!(call.request_id.as_deref(), Some(padded));
+        assert_eq!(call.title.as_deref(), Some("Review round 1"));
+        assert_eq!(call.role.as_deref(), Some("review"));
+        assert_eq!(
+            managed_task_id("parent", call.request_id.as_deref().unwrap()),
+            managed_task_id("parent", padded)
+        );
+        assert_ne!(
+            managed_task_id("parent", padded),
+            managed_task_id("parent", padded.trim())
+        );
+        let cli = ToolCall::Exec {
+            command: "zeron chat spawn --prompt x --request-id ' round-1 ' --title 'Review'".into(),
+        };
+        assert_eq!(delegate_call(&cli).unwrap().request_id.as_deref(), Some(padded));
+        let inline = ToolCall::Exec {
+            command: "zeron chat spawn --prompt x --request-id=\"\tround-1\"".into(),
+        };
+        assert_eq!(delegate_call(&inline).unwrap().request_id.as_deref(), Some("\tround-1"));
+        // A blank key is no key (the engine refuses it; nothing is derived).
+        for blank in [serde_json::json!("   "), serde_json::json!("")] {
+            let call = ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: "delegate_task".into(),
+                input: Some(serde_json::json!({"client_request_id": blank})),
+            };
+            assert_eq!(delegate_call(&call).unwrap().request_id, None);
+        }
+        let blank_cli = ToolCall::Exec {
+            command: "zeron chat spawn --prompt x --request-id '  '".into(),
+        };
+        assert_eq!(delegate_call(&blank_cli).unwrap().request_id, None);
     }
 }

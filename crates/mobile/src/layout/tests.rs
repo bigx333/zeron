@@ -1380,6 +1380,7 @@ mod orchestration {
             harness: Some("codex".into()),
             status,
             parent: None,
+            task: true,
         }]))
     }
 
@@ -1474,6 +1475,11 @@ mod orchestration {
         assert!(d.text.contains("Review asked a question"), "{}", d.text);
         assert!(!d.text.contains("needs an answer") && !d.text.contains("Answer"));
         let version = frame.placement(0).unwrap().version;
+        // The report doesn't draw its source's status: a status change
+        // alone keeps the row.
+        w.chats = directory("Review", ChatStatus::Working);
+        let frame = w.pass();
+        assert_eq!(frame.placement(0).unwrap().version, version);
         // A rename rebuilds just this row.
         w.chats = directory("Review receipts", ChatStatus::Working);
         let frame = w.pass();
@@ -1490,13 +1496,15 @@ mod orchestration {
         let child = zeron_proto::chat_refs::managed_task_id(parent, "audit-1");
         let mut w = worker(390.0);
         w.builder.chat_id = Some(parent.into());
-        w.chats = Arc::new(ChatDirectory::from_labels(vec![ChatLabel {
+        let task = |status| ChatLabel {
             id: child.clone(),
             title: "Audit the budget".into(),
             harness: Some("codex".into()),
-            status: ChatStatus::Working,
+            status,
             parent: Some(parent.into()),
-        }]));
+            task: true,
+        };
+        w.chats = Arc::new(ChatDirectory::from_labels(vec![task(ChatStatus::Working)]));
         let delegate = |id: &str, input: serde_json::Value| MessagePart::Tool {
             id: id.into(),
             call: zeron_proto::ToolCall::Mcp {
@@ -1532,6 +1540,111 @@ mod orchestration {
         assert_eq!(d.links.iter().filter(|l| l.url == format!("zeron-chat:{child}")).count(), 1);
         assert_eq!(d.links.len(), 1, "the pending call links nothing");
         assert!(d.widgets.iter().any(|wg| matches!(wg.kind, WidgetKind::Spinner)), "the child works");
+        // The line draws its task's status, so a status change rebuilds it.
+        let version = frame.placement(0).unwrap().version;
+        w.chats = Arc::new(ChatDirectory::from_labels(vec![task(ChatStatus::Finished)]));
+        let frame = w.pass();
+        assert_ne!(frame.placement(0).unwrap().version, version);
+        assert!(!display(&frame, 0).widgets.iter().any(|wg| matches!(wg.kind, WidgetKind::Spinner)));
+    }
+
+    fn delegate_part(id: &str, input: serde_json::Value, failed: bool) -> MessagePart {
+        MessagePart::Tool {
+            id: id.into(),
+            call: zeron_proto::ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: "delegate_task".into(),
+                input: Some(input),
+            },
+            is_error: failed,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        }
+    }
+
+    #[test]
+    fn a_side_chat_sharing_a_title_never_becomes_the_delegations_child() {
+        let parent = "6a1e0c2d-5b7f-4c1e-9d0a-3f2b1c4d5e60";
+        let side = "5b5b5b5b-0000-4000-8000-000000000001";
+        let task = "7c7c7c7c-0000-4000-8000-000000000002";
+        let label = |id: &str, is_task: bool| ChatLabel {
+            id: id.into(),
+            title: "Audit the budget".into(),
+            harness: Some("codex".into()),
+            status: ChatStatus::Idle,
+            parent: Some(parent.into()),
+            task: is_task,
+        };
+        let mut w = worker(390.0);
+        w.builder.chat_id = Some(parent.into());
+        w.chats = Arc::new(ChatDirectory::from_labels(vec![label(side, false)]));
+        w.input = input(vec![entry(
+            "a1",
+            MessageRole::Assistant,
+            vec![delegate_part("d1", serde_json::json!({"title": "Audit the budget"}), false)],
+        )]);
+        let frame = w.pass();
+        let d = display(&frame, 0);
+        assert!(d.text.contains("Audit the budget"), "{}", d.text);
+        assert!(d.links.is_empty(), "a side chat isn't a delegation: {:?}", d.links);
+        // The task arrives: the line links it, once, and never the side chat.
+        w.chats = Arc::new(ChatDirectory::from_labels(vec![label(side, false), label(task, true)]));
+        let frame = w.pass();
+        let d = display(&frame, 0);
+        assert_eq!(d.links.iter().map(|l| l.url.as_str()).collect::<Vec<_>>(), [format!("zeron-chat:{task}")]);
+    }
+
+    #[test]
+    fn a_failed_keyed_call_still_opens_the_task_its_key_created() {
+        // Wait mode can fail after the task exists (its watch ended). The
+        // key names exactly that task: the line links it and reads as a
+        // failure. A keyless failure borrows no title.
+        let parent = "6a1e0c2d-5b7f-4c1e-9d0a-3f2b1c4d5e60";
+        let key = " review-2 ";
+        let child = zeron_proto::chat_refs::managed_task_id(parent, key);
+        let mut w = worker(390.0);
+        w.builder.chat_id = Some(parent.into());
+        w.chats = Arc::new(ChatDirectory::from_labels(vec![
+            ChatLabel {
+                id: child.clone(),
+                title: "Review".into(),
+                harness: None,
+                status: ChatStatus::Working,
+                parent: Some(parent.into()),
+                task: true,
+            },
+            ChatLabel {
+                id: "solo".into(),
+                title: "Solo".into(),
+                harness: None,
+                status: ChatStatus::Idle,
+                parent: Some(parent.into()),
+                task: true,
+            },
+        ]));
+        w.input = input(vec![entry(
+            "a1",
+            MessageRole::Assistant,
+            vec![
+                delegate_part("k", serde_json::json!({"client_request_id": key, "title": "Review"}), true),
+                delegate_part("solo", serde_json::json!({"title": "Solo"}), true),
+            ],
+        )]);
+        let frame = w.pass();
+        let d = display(&frame, 0);
+        assert_eq!(d.links.iter().map(|l| l.url.as_str()).collect::<Vec<_>>(), [format!("zeron-chat:{child}")]);
+        assert!(
+            d.runs.iter().any(|r| r.color == display::ColorRole::Danger),
+            "the failed call reads as a failure"
+        );
     }
 
     #[test]
@@ -1543,6 +1656,7 @@ mod orchestration {
             harness: None,
             status: ChatStatus::Idle,
             parent: Some(parent.into()),
+            task: true,
         };
         let mut w = worker(390.0);
         w.builder.chat_id = Some(parent.into());

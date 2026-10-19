@@ -357,11 +357,17 @@ reads "Unknown chat" on desktop; neither opens anything. Code spans that are exa
 reference upgrade; link text and fences never do. Copy and selection read the written token.
 - Desktop (`markdown/chat_pills.rs`): the pill is reserved slot spaces around the title, so
   the shaped line fixes its geometry. An overlay paints the mark and status and takes the
-  click. A title, harness or resolution change re-flattens; a status change only repaints.
+  click. The transcript remembers what each written reference resolved to: a title, harness
+  or resolution change re-flattens and remeasures just the rows naming it (a report's body
+  included), and a status change only repaints. A reference that only just appeared (an id
+  still streaming in) sits in a row the splice already re-laid out, so it costs nothing
+  more.
 - Mobile: the pill is the mention-chip badge (`brand-<harness>` icon well) with a
   `zeron-chat:<full id>` link. The layout thread resolves from the workspace snapshot, which
-  it hears about through a Rust-side tap on `WorkspaceChanged`. Rows rebuild only when what
-  their references resolve to changed. No FFI changed.
+  it hears about through a Rust-side tap on `WorkspaceChanged`. Pills and report headers
+  rebuild only when what their references resolve to (which chat, its title, its harness)
+  changed. They don't draw status, so a status change keeps them. Delegation lines also
+  follow their task's status. No FFI changed.
 
 **Reports.** One report row: the activity glyph, the source's pill, and what it did
 ("finished", "failed", "was stopped", "was interrupted", "asked a question", "wrote"). A
@@ -370,6 +376,8 @@ one-line preview sits under it while folded. Unfolded: the Markdown body (at mos
 `Open chat`, and "Shortened…" when cut. On desktop, adjacent reports merge into one row under
 a summary ("2 tasks finished · 1 question asked · 1 message"). On mobile, reports stay
 separate rows and fold like tool groups, so platforms reuse the disclosure animation.
+On desktop an open body keeps its laid-out text, its code fences' horizontal scroll and their
+syntax colours across frames and parent updates, as any reply does.
 
 *Questions.* A question row never says "needs an answer" and never offers "Answer". Clients
 can't see which request a task is blocked on: a later question may wait before its report
@@ -383,19 +391,25 @@ join the provider's subagent spawns as one always-visible group. Each delegation
 child with the live pill (desktop: "Delegated [pill] Research · Own worktree · model ↗";
 mobile: a card with the harness mark and a spinner while the child works). A call links its
 child only on evidence that names exactly one:
-1. its request key, which is authoritative (a keyed call whose child isn't there stays
-   unlinked);
-2. otherwise, a title that exactly one of the parent's tasks and exactly one keyless,
-   unfailed call carry.
+1. its request key, which is authoritative. A keyed call whose child isn't there stays
+   unlinked. A call that reported an error after its task was created (a wait that ended
+   early) still opens exactly that task, and its line reads as failed.
+2. otherwise, a title that exactly one of the parent's managed tasks (never a side chat) and
+   exactly one keyless, unfailed call carry.
 
 Order is never evidence. The doc keeps the call's title, request key, role, isolation and
-target harness/model (`sanitize_tool_call`), never the brief.
+target harness/model (`sanitize_tool_call`), never the brief. The engine derives the child's
+id from the request key's exact bytes, so every client-side stage keeps the key byte for
+byte: padding stays, and only a blank key counts as no key. Titles and other labels are
+tidied for display.
 
 **Sidebar tree (desktop).** A chat with live children gets a slim line under its row: "3
 tasks, 1 side chat", the sidebar's running pill with the count of working descendants, and an
 accent dot with the count waiting for input. It unfolds (the sidebar's `COLLAPSE` disclosure)
 into child rows: status mark, harness mark, fading title, and the time or a status word.
 Nested tasks indent under the task that delegated them, to four levels. Rows open the chat.
+The row's slot includes its tree (folded, open or mid-tween). Pinned hit-testing and a drag's
+vacancy size the row the same way, through one helper (`sidebar_tree_height`).
 
 **Navigation.** Desktop opens a task or side chat beside the conversation and any other chat
 in the main view (⌘ forces the main view). iOS pushes the chat (`openRelated`), and Android
@@ -405,9 +419,23 @@ the inspectable tree.
 **Accessibility and motion.**
 - iOS: a pill's link speaks its title, with the hint "Opens the chat".
 - Android: chat links are TalkBack custom actions ("Open {title}").
-- Desktop: report disclosures tween with `TOOL_FOLD` from the measured body height, and new
-  reports ease in once with `FADE_IN`. History replays never animate, and all of it snaps
-  under reduced motion.
+- iOS and Android name a link by the text painted in it. Separate pieces get a space
+  ("Delegated Audit the budget"), and runs that continue each other join as written.
+- Desktop keyboard: these are tab stops with the accent focus ring, and Enter or Space
+  activates them:
+  - report and group headers (buttons with expanded state)
+  - the source pill and Markdown pills (links named "Open {title}, {status}")
+  - `Open task` / `Open chat`
+  - delegation cards whose task is known
+  - the sidebar tree's summary (expanded state) and its rows
+
+  A report's chevron is its own button beside the pill, so neither control sits inside the
+  other. A pointer click doesn't take focus, so the composer keeps the keyboard.
+- Desktop motion: report disclosures tween with `TOOL_FOLD` from the measured body height.
+  The chevron, rail and preview take their progress from that height, so a quick close and
+  reopen carries on from where it was. New reports ease in once with `FADE_IN`. History
+  replays never animate, including an opening tail's earlier reports when the full history
+  lands. All of it snaps under reduced motion.
 
 ## Motion (desktop catalog, reduced motion snaps)
 

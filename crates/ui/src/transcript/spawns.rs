@@ -6,11 +6,13 @@
 //! The whole line opens the child beside this chat.
 //!
 //! A call learns its child only from evidence that names one child: its
-//! request key (the engine derives the task id from it) — authoritative, so
-//! a keyed call whose child isn't there stays a placeholder — else a title
-//! that exactly one of this chat's tasks and exactly one keyless call carry.
-//! Order is never evidence: a failed or not-yet-created delegation must not
-//! borrow another child.
+//! request key (the engine derives the task id from its exact bytes) —
+//! authoritative, so a keyed call whose child isn't there stays a
+//! placeholder, and one that reported an error after its task was created
+//! (a wait that ended early) still opens that task and reads as failed —
+//! else a title that exactly one of this chat's tasks and exactly one
+//! keyless, unfailed call carry. Order is never evidence: a failed keyless
+//! or not-yet-created delegation must not borrow another child.
 
 use super::*;
 
@@ -148,11 +150,13 @@ impl Transcript {
             .and_then(|c| c.model.clone())
             .or_else(|| call.model.clone().map(SharedString::from));
         let open_id = child.as_ref().map(|c| c.chat_id.clone());
-        let spoken = format!(
-            "Delegated {}{}",
+        let spoken = SharedString::from(format!(
+            "Delegated {}{}{}",
             pill_chat.spoken(),
-            if starting { ", starting" } else { "" }
-        );
+            if starting { ", starting" } else { "" },
+            if tool.is_error { ", the call failed" } else { "" },
+        ));
+        let accent = theme.accent;
         div()
             .h(px(CHIP_HEIGHT))
             .w_full()
@@ -179,9 +183,21 @@ impl Transcript {
                     .text_size(px(TOOL_LABEL_SIZE))
                     .line_height(px(TOOL_LABEL_LINE_HEIGHT))
                     .text_color(theme.text_muted)
-                    .tooltip(crate::settings::widgets::text_tooltip(spoken))
+                    .tooltip(crate::settings::widgets::text_tooltip(spoken.clone()))
+                    // Until the child is known the card only says what was
+                    // asked for; once it is, the whole card opens it.
+                    .when(open_id.is_none(), |card| {
+                        card.role(gpui::Role::Group).aria_label(spoken.clone())
+                    })
                     .when_some(open_id, |card, chat_id| {
-                        card.cursor_pointer()
+                        card.role(gpui::Role::Link)
+                            .aria_label(spoken.clone())
+                            .tab_index(0)
+                            .focus_visible(move |style| style.border_color(accent))
+                            .on_mouse_down(MouseButton::Left, |_, window, _| {
+                                window.prevent_default()
+                            })
+                            .cursor_pointer()
                             .hover(|s| s.bg(crate::theme::ink(0.05)))
                             .on_click(cx.listener(move |_, _, window, cx| {
                                 cx.stop_propagation();
@@ -392,6 +408,40 @@ mod tests {
         // Two children share the title; two calls share the other.
         assert!(!links.contains_key("p-twin"));
         assert!(!links.contains_key("p-solo-1") && !links.contains_key("p-solo-2"));
+    }
+
+    #[test]
+    fn a_failed_keyed_call_links_the_task_its_key_created() {
+        // A wait-mode call can fail after its task exists (the watch ended,
+        // a status read failed). Its key names exactly that task, even when
+        // a retry changed the brief: the line opens it and reads as failed.
+        // A keyless failure still borrows no title, and a padded key is its
+        // own key.
+        let key = " review-2 ";
+        let keyed = managed_task_id("parent", key);
+        let chats = vec![
+            chat(&keyed, Some("Review"), 1),
+            chat("solo", Some("Solo"), 2),
+            chat(&managed_task_id("parent", key.trim()), Some("Trimmed"), 3),
+        ];
+        let mut failed = delegate("p-failed", serde_json::json!({"client_request_id": key, "title": "Review"}));
+        failed.is_error = true;
+        let mut failed_keyless = delegate("p-failed-keyless", serde_json::json!({"title": "Solo"}));
+        failed_keyless.is_error = true;
+        let links = link_delegations(&group(vec![failed, failed_keyless]), "parent", &chats);
+        assert_eq!(links.get("p-failed").map(|id| id.as_ref()), Some(keyed.as_str()));
+        assert!(!links.contains_key("p-failed-keyless"));
+    }
+
+    #[test]
+    fn a_side_chat_sharing_a_title_is_never_a_delegations_child() {
+        let mut side = chat("side", Some("Audit"), 1);
+        side.orchestration = None;
+        let call = || delegate("p", serde_json::json!({"title": "Audit"}));
+        assert!(link_delegations(&group(vec![call()]), "parent", std::slice::from_ref(&side)).is_empty());
+        let chats = vec![side, chat("task", Some("Audit"), 2)];
+        let links = link_delegations(&group(vec![call()]), "parent", &chats);
+        assert_eq!(links["p"].as_ref(), "task");
     }
 
     #[test]

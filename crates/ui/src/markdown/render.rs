@@ -488,6 +488,21 @@ impl RenderCache {
         self.display.clear();
     }
 
+    /// Plant a marker entry for `row` that no render rewrites: it survives
+    /// exactly as long as the row's cached layout does.
+    #[cfg(test)]
+    pub(crate) fn seed_row(&mut self, row: &str) {
+        self.display
+            .insert((row.to_owned().into(), usize::MAX, usize::MAX), (String::new(), None));
+    }
+
+    /// Whether `row`'s marker from [`Self::seed_row`] is still cached.
+    #[cfg(test)]
+    pub(crate) fn has_seed(&self, row: &str) -> bool {
+        self.display
+            .contains_key(&(row.to_owned().into(), usize::MAX, usize::MAX))
+    }
+
     /// Drop every entry if the resolved text style changed since shaping. Cheap
     /// enough (one relaxed atomic load) to call on every cache access.
     fn sync_style(&mut self) {

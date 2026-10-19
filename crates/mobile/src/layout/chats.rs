@@ -2,7 +2,8 @@
 //! sources of orchestration reports — resolved from the workspace the client
 //! already holds. The layout thread gets a fresh directory whenever the
 //! workspace moves and rebuilds only the rows whose references now read
-//! differently (a title, a harness, a status word).
+//! differently: a pill or a report follows its chat's title and harness; a
+//! delegation line also follows its task's status (its spinner and tone).
 //!
 //! Taps reach the platform as `zeron-chat:<full id>` links; the platform
 //! opens that chat like any other session.
@@ -31,6 +32,8 @@ pub(crate) struct ChatLabel {
     pub harness: Option<String>,
     pub status: ChatStatus,
     pub parent: Option<String>,
+    /// A managed task (it has a task record), not a plain side chat.
+    pub task: bool,
 }
 
 impl ChatLabel {
@@ -112,6 +115,7 @@ impl ChatDirectory {
                     harness: row.harness.clone(),
                     status,
                     parent: row.parent_chat_id.clone(),
+                    task: task.is_some(),
                 };
                 (row.id.clone(), label)
             })
@@ -146,12 +150,14 @@ impl ChatDirectory {
         }
     }
 
-    /// The child a delegation started, only where the evidence names one:
-    /// its request key (the engine derives the task id from it) is
-    /// authoritative — a keyed call whose child isn't here stays unlinked —
-    /// else a title exactly one of `parent`'s children carries, when the
-    /// caller saw that title on exactly one keyless call. Order is never
-    /// evidence: a failed or not-yet-created delegation borrows no child.
+    /// The task a delegation started, only where the evidence names one:
+    /// its request key (the engine derives the task id from its exact
+    /// bytes) is authoritative — a keyed call whose task isn't here stays
+    /// unlinked, and one that reported an error still names the task its
+    /// key created — else a title exactly one of `parent`'s managed tasks
+    /// carries, when the caller saw that title on exactly one keyless,
+    /// unfailed call. Side chats are never delegations, and order is never
+    /// evidence: a not-yet-created delegation borrows no child.
     pub fn delegated(
         &self,
         parent: &str,
@@ -159,7 +165,10 @@ impl ChatDirectory {
         title_is_unique_call: bool,
     ) -> Option<&ChatLabel> {
         if let Some(key) = call.request_id.as_deref() {
-            return self.chats.get(&zeron_proto::chat_refs::managed_task_id(parent, key));
+            return self
+                .chats
+                .get(&zeron_proto::chat_refs::managed_task_id(parent, key))
+                .filter(|chat| chat.task);
         }
         if !title_is_unique_call {
             return None;
@@ -168,30 +177,38 @@ impl ChatDirectory {
         let mut named = self
             .chats
             .values()
-            .filter(|chat| chat.parent.as_deref() == Some(parent) && chat.title == title);
+            .filter(|chat| chat.task && chat.parent.as_deref() == Some(parent) && chat.title == title);
         match (named.next(), named.next()) {
             (Some(chat), None) => Some(chat),
             _ => None,
         }
     }
 
-    /// Every chat whose parent is `parent`, hashed: delegation lines rebuild
-    /// when a child arrives, is renamed or moves.
+    /// `parent`'s managed tasks as delegation lines draw them (title,
+    /// harness, status), hashed: those lines rebuild when a task arrives,
+    /// is renamed or changes status.
     pub fn children_fingerprint(&self, parent: &str) -> u64 {
-        let mut children: Vec<&ChatLabel> = self.chats.values().filter(|c| c.parent.as_deref() == Some(parent)).collect();
+        let mut children: Vec<&ChatLabel> = self
+            .chats
+            .values()
+            .filter(|c| c.task && c.parent.as_deref() == Some(parent))
+            .collect();
         children.sort_by(|a, b| a.id.cmp(&b.id));
         let mut h = std::collections::hash_map::DefaultHasher::new();
         children.hash(&mut h);
         h.finish()
     }
 
-    /// What `written` ids resolve to, hashed: rows naming them rebuild when
-    /// this moves.
+    /// What `written` ids resolve to as pills and report headers draw them
+    /// (which chat, its title and harness), hashed: rows naming them rebuild
+    /// when this moves. Status isn't drawn there, so it stays out.
     pub fn fingerprint<'a>(&self, written: impl IntoIterator<Item = &'a str>) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for id in written {
             id.hash(&mut h);
-            self.resolve(id).hash(&mut h);
+            self.resolve(id)
+                .map(|chat| (&chat.id, &chat.title, &chat.harness))
+                .hash(&mut h);
         }
         h.finish()
     }
@@ -243,7 +260,76 @@ mod tests {
             harness: harness.map(Into::into),
             status: ChatStatus::Idle,
             parent: None,
+            task: false,
         }
+    }
+
+    fn child(id: &str, title: &str, task: bool) -> ChatLabel {
+        ChatLabel {
+            parent: Some("parent".into()),
+            task,
+            ..label(id, title, None)
+        }
+    }
+
+    fn keyless(title: &str) -> zeron_proto::chat_refs::DelegateCall {
+        zeron_proto::chat_refs::DelegateCall {
+            title: Some(title.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn keyless_titles_name_managed_tasks_never_side_chats() {
+        // A side chat titled like the delegation is there first: it is not
+        // the delegation's child, whatever its title.
+        let side_only = ChatDirectory::from_labels(vec![child("side", "Audit", false)]);
+        assert!(side_only.delegated("parent", &keyless("Audit"), true).is_none());
+        // Once the task arrives it is the one match; the side chat still
+        // doesn't make the title ambiguous.
+        let both = ChatDirectory::from_labels(vec![child("side", "Audit", false), child("task", "Audit", true)]);
+        assert_eq!(both.delegated("parent", &keyless("Audit"), true).unwrap().id, "task");
+        // A title two keyless calls share names nobody.
+        assert!(both.delegated("parent", &keyless("Audit"), false).is_none());
+        // A side chat's change never rebuilds delegation lines; a task's does.
+        let renamed_side = ChatDirectory::from_labels(vec![child("side", "Audit v2", false), child("task", "Audit", true)]);
+        assert_eq!(both.children_fingerprint("parent"), renamed_side.children_fingerprint("parent"));
+        let mut working = child("task", "Audit", true);
+        working.status = ChatStatus::Working;
+        let working = ChatDirectory::from_labels(vec![child("side", "Audit", false), working]);
+        assert_ne!(both.children_fingerprint("parent"), working.children_fingerprint("parent"));
+    }
+
+    #[test]
+    fn a_request_key_names_its_own_task_even_after_an_error() {
+        // A wait-mode call can fail after its task exists (the watch ended);
+        // the key still names exactly that task.
+        let key = " round-1 ";
+        let id = zeron_proto::chat_refs::managed_task_id("parent", key);
+        let dir = ChatDirectory::from_labels(vec![child(&id, "Review", true), child("other", "Review", true)]);
+        let call = zeron_proto::chat_refs::DelegateCall {
+            request_id: Some(key.into()),
+            title: Some("Review".into()),
+            ..Default::default()
+        };
+        assert_eq!(dir.delegated("parent", &call, false).unwrap().id, id);
+        // The trimmed spelling is a different key.
+        let trimmed = zeron_proto::chat_refs::DelegateCall {
+            request_id: Some(key.trim().into()),
+            ..call.clone()
+        };
+        assert!(dir.delegated("parent", &trimmed, true).is_none());
+    }
+
+    #[test]
+    fn reference_fingerprints_follow_what_pills_draw_not_status() {
+        let idle = ChatDirectory::from_labels(vec![label("ba6888c8-0000", "Review", Some("codex"))]);
+        let mut busy = label("ba6888c8-0000", "Review", Some("codex"));
+        busy.status = ChatStatus::Working;
+        let busy = ChatDirectory::from_labels(vec![busy]);
+        assert_eq!(idle.fingerprint(["ba6888c8"]), busy.fingerprint(["ba6888c8"]));
+        let moved = ChatDirectory::from_labels(vec![label("ba6888c8-0000", "Review", Some("claude-code"))]);
+        assert_ne!(idle.fingerprint(["ba6888c8"]), moved.fingerprint(["ba6888c8"]));
     }
 
     #[test]

@@ -3659,9 +3659,9 @@ pub struct Transcript {
     chat_refs_revision: u64,
     /// The rows' references changed since the last check.
     chat_refs_dirty: bool,
-    /// What the references resolved to (ids, titles, harnesses) when pills
-    /// were last flattened.
-    chat_refs_fingerprint: u64,
+    /// What each written reference resolved to (which chat, its title and
+    /// harness) when its rows were last flattened.
+    chat_ref_layouts: activity::ChatRefLayouts,
     /// Measured natural heights of report bodies and report groups, written
     /// by paint probes; disclosure tweens read them as endpoints.
     activity_heights: HashMap<SharedString, Rc<Cell<f32>>>,
@@ -3977,7 +3977,7 @@ impl Transcript {
             chat_refs: Vec::new(),
             chat_refs_revision: 0,
             chat_refs_dirty: false,
-            chat_refs_fingerprint: 0,
+            chat_ref_layouts: Default::default(),
             activity_heights: HashMap::new(),
             activity_seen: HashSet::new(),
             activity_arrivals: HashMap::new(),
@@ -5261,7 +5261,13 @@ impl Transcript {
         // live tool group; treating it as history prevents a whole existing
         // task tree from reanimating on every chat switch.
         let replay_baseline = self.veil_attach_pending && !entries_empty;
-        self.track_activity_arrivals(&new_rows, replay_baseline || entries_empty);
+        // Reports the replay baseline covers are history too: an opening
+        // tail's earlier reports landing with the full history stay still.
+        self.track_activity_arrivals(
+            &new_rows,
+            replay_baseline || entries_empty,
+            &fully_historical,
+        );
         let chat_refs = Self::collect_chat_refs(&new_rows);
         if chat_refs != self.chat_refs {
             self.chat_refs = chat_refs;
@@ -5383,6 +5389,11 @@ impl Transcript {
                         })
                         .unwrap_or_default()
                 }
+                RowKind::Activity { .. } => {
+                    let mut keys = Vec::new();
+                    activity::body_code_fences(row, &mut keys);
+                    keys
+                }
                 _ => Vec::new(),
             })
             .collect();
@@ -5454,7 +5465,10 @@ impl Transcript {
                 // changed (the tail), this is O(changed rows) per commit, never
                 // O(reply).
                 for row in &self.rows[old_range.clone()] {
-                    self.render_cache.borrow_mut().invalidate_row(&row.id);
+                    let mut cache = self.render_cache.borrow_mut();
+                    for key in activity::cache_rows(row) {
+                        cache.invalidate_row(&key);
+                    }
                 }
                 if old_range.len() == count {
                     // In-place content change, same row count — notably the

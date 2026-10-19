@@ -8,8 +8,8 @@
 //! the pill back to the written token through the flat text's offset map.
 //!
 //! Which chat a token names — and its title — is fixed at flatten time, so
-//! the owner clears its flatten cache when that changes
-//! ([`crate::chat_pill::layout_fingerprint`]). Status is read per paint.
+//! the owner drops the flattened rows naming a token when that changes
+//! ([`crate::chat_pill::layout_key`]). Status is read per paint.
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -196,7 +196,8 @@ impl Element for ChatPills {
             if !chat.known {
                 continue;
             }
-            // The click target covers every line the pill spans.
+            // The click target covers every line the pill spans; the first
+            // line is the pill's one keyboard stop and accessible link.
             for (line, rect) in range_rects(&self.layout, &pill.range, 0.0, INLINE_CODE_INSET_Y)
                 .into_iter()
                 .enumerate()
@@ -205,18 +206,28 @@ impl Element for ChatPills {
                 let chat_id = chat.chat_id.clone();
                 let tooltip = SharedString::from(chat.spoken());
                 let hover = theme.ink(0.06);
-                let mut el = div()
+                let target = div()
                     .id(SharedString::from(format!("{}-hit-{ix}-{line}", self.id)))
                     .size_full()
                     .rounded(px(PILL_RADIUS))
                     .cursor_pointer()
                     .hover(move |style| style.bg(hover))
-                    .tooltip(crate::settings::widgets::text_tooltip(tooltip))
+                    .tooltip(crate::settings::widgets::text_tooltip(tooltip.clone()))
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         open(&chat_id, window, cx);
-                    })
-                    .into_any_element();
+                    });
+                let mut el = if line == 0 {
+                    crate::chat_pill::tab_stop(
+                        target
+                            .role(gpui::Role::Link)
+                            .aria_label(SharedString::from(format!("Open {tooltip}"))),
+                        &theme,
+                    )
+                    .into_any_element()
+                } else {
+                    target.into_any_element()
+                };
                 el.prepaint_as_root(
                     point(rect.origin.x, rect.origin.y),
                     size(rect.size.width, rect.size.height).map(AvailableSpace::Definite),
