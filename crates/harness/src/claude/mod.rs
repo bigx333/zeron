@@ -1455,7 +1455,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
                 |keys: [&str; 2]| keys.iter().find_map(|k| q.get(*k).and_then(Value::as_str));
             UserInputQuestion {
                 id: uuid::Uuid::new_v4().to_string(),
-                header: field(["header", "title"]).unwrap_or("Question").into(),
+                header: field(["header", "title"]).unwrap_or_default().into(),
                 question: field(["question", "prompt"]).unwrap_or("").into(),
                 prefill: None,
                 multiline: false,

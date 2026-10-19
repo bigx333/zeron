@@ -7,7 +7,8 @@
 #              existing target/package/Zeron Nova.app)
 #   --dry-run  go through detection and the detached hand-off, log what
 #              would happen, and change nothing
-# The previous install is kept at /tmp/Zeron Nova.old.app.
+# The previous install is kept at /tmp/Zeron Nova.old.app. Older backups
+# and install logs are renamed rather than deleted.
 #
 # The quit-swap-reopen always runs as a one-shot launchd agent in the
 # user's GUI session, writing /tmp/zeron-nova-install.log: nothing ties it
@@ -41,15 +42,21 @@ is_ancestor() {
   return 1
 }
 
-if [[ "${ZERON_NOVA_INSTALL_DETACHED:-}" != 1 ]]; then
-  build=0 dry=0
-  for arg in "$@"; do
-    case "$arg" in
-      --build) build=1 ;;
-      --dry-run) dry=1 ;;
-      *) echo "unknown argument: $arg" >&2; exit 2 ;;
-    esac
-  done
+# Older installers leaked these flags into the app they reopened. A later
+# install from that app then skipped launchd and died when the app quit.
+# Only an explicit argument to the launchd job may select the worker path.
+unset ZERON_NOVA_INSTALL_DETACHED ZERON_NOVA_INSTALL_DRY
+build=0 dry=0 worker=0
+for arg in "$@"; do
+  case "$arg" in
+    --build) build=1 ;;
+    --dry-run) dry=1 ;;
+    --launchd-job) worker=1 ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+
+if [[ $worker == 0 ]]; then
   [[ $build == 1 ]] && "$ROOT/scripts/package-macos.sh"
   [[ -d "$SRC" ]] || { echo "no build at $SRC; run with --build" >&2; exit 1; }
   codesign --verify "$SRC"
@@ -60,10 +67,11 @@ if [[ "${ZERON_NOVA_INSTALL_DETACHED:-}" != 1 ]]; then
   # Hand the swap to launchd as a one-shot agent. A process merely
   # reparented to launchd still died with Nova once (killed before logging
   # anything), so the job must not start life under Nova at all.
-  label="sh.zeron.nova-install"
+  # Reusing a label requires booting out its old job, whose app coalition
+  # may still contain the Nova instance running this installer.
+  label="sh.zeron.nova-install.$(id -u).$$"
   domain="gui/$(id -u)"
   plist="/tmp/$label.plist"
-  launchctl bootout "$domain/$label" 2>/dev/null || true
   cat >"$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -71,11 +79,13 @@ if [[ "${ZERON_NOVA_INSTALL_DETACHED:-}" != 1 ]]; then
 <dict>
   <key>Label</key><string>$label</string>
   <key>ProgramArguments</key>
-  <array><string>/bin/bash</string><string>$ROOT/scripts/install-nova-macos.sh</string></array>
+  <array>
+    <string>/bin/bash</string><string>$ROOT/scripts/install-nova-macos.sh</string>
+    <string>--launchd-job</string>
+    $([[ $dry == 1 ]] && echo '<string>--dry-run</string>')
+  </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>ZERON_NOVA_INSTALL_DETACHED</key><string>1</string>
-    <key>ZERON_NOVA_INSTALL_DRY</key><string>$dry</string>
     <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key><true/>
@@ -86,7 +96,7 @@ if [[ "${ZERON_NOVA_INSTALL_DETACHED:-}" != 1 ]]; then
 </dict>
 </plist>
 PLIST
-  rm -f "$LOG"
+  if [[ -e "$LOG" ]]; then mv "$LOG" "$LOG.$(date '+%Y%m%d-%H%M%S').$$"; fi
   launchctl bootstrap "$domain" "$plist"
   for _ in $(seq 1 40); do [[ -s "$LOG" ]] && break; sleep 0.25; done
   [[ -s "$LOG" ]] || { echo "the install job did not start (see $LOG.launchd)" >&2; exit 1; }
@@ -111,7 +121,10 @@ for signal in TERM HUP INT; do
   trap "echo \"failed: killed by SIG$signal (previous build: $BACKUP)\"; exit 1" "$signal"
 done
 
-if [[ "${ZERON_NOVA_INSTALL_DRY:-0}" == 1 ]]; then
+parent="$(ps -o ppid= -p $$ | tr -d ' ')"
+[[ "$parent" == 1 ]] || { echo "failed: install job must be started by launchd (parent $parent)"; exit 1; }
+
+if [[ $dry == 1 ]]; then
   echo "dry run: Nova running as pid(s): $(gui_pids | tr '\n' ' ')"
   # Outlive the caller and anything that cleans up after it.
   sleep 3
@@ -122,12 +135,22 @@ fi
 
 if [[ -n "$(gui_pids)" ]]; then
   echo "quitting Zeron Nova…"
-  # Each AppleScript quit reaches one instance; repeat until all are gone.
+  # AppleScript can block while the app is busy. Keep it in a child process
+  # so the ten-second deadline applies to the whole quit, not each request.
+  quit_pid=""
   for _ in $(seq 1 40); do
     [[ -z "$(gui_pids)" ]] && break
-    osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
+    if [[ -z "$quit_pid" ]] || ! kill -0 "$quit_pid" 2>/dev/null; then
+      if [[ -n "$quit_pid" ]]; then wait "$quit_pid" || true; fi
+      osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 &
+      quit_pid=$!
+    fi
     sleep 0.25
   done
+  if [[ -n "$quit_pid" ]]; then
+    kill -TERM "$quit_pid" 2>/dev/null || true
+    wait "$quit_pid" 2>/dev/null || true
+  fi
   if [[ -n "$(gui_pids)" ]]; then
     echo "Zeron Nova did not quit in 10s; terminating"
     pkill -a -TERM -f "$GUI_PATTERN" || true
@@ -138,10 +161,11 @@ if [[ -n "$(gui_pids)" ]]; then
   [[ -z "$(gui_pids)" ]] || { echo "failed: Zeron Nova is still running"; exit 1; }
 fi
 
-rm -rf "$BACKUP"
+if [[ -e "$BACKUP" ]]; then mv "$BACKUP" "$BACKUP.$(date '+%Y%m%d-%H%M%S').$$"; fi
 if [[ -d "$DEST" ]]; then mv "$DEST" "$BACKUP"; fi
 ditto "$SRC" "$DEST"
 codesign --verify "$DEST"
+cmp "$SRC/Contents/MacOS/zeron" "$DEST/Contents/MacOS/zeron"
 echo "installed $(defaults read "$DEST/Contents/Info" CFBundleShortVersionString) ($(stat -f '%Sm' "$DEST/Contents/MacOS/zeron")) to $DEST (previous: $BACKUP)"
 
 # Leave $DEST the only bundle LaunchServices knows for $BUNDLE_ID. Banners

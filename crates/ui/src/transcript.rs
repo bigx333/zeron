@@ -1693,11 +1693,18 @@ pub fn rows_for_entry(
                         resolved,
                         ..
                     } => {
-                        // Model-generated header onto the one-line chip.
+                        // Model-generated header onto the one-line chip; a
+                        // harness without headers falls back to the question.
                         let header: SharedString = single_line(
                             &questions
                                 .first()
-                                .map(|q| q.header.clone())
+                                .map(|q| {
+                                    if q.header.trim().is_empty() {
+                                        q.question.clone()
+                                    } else {
+                                        q.header.clone()
+                                    }
+                                })
                                 .unwrap_or_else(|| "Question".to_string()),
                         )
                         .into();

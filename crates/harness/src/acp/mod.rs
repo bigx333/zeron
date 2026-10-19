@@ -1933,7 +1933,7 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
         .map(|a| a.as_slice())
         .unwrap_or_default();
 
-    let ladder: Vec<ReasoningLevel> = config_options
+    let mut ladder: Vec<ReasoningLevel> = config_options
         .iter()
         .find(|o| o.get("category").and_then(Value::as_str) == Some("thought_level"))
         .and_then(|o| o.get("options").and_then(Value::as_array))
@@ -1944,6 +1944,10 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
                 .collect()
         })
         .unwrap_or_default();
+    // ACP choices are not ordered by intensity (Grok advertises highest
+    // first). Every client consumes this as a low-to-high effort ladder.
+    ladder.sort_unstable();
+    ladder.dedup();
     let wire_options: Vec<ModelOption> = config_options
         .iter()
         .filter_map(trait_from_config_option)
@@ -3114,7 +3118,7 @@ fn handle_server_request_live(
         .collect();
     let question = UserInputQuestion {
         id: new_message_id(),
-        header: "Agent question".into(),
+        header: String::new(),
         question: params
             .get("toolCall")
             .and_then(|t| t.get("title"))
@@ -5880,6 +5884,41 @@ mod tests {
             vec!["fast-mode"]
         );
         assert_eq!(models[0].options[0].default_choice, "off");
+    }
+
+    #[test]
+    fn discovered_effort_levels_increase_even_when_acp_advertises_highest_first() {
+        let response = json!({
+            "models": {
+                "availableModels": [{ "modelId": "grok-4.7", "name": "Grok 4.7" }],
+            },
+            "configOptions": [{
+                "id": "reasoning_effort",
+                "category": "thought_level",
+                "type": "select",
+                "options": [
+                    { "value": "xhigh", "name": "Extra High" },
+                    { "value": "high", "name": "High" },
+                    { "value": "medium", "name": "Medium" },
+                    { "value": "low", "name": "Low" },
+                ],
+            }],
+        });
+        let models = models_from_session(&response, &(grok_spec().models)());
+        assert_eq!(
+            models[0].reasoning_levels,
+            [
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh
+            ]
+        );
+        // Sorting the display ladder must not change which wire value runs.
+        assert_eq!(
+            config_option_sets(&response, None, &["low"], &serde_json::Map::new()),
+            vec![("reasoning_effort".into(), json!({ "value": "low" }))]
+        );
     }
 
     #[test]

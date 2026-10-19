@@ -411,7 +411,7 @@ async fn grok_native_questions_round_trip_through_the_input_bridge() {
     let (mut controls, _steer, _token) = controls();
     controls.request_input = Box::new(|questions| {
         assert_eq!(questions.len(), 2);
-        assert_eq!(questions[0].header, "Grok question");
+        assert!(questions[0].header.is_empty(), "Grok sends no header");
         assert_eq!(questions[0].question, "Color");
         assert_eq!(questions[0].options, ["Blue", "Green"]);
         assert!(!questions[0].multi_select);
