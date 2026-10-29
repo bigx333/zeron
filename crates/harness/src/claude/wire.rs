@@ -17,11 +17,13 @@ pub(crate) enum Frame {
     RateLimit(RateLimitFrame),
     Result(ResultFrame),
     ControlRequest(ControlRequestFrame),
+    /// The provider withdrew a question or permission request.
+    ControlCancelRequest(String),
     /// The CLI's answer to one of our control requests.
     ControlResponse(ControlResponseFrame),
     /// Where the CLI has taken one of our stdin user messages.
     CommandLifecycle(CommandLifecycleFrame),
-    /// control_cancel_request / anything unknown.
+    /// Anything unknown.
     Other,
 }
 
@@ -417,6 +419,13 @@ fn typed_frame(value: Value) -> Result<Frame, serde_json::Error> {
         "result" => Frame::Result(serde_json::from_value(value)?),
         "control_request" => Frame::ControlRequest(serde_json::from_value(value)?),
         "control_response" => Frame::ControlResponse(serde_json::from_value(value)?),
+        "control_cancel_request" => Frame::ControlCancelRequest(
+            value
+                .get("request_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        ),
         "command_lifecycle" => Frame::CommandLifecycle(serde_json::from_value(value)?),
         _ => Frame::Other,
     };
