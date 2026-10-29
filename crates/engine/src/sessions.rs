@@ -86,14 +86,28 @@ struct HarnessSessionRef {
 /// client, must never force one.
 #[derive(Clone)]
 struct RuntimeConfig {
+    account_pool: Option<zeron_harness::AccountPoolRoute>,
     harness_id: HarnessId,
     request: RunRequest,
     harness: Arc<dyn Harness>,
 }
 
 impl RuntimeConfig {
+    fn route_with_pool(
+        &self,
+        harness_id: HarnessId,
+        request: &RunRequest,
+        pool: &Option<zeron_harness::AccountPoolRoute>,
+    ) -> Option<bool> {
+        if &self.account_pool != pool {
+            return None;
+        }
+        self.route(harness_id, request)
+    }
+
     fn new(harness_id: HarnessId, request: &RunRequest, harness: Arc<dyn Harness>) -> Self {
         Self {
+            account_pool: None,
             harness_id,
             request: request.clone(),
             harness,
@@ -246,6 +260,7 @@ struct Revival {
 }
 
 struct Inner {
+    agent_accounts: OnceLock<crate::AgentAccounts>,
     voice: crate::voice::VoiceManager,
     device_id: String,
     /// The engine is shutting down: dying runs re-dispatch nothing.
@@ -358,6 +373,7 @@ impl SessionsEngine {
                 harness_sessions: Mutex::new(HashMap::new()),
                 rejected_resumes: Mutex::new(HashMap::new()),
                 fresh_start_notices: Mutex::new(std::collections::HashSet::new()),
+                agent_accounts: OnceLock::new(),
                 titles: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 scratch_root: OnceLock::new(),
@@ -421,6 +437,10 @@ impl SessionsEngine {
     /// completed exchange the run task fires it for still-untitled chats.
     pub fn set_titles(&self, titles: crate::titles::TitleGenerator) {
         let _ = self.inner.titles.set(titles);
+    }
+
+    pub fn set_agent_accounts(&self, accounts: crate::AgentAccounts) {
+        let _ = self.inner.agent_accounts.set(accounts);
     }
 
     /// Wire the turn-start listener (called once at engine assembly).
@@ -602,7 +622,8 @@ impl SessionsEngine {
         loop {
             let stale = lock(&self.inner.runs).get(chat_id).map(|run| {
                 (
-                    run.voice.as_ref().is_some_and(|v| v.invalidated()),
+                    run.voice.as_ref().is_some_and(|v| v.invalidated())
+                        || run.runtime_config.account_pool.is_some(),
                     run.voice_active.live(),
                 )
             });
@@ -743,11 +764,23 @@ impl SessionsEngine {
             tracing::info!(chat = %chat_id, "auto-resume skipped: the chat moved on");
             return Ok(String::new());
         }
+        let voice_live = lock(&self.inner.runs)
+            .get(chat_id)
+            .is_some_and(|run| run.voice_active.live());
+        let account_pool = if !idle
+            && !voice_live
+            && let Some(accounts) = self.inner.agent_accounts.get()
+        {
+            accounts.pool_route(harness_id, chat_id).await?
+        } else {
+            None
+        };
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
                 h.steerable && !h.retiring.load(std::sync::atomic::Ordering::Acquire),
-                h.runtime_config.route(harness_id, &request),
+                h.runtime_config
+                    .route_with_pool(harness_id, &request, &account_pool),
                 h.steer_tx.clone(),
                 h.routed_steers.clone(),
                 h.fork_history_sent.clone(),
@@ -1077,7 +1110,10 @@ impl SessionsEngine {
                 voice_active: voice_active.clone(),
                 run_id: run_id.clone(),
                 steerable: harness.supports_steering(),
-                runtime_config: RuntimeConfig::new(harness_id, &request, harness.clone()),
+                runtime_config: RuntimeConfig {
+                    account_pool: account_pool.clone(),
+                    ..RuntimeConfig::new(harness_id, &request, harness.clone())
+                },
                 steer_tx,
                 interrupt_token,
                 stops_turn_in_place: harness.supports_steering() && harness.stops_turn_in_place(),
@@ -1141,6 +1177,7 @@ impl SessionsEngine {
                 stops_seen: stops,
                 fork_history_sent,
                 started,
+                account_pool,
             },
             turn,
             side_chats_only,
@@ -3371,6 +3408,9 @@ struct RunResumeState {
     fork_history_sent: Arc<std::sync::atomic::AtomicBool>,
     /// Set once the harness stream is open (see [`RunHandle::started`]).
     started: Arc<std::sync::atomic::AtomicBool>,
+    /// The account pool's hub, when this run is pooled. Applied to the run's
+    /// environment after every other provider (see [`zeron_harness::AccountPoolRoute`]).
+    account_pool: Option<zeron_harness::AccountPoolRoute>,
 }
 
 fn cursor_unstarted_history(
@@ -3633,11 +3673,18 @@ async fn drive_run(
                 );
                 // Host-resolved spawn env (a Cloud device's credential broker);
                 // `RunRequest::env` is serde-skipped, never persisted.
-                match inner
+                let env_ready = inner
                     .registry
                     .prepare_run(harness_id, &mut wire_request)
-                    .await
+                    .await;
+                // Last, so a pooled run's hub outranks a Cloud device's
+                // `ANTHROPIC_API_KEY`; an unpooled run keeps the key.
+                if env_ready.is_ok()
+                    && let Some(route) = &resume_state.account_pool
                 {
+                    route.apply_env(harness_id, &mut wire_request.env);
+                }
+                match env_ready {
                     Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
                     Ok(()) => harness.run(wire_request, controls).await,
                     Err(message) => Err(zeron_harness::HarnessError::NotSignedIn(message)),
@@ -5515,6 +5562,43 @@ mod tests {
     #[tokio::test]
     async fn voice_idle_startup_remembers_thread_without_creating_messages() {
         idle_startup_case(false).await;
+    }
+
+    #[test]
+    fn pool_changes_require_a_new_process_even_for_in_place_reconfiguration() {
+        let initial = request();
+        let mut runtime = RuntimeConfig::new(
+            HarnessId::ClaudeCode,
+            &initial,
+            Arc::new(zeron_harness::ClaudeHarness::new()),
+        );
+        let route = zeron_harness::AccountPoolRoute {
+            base_url: "http://127.0.0.1:1234/claude".into(),
+            token: "capability".into(),
+        };
+        assert!(
+            runtime
+                .route_with_pool(HarnessId::ClaudeCode, &initial, &None)
+                .is_some()
+        );
+        assert!(
+            runtime
+                .route_with_pool(HarnessId::ClaudeCode, &initial, &Some(route.clone()))
+                .is_none()
+        );
+        runtime.account_pool = Some(route.clone());
+        assert!(
+            runtime
+                .route_with_pool(HarnessId::ClaudeCode, &initial, &Some(route))
+                .is_some()
+        );
+        let mut next = initial.clone();
+        next.model = Some("different-model".into());
+        assert!(
+            runtime
+                .route_with_pool(HarnessId::ClaudeCode, &next, &None)
+                .is_none()
+        );
     }
 
     #[test]

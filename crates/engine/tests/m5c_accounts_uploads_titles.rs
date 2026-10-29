@@ -1550,3 +1550,57 @@ async fn codex_relogin_revives_the_live_account_and_live_is_removable() {
         vec![("bea@example.com".to_string(), true)]
     );
 }
+
+#[tokio::test]
+async fn committed_pool_bypass_is_returned_even_when_account_discovery_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = test_accounts(&tmp.path().join("accounts"));
+    write_claude_login(&config, "live@example.com", "live", "access");
+    let saved = accounts
+        .list(false)
+        .await
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|account| account.harness == HarnessId::ClaudeCode)
+        .unwrap();
+    let slot = config
+        .data_dir
+        .join("agent-accounts")
+        .join("claude-code")
+        .join(format!("{}.json", saved.id));
+    std::fs::rename(&slot, slot.with_extension("backup")).unwrap();
+    std::fs::create_dir(&slot).unwrap();
+    assert!(
+        accounts.list(false).await.is_err(),
+        "fixture blocks live-slot snapshot writes"
+    );
+    let mut core = assemble_with_mock(&tmp.path().join("engine"), Vec::new());
+    core.agent_accounts = accounts;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let committed: zeron_proto::AccountPoolSnapshot = serde_json::from_value(
+        client
+            .call(
+                methods::SET_ACCOUNT_POOL_BYPASS,
+                serde_json::json!({"chatId":"chat-a","bypassed":true}),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        committed
+            .config
+            .bypassed_chat_ids
+            .contains(&"chat-a".into())
+    );
+    let read: zeron_proto::AccountPoolSnapshot = serde_json::from_value(
+        client
+            .call(methods::GET_ACCOUNT_POOL, serde_json::json!({}))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(read.config.bypassed_chat_ids.contains(&"chat-a".into()));
+    core.shutdown().await;
+}

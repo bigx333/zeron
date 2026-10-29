@@ -12182,18 +12182,20 @@ impl Render for Composer {
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
             if session_chrome_opacity > 0.0 {
-                let harness = (!self.side_chat)
-                    .then(|| self.pickers.read(cx).resolved(cx).harness)
-                    .flatten();
-                let target = {
+                let resolved = (!self.side_chat).then(|| self.pickers.read(cx).resolved(cx));
+                let harness = resolved.as_ref().and_then(|resolved| resolved.harness);
+                let model = resolved.and_then(|resolved| resolved.model);
+                let (target, chat) = {
                     let state = self.state.read(cx);
-                    state
+                    let target = state
                         .selected_chat_row()
                         .map(|chat| chat.device_id.clone())
-                        .filter(|device| state.local_device_id.as_ref() != Some(device))
+                        .filter(|device| state.local_device_id.as_ref() != Some(device));
+                    (target, state.selected_chat.clone())
                 };
-                self.account_usage
-                    .update(cx, |usage, cx| usage.track(harness, target, cx));
+                self.account_usage.update(cx, |usage, cx| {
+                    usage.track(harness, target, chat, model, cx)
+                });
             }
             container.child(
                 div()
@@ -17318,6 +17320,22 @@ impl Composer {
     /// A typed draft, as the input holds it.
     pub fn fixture_draft(&mut self, text: &str, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| input.set_text(text, cx));
+        cx.notify();
+    }
+}
+
+#[cfg(feature = "account-pool-fixture")]
+impl Composer {
+    /// Seed the actual composer pool indicator and optionally open its card.
+    #[doc(hidden)]
+    pub fn fixture_account_pool(
+        &mut self,
+        snapshot: zeron_proto::AgentAccountsSnapshot,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.account_usage
+            .update(cx, |usage, cx| usage.fixture_snapshot(snapshot, open, cx));
         cx.notify();
     }
 }

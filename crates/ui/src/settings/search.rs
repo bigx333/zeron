@@ -153,6 +153,12 @@ settings_index! {
         "subagent delegate side chats tasks spawn"),
     (UpdatePolicy, Harnesses, Some("Updates"), "Update policy",
         "automatic upgrade version cli"),
+    (AccountPool, Harnesses, Some("Accounts"), "Account pool",
+        "pooling share load quota rotate multiple accounts claude codex"),
+    (AccountPoolRouting, Harnesses, Some("Accounts"), "Routing",
+        "account pool sequential spread balance order"),
+    (AccountPoolThreshold, Harnesses, Some("Accounts"), "Move on at",
+        "account pool switch threshold limit usage percent"),
     (CloudUsage, Cloud, None, "Usage",
         "hours consumption range"),
     (CloudGitHub, Cloud, None, "GitHub",
@@ -205,6 +211,17 @@ impl SettingId {
                 | SettingId::UpdatePolicy
         )
     }
+
+    /// A row only Claude Code's and Codex's details show, once their
+    /// accounts have loaded (the account pool).
+    pub fn pooled_provider(self) -> bool {
+        matches!(
+            self,
+            SettingId::AccountPool
+                | SettingId::AccountPoolRouting
+                | SettingId::AccountPoolThreshold
+        )
+    }
 }
 
 /// Shortcuts recorded on a feature page rather than on Shortcuts.
@@ -239,7 +256,7 @@ impl Target {
     /// only once it is expanded: until then, the provider list, to pick one.
     fn fallback(self) -> Option<Target> {
         match self {
-            Target::Setting(id) if id.per_provider() => {
+            Target::Setting(id) if id.per_provider() || id.pooled_provider() => {
                 Some(Target::Page(SettingsSection::Harnesses))
             }
             Target::Setting(id) => id.parent().map(Target::Setting),
@@ -784,6 +801,11 @@ mod tests {
         );
         assert_eq!(
             Target::Setting(SettingId::NativeSubagents).fallback(),
+            Some(Target::Page(SettingsSection::Harnesses))
+        );
+        assert_eq!(top("account pool"), Target::Setting(SettingId::AccountPool));
+        assert_eq!(
+            Target::Setting(SettingId::AccountPoolThreshold).fallback(),
             Some(Target::Page(SettingsSection::Harnesses))
         );
     }

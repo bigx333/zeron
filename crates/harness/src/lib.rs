@@ -152,6 +152,111 @@ pub struct RunControls {
     pub turn: TurnControl,
 }
 
+/// A capability for the engine's loopback account-pool hub. Debug output
+/// must never expose it.
+///
+/// The host hands it to a run through [`RunRequest::env`] ([`Self::apply_env`]),
+/// after every other environment provider: a pooled run's endpoint and token
+/// win over a Cloud device's `ANTHROPIC_API_KEY`, which would otherwise send
+/// the CLI straight to Anthropic and around the pool. An unpooled run (pool
+/// off, the chat bypassing it, the harness not pooled) keeps that key.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AccountPoolRoute {
+    pub base_url: String,
+    pub token: String,
+}
+
+impl std::fmt::Debug for AccountPoolRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountPoolRoute").finish_non_exhaustive()
+    }
+}
+
+impl AccountPoolRoute {
+    /// Names the pooled harness (`claude` / `codex`); its presence marks a run as pooled.
+    pub const ACTIVE_ENV: &'static str = "ZERON_ACCOUNT_POOL_ACTIVE";
+    pub const TOKEN_ENV: &'static str = "ZERON_POOL_TOKEN";
+    pub const BASE_URL_ENV: &'static str = "ZERON_POOL_BASE_URL";
+    /// The temporary Codex model provider pooled threads are started with.
+    pub const CODEX_PROVIDER: &'static str = "zeron-pool";
+    /// Auth a pooled Claude run must not carry: either would bypass the hub.
+    const CLAUDE_CONFLICTING_AUTH: [&'static str; 2] =
+        ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"];
+
+    fn tag(harness: HarnessId) -> Option<&'static str> {
+        match harness {
+            HarnessId::ClaudeCode => Some("claude"),
+            HarnessId::Codex => Some("codex"),
+            _ => None,
+        }
+    }
+
+    /// Route a run of `harness` through the hub. Call it last, after the
+    /// host's environment providers have filled `env`.
+    pub fn apply_env(
+        &self,
+        harness: HarnessId,
+        env: &mut std::collections::BTreeMap<String, String>,
+    ) {
+        let Some(tag) = Self::tag(harness) else {
+            return;
+        };
+        env.insert(Self::ACTIVE_ENV.into(), tag.into());
+        env.insert(Self::TOKEN_ENV.into(), self.token.clone());
+        env.insert(Self::BASE_URL_ENV.into(), self.base_url.clone());
+        if harness == HarnessId::ClaudeCode {
+            for key in Self::CLAUDE_CONFLICTING_AUTH {
+                env.remove(key);
+            }
+            env.insert("ANTHROPIC_BASE_URL".into(), self.base_url.clone());
+            env.insert("ANTHROPIC_AUTH_TOKEN".into(), self.token.clone());
+            env.insert("ENABLE_TOOL_SEARCH".into(), "true".into());
+        }
+        for key in ["NO_PROXY", "no_proxy"] {
+            let previous = env
+                .get(key)
+                .cloned()
+                .or_else(|| std::env::var(key).ok())
+                .unwrap_or_default();
+            env.insert(key.into(), format!("{previous},127.0.0.1,localhost"));
+        }
+    }
+
+    /// The route a run's environment carries for `harness`, if pooled.
+    pub fn from_env(
+        harness: HarnessId,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> Option<Self> {
+        if env.get(Self::ACTIVE_ENV).map(String::as_str) != Self::tag(harness) {
+            return None;
+        }
+        Some(Self {
+            base_url: env.get(Self::BASE_URL_ENV)?.clone(),
+            token: env.get(Self::TOKEN_ENV)?.clone(),
+        })
+    }
+
+    /// `-c` overrides adding the temporary provider. The token stays in
+    /// [`Self::TOKEN_ENV`]; no argument carries it.
+    pub(crate) fn codex_config(&self) -> Vec<String> {
+        let provider = Self::CODEX_PROVIDER;
+        vec![
+            format!("model_provider=\"{provider}\""),
+            format!("model_providers.{provider}.name=\"Zeron account pool\""),
+            format!(
+                "model_providers.{provider}.base_url={}",
+                serde_json::to_string(&self.base_url).unwrap()
+            ),
+            format!("model_providers.{provider}.env_key=\"{}\"", Self::TOKEN_ENV),
+            format!("model_providers.{provider}.wire_api=\"responses\""),
+            format!("model_providers.{provider}.requires_openai_auth=false"),
+            format!("model_providers.{provider}.supports_websockets=false"),
+            format!("model_providers.{provider}.request_max_retries=2"),
+            format!("model_providers.{provider}.stream_max_retries=2"),
+        ]
+    }
+}
+
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
 #[derive(Clone, Debug)]
 pub struct ModelCatalog {
@@ -362,12 +467,30 @@ pub fn apply_run_env(cmd: &mut process::Command, env: &std::collections::BTreeMa
     for (key, value) in env {
         cmd.env(key, value);
     }
+    // A pooled Claude run must not inherit auth that bypasses the pool.
+    if AccountPoolRoute::from_env(HarnessId::ClaudeCode, env).is_some() {
+        for key in AccountPoolRoute::CLAUDE_CONFLICTING_AUTH {
+            cmd.env_remove(key);
+        }
+    }
 }
 
 fn compose_path<'a>(
     cmd: &mut std::process::Command,
     executable_dir: impl IntoIterator<Item = &'a std::path::Path>,
 ) {
+    // Nested engines do not inherit another engine's routing capability; a
+    // run's own (`apply_run_env`, later) is set again. Ordinary custom
+    // endpoints stay.
+    if let Ok(pooled) = std::env::var(AccountPoolRoute::ACTIVE_ENV) {
+        cmd.env_remove(AccountPoolRoute::ACTIVE_ENV)
+            .env_remove(AccountPoolRoute::TOKEN_ENV)
+            .env_remove(AccountPoolRoute::BASE_URL_ENV);
+        if pooled == "claude" {
+            cmd.env_remove("ANTHROPIC_BASE_URL")
+                .env_remove("ANTHROPIC_AUTH_TOKEN");
+        }
+    }
     let executable_dir: Vec<std::path::PathBuf> =
         executable_dir.into_iter().map(Into::into).collect();
     let own = std::env::var_os("PATH");
@@ -832,6 +955,47 @@ mod path_tests {
 
 #[cfg(test)]
 mod stderr_tests {
+    #[cfg(not(windows))]
+    #[test]
+    fn pool_routing_keeps_the_capability_in_env_and_removes_conflicting_claude_auth() {
+        use zeron_proto::HarnessId;
+        let route = super::AccountPoolRoute {
+            base_url: "http://127.0.0.1:1234/claude".into(),
+            token: "secret-capability".into(),
+        };
+        // A Cloud device's broker key is already in the run env: the pool wins.
+        let mut env = std::collections::BTreeMap::from([(
+            "ANTHROPIC_API_KEY".to_owned(),
+            "sk-broker".to_owned(),
+        )]);
+        route.apply_env(HarnessId::ClaudeCode, &mut env);
+        assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "secret-capability");
+        assert_eq!(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:1234/claude");
+        assert_eq!(env["ENABLE_TOOL_SEARCH"], "true");
+        assert!(!env.contains_key("ANTHROPIC_API_KEY"));
+        assert_eq!(
+            super::AccountPoolRoute::from_env(HarnessId::ClaudeCode, &env),
+            Some(route.clone())
+        );
+        assert_eq!(super::AccountPoolRoute::from_env(HarnessId::Codex, &env), None);
+        let mut claude = super::process::Command::new("claude");
+        super::apply_run_env(&mut claude, &env);
+        let applied: std::collections::HashMap<_, _> = claude.as_std().get_envs().collect();
+        assert_eq!(applied[std::ffi::OsStr::new("ANTHROPIC_API_KEY")], None);
+        assert_eq!(applied[std::ffi::OsStr::new("CLAUDE_CODE_OAUTH_TOKEN")], None);
+        assert!(!format!("{route:?}").contains("secret-capability"));
+
+        let mut env = std::collections::BTreeMap::new();
+        route.apply_env(HarnessId::Codex, &mut env);
+        assert_eq!(env[super::AccountPoolRoute::TOKEN_ENV], "secret-capability");
+        assert!(!env.contains_key("ANTHROPIC_AUTH_TOKEN"));
+        let route = super::AccountPoolRoute::from_env(HarnessId::Codex, &env).unwrap();
+        let args = route.codex_config();
+        assert!(args.iter().any(|s| s.contains("supports_websockets=false")));
+        assert!(args.iter().any(|s| s.contains("requires_openai_auth=false")));
+        assert!(args.iter().all(|s| !s.contains("secret-capability")));
+    }
+
     #[test]
     fn stderr_tail_truncates_at_utf8_boundaries() {
         let tail = super::StderrTail::default();

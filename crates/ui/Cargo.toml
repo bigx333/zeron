@@ -11,6 +11,7 @@ project-palette-fixture = []
 # New project's typed path against a real engine, filmed in process.
 project-path-fixture = ["gpui_platform/test-support"]
 compact-picker-fixture = ["gpui_platform/test-support"]
+account-pool-fixture = ["gpui_platform/test-support"]
 
 # Native captures explicitly present the freshly drawn scene, including when
 # a nested Wayland compositor has stopped requesting idle frames.
@@ -107,6 +108,10 @@ required-features = ["appshots-fixture"]
 [[example]]
 name = "settings-search-fixture"
 required-features = ["appshots-fixture"]
+
+[[example]]
+name = "account-pool-fixture"
+required-features = ["account-pool-fixture"]
 
 [dependencies]
 zeron-voice-media.workspace = true
