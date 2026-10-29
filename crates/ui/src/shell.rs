@@ -53,7 +53,7 @@ use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, FILES_PANEL_MIN, JUMP_SLOTS, KeymapConfig,
     RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId,
-    SidebarOrganization, SidebarSort, TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
+    SidebarMode, SidebarOrganization, SidebarSort, TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
     TERMINAL_MIN_HEIGHT, UiSettings, badge_combo, jump_hints_visible, modifier_send_hint_visible,
     platform_combo, sidebar_pin_profile_key,
 };
@@ -92,10 +92,14 @@ mod session_info;
 mod session_lanes;
 mod settings_search;
 mod side_chats;
+mod sidebar_lifecycle;
 mod sidebar_pins;
+#[cfg(test)]
+mod sidebar_row_actions_tests;
 mod sidebar_sections;
 mod search_warm;
 pub(crate) mod spaces;
+mod t3_sidebar;
 mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;
@@ -216,6 +220,7 @@ fn move_settings_focus(
 enum ChatMenuPage {
     Root,
     Copy,
+    Snooze,
 }
 
 /// Hover-intent keys for the chat menu's rows; only Copy owns a submenu.
@@ -225,6 +230,7 @@ const CHAT_MENU_ROW_ARCHIVE: u8 = 2;
 const CHAT_MENU_ROW_COPY: u8 = 3;
 const CHAT_MENU_ROW_DELETE: u8 = 4;
 const CHAT_MENU_ROW_TAB: u8 = 5;
+const CHAT_MENU_ROW_SNOOZE: u8 = 9;
 
 #[derive(Clone, Copy)]
 enum TabCloseAction {
@@ -1404,6 +1410,7 @@ type SidebarKeyedRow = (String, f32, AnyElement);
 struct SidebarSessionRows {
     custom_count: usize,
     regular_count: usize,
+    shelf_count: usize,
     rows: Vec<SidebarKeyedRow>,
     pinned_count: usize,
     moving_row: Option<(AnyElement, f32)>,
@@ -2130,6 +2137,9 @@ pub struct Shell {
     /// (user request), session-transient. `archived_shown` pages the
     /// expanded list ("Show more" reveals another page).
     pub(super) archived_open: bool,
+    t3_working_open: bool,
+    t3_snoozed_open: bool,
+    t3_settled_open: bool,
     pub(super) archived_shown: usize,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
@@ -2239,6 +2249,9 @@ pub struct Shell {
     appearance_settings_sub: Option<Subscription>,
     /// Session-row context menu, including the Copy submenu.
     chat_menu: popover::Popup<ChatMenuState>,
+    /// A T3 row's quick snooze menu, opened from its hover clock button.
+    row_snooze_menu: popover::Popup<sidebar_lifecycle::RowSnoozeMenu>,
+    custom_snooze: Option<sidebar_lifecycle::CustomSnoozeDialog>,
     /// The Copy submenu's hover grace, its painted bounds, and which side
     /// of the menu it opens on (the sidebar options menu's recipe).
     chat_copy_intent: popover::HoverIntent<u8>,
@@ -2742,6 +2755,9 @@ impl Shell {
             composer_dock: Default::default(),
             new_thread_artwork_ready: Default::default(),
             archived_open: true,
+            t3_working_open: false,
+            t3_snoozed_open: false,
+            t3_settled_open: false,
             pinned_open: true,
             sessions_open: true,
             archived_shown: 0,
@@ -2811,6 +2827,8 @@ impl Shell {
             files_settings_sub: None,
             appearance_settings_sub: None,
             chat_menu: popover::Popup::default(),
+            row_snooze_menu: popover::Popup::default(),
+            custom_snooze: None,
             chat_copy_intent: Default::default(),
             chat_copy_bounds: None,
             chat_copy_left: false,
@@ -5355,15 +5373,28 @@ impl Shell {
         } else {
             ChatMenuPage::Root
         };
+        self.set_chat_submenu_page(page, cx);
+    }
+
+    fn set_chat_submenu_page(&mut self, page: ChatMenuPage, cx: &mut Context<Self>) {
         if let Some(menu) = self.chat_menu.open_mut()
             && menu.page != page
         {
             menu.page = page;
-            if !open {
-                self.chat_copy_bounds = None;
-            }
+            self.chat_copy_bounds = None;
             cx.notify();
         }
+    }
+
+    fn open_chat_submenu_for_row(&mut self, key: u8, cx: &mut Context<Self>) {
+        self.set_chat_submenu_page(
+            match key {
+                CHAT_MENU_ROW_COPY => ChatMenuPage::Copy,
+                CHAT_MENU_ROW_SNOOZE => ChatMenuPage::Snooze,
+                _ => ChatMenuPage::Root,
+            },
+            cx,
+        );
     }
 
     /// Pointer intent over a chat-menu row: hovering Copy opens its submenu,
@@ -5376,11 +5407,11 @@ impl Shell {
         moved: bool,
         cx: &mut Context<Self>,
     ) {
-        let current = self
-            .chat_menu
-            .as_open()
-            .filter(|menu| menu.page == ChatMenuPage::Copy)
-            .map(|_| CHAT_MENU_ROW_COPY);
+        let current = self.chat_menu.as_open().and_then(|menu| match menu.page {
+            ChatMenuPage::Copy => Some(CHAT_MENU_ROW_COPY),
+            ChatMenuPage::Snooze => Some(CHAT_MENU_ROW_SNOOZE),
+            ChatMenuPage::Root => None,
+        });
         let (bounds, left) = (self.chat_copy_bounds, self.chat_copy_left);
         let action = if moved {
             self.chat_copy_intent
@@ -5392,7 +5423,7 @@ impl Shell {
         match action {
             popover::HoverAction::None => {}
             popover::HoverAction::Open => {
-                self.set_chat_copy_open(key == CHAT_MENU_ROW_COPY, cx);
+                self.open_chat_submenu_for_row(key, cx);
                 self.chat_copy_intent.record_origin(pointer);
             }
             popover::HoverAction::Defer => {
@@ -5401,7 +5432,7 @@ impl Shell {
                         && this.chat_copy_intent.pending() == Some(&key)
                     {
                         this.chat_copy_intent.cancel();
-                        this.set_chat_copy_open(key == CHAT_MENU_ROW_COPY, cx);
+                        this.open_chat_submenu_for_row(key, cx);
                         this.chat_copy_intent.record_origin(pointer);
                     }
                 });
@@ -5442,65 +5473,102 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.render_chat_submenu_trigger(chat_id, open, false, theme, cx)
+    }
+
+    fn render_chat_submenu_trigger(
+        &mut self,
+        chat_id: &str,
+        open: bool,
+        snooze: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let entity = cx.entity().downgrade();
         let exit_entity = entity.clone();
-        let mut row = popover::menu_row_nav(theme, open, false, format!("chat-menu-copy-{chat_id}"))
-            .id("chat-menu-copy")
-            .relative()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.chat_copy_intent.reset();
-                this.set_chat_copy_open(true, cx);
-                cx.stop_propagation();
-            }))
-            .child(icon(icons::COPY).size(px(16.0)).text_color(theme.text_muted))
-            .child(div().flex_1().child(SharedString::from("Copy")))
-            .child(
-                icon(icons::ALT_ARROW_RIGHT)
-                    .size(px(14.0))
+        let kind = if snooze { "snooze" } else { "copy" };
+        let mut row =
+            popover::menu_row_nav(theme, open, false, format!("chat-menu-{kind}-{chat_id}"))
+                .id(SharedString::from(format!("chat-menu-{kind}")))
+                .relative()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.chat_copy_intent.reset();
+                    this.open_chat_submenu_for_row(
+                        if snooze {
+                            CHAT_MENU_ROW_SNOOZE
+                        } else {
+                            CHAT_MENU_ROW_COPY
+                        },
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }))
+                .child(
+                    icon(if snooze {
+                        icons::CLOCK_CIRCLE
+                    } else {
+                        icons::COPY
+                    })
+                    .size(px(16.0))
                     .text_color(theme.text_muted),
-            )
-            .child(
-                gpui::canvas(
-                    move |bounds, window, cx| {
-                        let left = bounds.right() + px(244.0) > window.viewport_size().width;
-                        let _ = entity.update(cx, |this, cx| {
-                            if this.chat_copy_left != left {
-                                this.chat_copy_left = left;
-                                cx.notify();
-                            }
-                        });
-                    },
-                    move |trigger, _, window, _| {
-                        if !open {
-                            return;
-                        }
-                        // Leaving the trigger anywhere but toward the submenu
-                        // closes it, as in the sidebar options menu.
-                        window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
-                            if phase != gpui::DispatchPhase::Bubble {
+                )
+                .child(div().flex_1().child(if snooze { "Snooze" } else { "Copy" }))
+                .child(
+                    icon(icons::ALT_ARROW_RIGHT)
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(
+                    gpui::canvas(
+                        move |bounds, window, cx| {
+                            let left = bounds.right() + px(244.0) > window.viewport_size().width;
+                            let _ = entity.update(cx, |this, cx| {
+                                if this.chat_copy_left != left {
+                                    this.chat_copy_left = left;
+                                    cx.notify();
+                                }
+                            });
+                        },
+                        move |trigger, _, window, _| {
+                            if !open {
                                 return;
                             }
-                            let _ = exit_entity.update(cx, |this, cx| {
-                                let (bounds, left) = (this.chat_copy_bounds, this.chat_copy_left);
-                                if this
-                                    .chat_copy_intent
-                                    .contains_pointer(trigger, bounds, event.position, left)
-                                {
-                                    return;
-                                }
-                                this.chat_copy_intent.reset();
-                                this.set_chat_copy_open(false, cx);
-                            });
-                        });
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            );
+                            // Leaving the trigger anywhere but toward the submenu
+                            // closes it, as in the sidebar options menu.
+                            window.on_mouse_event(
+                                move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                                    if phase != gpui::DispatchPhase::Bubble {
+                                        return;
+                                    }
+                                    let _ = exit_entity.update(cx, |this, cx| {
+                                        let (bounds, left) =
+                                            (this.chat_copy_bounds, this.chat_copy_left);
+                                        if this.chat_copy_intent.contains_pointer(
+                                            trigger,
+                                            bounds,
+                                            event.position,
+                                            left,
+                                        ) {
+                                            return;
+                                        }
+                                        this.chat_copy_intent.reset();
+                                        this.set_chat_copy_open(false, cx);
+                                    });
+                                },
+                            );
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                );
         if open {
-            let submenu = self.render_chat_copy_submenu(chat_id, theme, cx);
+            let submenu = if snooze {
+                self.render_chat_snooze_submenu(chat_id, theme, cx)
+            } else {
+                self.render_chat_copy_submenu(chat_id, theme, cx)
+            };
             row = row.child(popover::nested_menu(
-                format!("chat-copy-submenu-{chat_id}"),
+                format!("chat-{kind}-submenu-{chat_id}"),
                 submenu,
                 self.chat_copy_left,
             ));
@@ -6608,6 +6676,10 @@ impl Shell {
         archived: bool,
         cx: &mut Context<Self>,
     ) {
+        if archived && self.settings.sidebar_mode == SidebarMode::T3 {
+            self.settle_chat(chat_id, cx);
+            return;
+        }
         self.close_chat_menu(cx);
         self.mutate(
             serde_json::json!({ "op": "setChatArchived", "chatId": chat_id, "archived": archived }),
@@ -6640,6 +6712,7 @@ impl Shell {
         self.command_palette.is_some()
             || self.voice.read(cx).stage_open
             || self.section_dialog.is_some()
+            || self.custom_snooze.is_some()
             || self.section_menu.is_some()
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
@@ -8876,6 +8949,32 @@ impl Shell {
         } else {
             crate::change_requests::ChangeRequestBadgeSurface::SessionRow
         };
+        let t3 = self.settings.sidebar_mode == SidebarMode::T3 && search_query.is_none();
+        let archive_label = if t3 {
+            if archived { "Unsettle" } else { "Settle" }
+        } else if archived {
+            "Unarchive"
+        } else {
+            "Archive"
+        };
+        let archive_tooltip = if t3 {
+            if archived {
+                "Unsettle session"
+            } else {
+                "Settle session"
+            }
+        } else if archived {
+            "Unarchive session"
+        } else {
+            ShortcutId::ArchiveSession.label()
+        };
+        let archive_icon = if t3 && !archived {
+            icons::CHECK
+        } else if archived {
+            icons::ARCHIVE_UP_MINIMALISTIC
+        } else {
+            icons::ARCHIVE_MINIMALISTIC
+        };
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
         let host = self
             .state
@@ -8900,6 +8999,16 @@ impl Shell {
         let project_icon = (project_icon && search_query.is_none())
             .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        // T3 rows trade the single archive control for separate Snooze and
+        // Settle buttons. They stay up while their quick menu is open, since
+        // the menu takes the pointer off the row.
+        let t3_actions = t3 && !preview;
+        let actions_visible = corner_hovered
+            || (t3_actions
+                && self
+                    .row_snooze_menu
+                    .get()
+                    .is_some_and(|menu| menu.chat_id == id));
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
         let project_icon = project_icon.map(|icon| {
             div()
@@ -9008,6 +9117,8 @@ impl Shell {
                 .text_color(theme.text_muted.opacity(0.5))
                 .child(label)
                 .into_any_element()
+        } else if t3_actions && actions_visible {
+            self.render_t3_row_actions(&id, &row_id, archived, false, theme, cx)
         } else if corner_hovered {
             div()
                 .flex()
@@ -9023,29 +9134,21 @@ impl Shell {
                         .hover(|s| s.bg(crate::theme::wash(0.18)))
                 })
                 .child(
-                    icon(if archived {
-                        icons::ARCHIVE_UP_MINIMALISTIC
-                    } else {
-                        icons::ARCHIVE_MINIMALISTIC
-                    })
-                    .size(px(if compact {
-                        SIDEBAR_ACTIVE_HARNESS_ICON_SIZE
-                    } else {
-                        11.0
-                    }))
-                    .flex_none()
-                    .text_color(theme.text_muted),
+                    icon(archive_icon)
+                        .size(px(if compact {
+                            SIDEBAR_ACTIVE_HARNESS_ICON_SIZE
+                        } else {
+                            11.0
+                        }))
+                        .flex_none()
+                        .text_color(theme.text_muted),
                 )
                 .when(!compact, |el| {
                     el.child(
                         div()
                             .text_size(crate::typography::ui_rems(10.0))
                             .text_color(theme.text_muted)
-                            .child(SharedString::from(if archived {
-                                "Unarchive"
-                            } else {
-                                "Archive"
-                            })),
+                            .child(SharedString::from(archive_label)),
                     )
                 })
                 .into_any_element()
@@ -9135,8 +9238,10 @@ impl Shell {
                     let row_id = row_id.clone();
                     move || format!("{row_id}-corner")
                 })
-                .aria_label(if corner_hovered {
-                    if archived { "Unarchive" } else { "Archive" }
+                .aria_label(if t3_actions && actions_visible {
+                    "Session actions"
+                } else if corner_hovered {
+                    archive_label
                 } else {
                     if compact {
                         if remote {
@@ -9162,7 +9267,18 @@ impl Shell {
                 .flex()
                 .items_center()
                 .when(!preview, |el| el.cursor_pointer())
-                .when(corner_hovered, |el| {
+                // The buttons own their clicks; the gaps between them must
+                // not select the row either.
+                .when(t3_actions && actions_visible, |el| {
+                    el.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.dismiss_session_card(cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                })
+                .when(corner_hovered && !t3_actions, |el| {
                     el.on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
@@ -9176,11 +9292,7 @@ impl Shell {
                         this.set_chat_archived(archive_id.clone(), !archived, cx);
                     }))
                     // Above the pill: below it the chip would cover the next row.
-                    .tooltip(crate::settings::widgets::text_tooltip_above(if archived {
-                        "Unarchive session"
-                    } else {
-                        ShortcutId::ArchiveSession.label()
-                    }))
+                    .tooltip(crate::settings::widgets::text_tooltip_above(archive_tooltip))
                 })
                 .child(corner_body)
                 .into_any_element()
@@ -9503,7 +9615,9 @@ impl Shell {
                         // Cmd-held legend beats the hover archive; preview rows
                         // (the palette) never archive.
                         let show_legend = compact_jump_label.is_some();
-                        let show_archive = corner_hovered && !show_legend && !preview;
+                        let show_actions = t3_actions && actions_visible && !show_legend;
+                        let show_archive =
+                            corner_hovered && !show_legend && !preview && !t3_actions;
                         // The slot is 30px (holds "17m"); a text-length jump
                         // hint widens it to a floor so "Ctrl+1" vs "Ctrl+2"
                         // never nudges the column.
@@ -9512,7 +9626,7 @@ impl Shell {
                             .is_some_and(|label| label.chars().count() > 3);
                         // Running subagents take the time stamp's place; the
                         // legend and the hover archive still win.
-                        let pill = (!show_legend && !show_archive)
+                        let pill = (!show_legend && !show_archive && !show_actions)
                             .then(|| subagent_pill("compact"))
                             .flatten();
                         let archive_id = id.clone();
@@ -9553,10 +9667,17 @@ impl Shell {
                                 .flex()
                                 .items_center()
                                 .justify_end()
-                                .aria_label(if show_archive {
-                                    if archived { "Unarchive" } else { "Archive" }
+                                .aria_label(if show_actions {
+                                    "Session actions"
+                                } else if show_archive {
+                                    archive_label
                                 } else {
                                     "Session time"
+                                })
+                                .when(show_actions, |el| {
+                                    el.on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
                                 })
                                 .when(show_archive, |el| {
                                     el.cursor_pointer()
@@ -9577,23 +9698,19 @@ impl Shell {
                                             );
                                         }))
                                         .tooltip(crate::settings::widgets::text_tooltip_above(
-                                            if archived {
-                                                "Unarchive session"
-                                            } else {
-                                                ShortcutId::ArchiveSession.label()
-                                            },
+                                            archive_tooltip,
                                         ))
                                 })
-                                .child(if show_archive {
-                                    icon(if archived {
-                                        icons::ARCHIVE_UP_MINIMALISTIC
-                                    } else {
-                                        icons::ARCHIVE_MINIMALISTIC
-                                    })
-                                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                                    .flex_none()
-                                    .text_color(theme.text_muted)
-                                    .into_any_element()
+                                .child(if show_actions {
+                                    self.render_t3_row_actions(
+                                        &id, &row_id, archived, true, theme, cx,
+                                    )
+                                } else if show_archive {
+                                    icon(archive_icon)
+                                        .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                        .flex_none()
+                                        .text_color(theme.text_muted)
+                                        .into_any_element()
                                 } else if let Some(pill) = pill {
                                     pill
                                 } else {
@@ -9835,18 +9952,21 @@ impl Shell {
         let pinned_count = session_rows.pinned_count;
         let custom_count = session_rows.custom_count;
         let regular_start = pinned_count + custom_count;
+        let shelf_count = session_rows.shelf_count;
         let mut keyed = session_rows.rows;
+        let shelf_start = keyed.len() - shelf_count;
         let regular_count = session_rows.regular_count;
         let ungrouped = self.settings.sidebar_organization == SidebarOrganization::InOneList;
         let regular_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
             + keyed
                 .iter()
                 .skip(regular_start)
+                .take(shelf_start - regular_start)
                 .map(|(_, height, _)| height)
                 .sum::<f32>()
-            + SIDEBAR_LIST_GAP * keyed.len().saturating_sub(regular_start + 1) as f32;
+            + SIDEBAR_LIST_GAP * shelf_start.saturating_sub(regular_start + 1) as f32;
         let regular_body_height =
-            if keyed.len() == regular_start && self.sidebar_session_transfer.is_some() {
+            if shelf_start == regular_start && self.sidebar_session_transfer.is_some() {
                 spaces::SIDEBAR_DISCLOSURE_BODY_INSET
                     + 48.0
                     + self.sidebar_transfer_extra_gap("regular")
@@ -9883,7 +10003,7 @@ impl Shell {
             ));
         }
         for (ix, (key, height, _)) in keyed.iter().enumerate() {
-            if ungrouped && ix == regular_start {
+            if ungrouped && ix == regular_start && ix < shelf_start {
                 order.push((
                     "sidebar-sessions-header".into(),
                     spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
@@ -9899,7 +10019,7 @@ impl Shell {
                         },
                 ));
             }
-            if ungrouped && ix >= regular_start && !self.sessions_open {
+            if ungrouped && ix >= regular_start && ix < shelf_start && !self.sessions_open {
                 continue;
             }
             if ix < pinned_count && !self.pinned_open {
@@ -10046,7 +10166,8 @@ impl Shell {
         let active_list = if !list_items.is_empty() {
             let mut pinned_items = list_items;
             let mut custom_items = pinned_items.split_off(pinned_count);
-            let regular_items = custom_items.split_off(custom_count);
+            let mut regular_items = custom_items.split_off(custom_count);
+            let shelf_items = regular_items.split_off(regular_items.len() - shelf_count);
             let regular_empty = regular_items.is_empty();
             let pinned_group = show_pinned_section
                 .then(|| self.render_pinned_section(pinned_items, pinned_body_height, theme, cx));
@@ -10148,6 +10269,7 @@ impl Shell {
                         )
                     },
                 )
+                .children(shelf_items)
                 .into_any_element()
         } else {
             div()
@@ -10155,7 +10277,13 @@ impl Shell {
                 .pb(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
-                .child(SharedString::from("No sessions yet"))
+                .child(SharedString::from(
+                    if self.settings.sidebar_mode == SidebarMode::T3 {
+                        "All caught up"
+                    } else {
+                        "No sessions yet"
+                    },
+                ))
                 .into_any_element()
         };
 
@@ -11039,6 +11167,24 @@ impl Shell {
     /// Resolve shell-owned Escape surfaces in capture phase, before focused
     /// descendants such as an integrated terminal can consume the key.
     fn capture_escape_surface(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.custom_snooze.take().is_some() {
+            cx.notify();
+            return true;
+        }
+        // A row's quick snooze menu has no other owner; Escape dismisses it
+        // before anything below can read the key as an interrupt.
+        if self.row_snooze_menu.get().is_some() {
+            self.close_row_snooze_menu(cx);
+            return true;
+        }
+        if self
+            .chat_menu
+            .get()
+            .is_some_and(|menu| menu.page == ChatMenuPage::Snooze)
+        {
+            self.close_chat_menu(cx);
+            return true;
+        }
         // Modals and context menus sit above the rest of the shell. Preserve
         // their existing behavior: only surfaces that already have a Cancel
         // path close here; the others remain explicit blockers.
@@ -11221,6 +11367,14 @@ impl Shell {
                     .iter()
                     .any(|chat| chat.id == chat_id && chat.parent_chat_id.is_some());
             let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
+            let t3 = self.settings.sidebar_mode == SidebarMode::T3;
+            let chat = self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .find(|chat| chat.id == chat_id);
+            let archived = chat.is_some_and(|chat| chat.archived);
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();
@@ -11267,18 +11421,40 @@ impl Shell {
                         popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
                             .id("chat-menu-archive")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.archive_chat(archive_id.clone(), cx)
+                                this.set_chat_archived(archive_id.clone(), !archived, cx)
                             }))
                             .child(
-                                icon(icons::ARCHIVE_MINIMALISTIC)
-                                    .size(px(16.0))
-                                    .text_color(theme.text_muted),
+                                icon(if t3 && !archived {
+                                    icons::CHECK
+                                } else {
+                                    icons::ARCHIVE_MINIMALISTIC
+                                })
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from("Archive"));
+                            .child(SharedString::from(if t3 {
+                                if archived { "Unsettle" } else { "Settle" }
+                            } else if archived {
+                                "Unarchive"
+                            } else {
+                                "Archive"
+                            }));
                     let copy = self.render_chat_copy_trigger(&chat_id, copy_open, &theme, cx);
-                    menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PIN, pin, cx))
-                        .child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx))
-                        .child(self.chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx))
+                    let mut menu = menu
+                        .child(self.chat_menu_hover_row(CHAT_MENU_ROW_PIN, pin, cx))
+                        .child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx));
+                    if t3 && !archived {
+                        let snooze = self.render_chat_submenu_trigger(
+                            &chat_id,
+                            menu_state.page == ChatMenuPage::Snooze,
+                            true,
+                            &theme,
+                            cx,
+                        );
+                        menu =
+                            menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_SNOOZE, snooze, cx));
+                    }
+                    menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx))
                 };
                 let delete = popover::menu_row(&theme, false, format!("chat-menu-delete-{chat_id}"))
                     .id("chat-menu-delete")
@@ -11343,12 +11519,18 @@ impl Shell {
                 chat_menu_closing,
             ));
         }
+        if let Some(menu) = self.render_row_snooze_menu(&theme, cx) {
+            overlays.push(menu);
+        }
         if let Some(menu) = self.render_pull_request_tab_menu(cx) {
             overlays.push(menu);
         }
 
         overlays.extend(self.render_space_overlays(viewport, window, cx));
         overlays.extend(self.render_section_overlays(viewport, window, cx));
+        if let Some(overlay) = self.render_custom_snooze(viewport, window, cx) {
+            overlays.push(overlay);
+        }
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
             overlays.push(overlay);
         }
