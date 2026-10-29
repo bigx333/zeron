@@ -219,7 +219,9 @@ feature spec `docs/research/feature-inventory.md` §1.
   clipboard, key actions), compact↔expanded auto-flip by measured text width, auto-grow 76–260px,
   Enter/Shift+Enter, Send→Steer→Stop morph, drafts + attachments per chat, drag-drop/paste
   images, QuestionPanel (paged, 1-9 keys, 220ms auto-advance, a corner close / Escape that
-  answers nothing) replacing the composer while input is requested. Pickers (harness/model, traits, repo w/ folder browser, branch w/ worktree
+  answers nothing) replacing the composer while input is requested. Async questions (Codex
+  `request_user_input_async`, `nonBlocking` input parts) stay open across turns while the agent
+  keeps working; an answer arrives as a later message, and closing one records `answers: []`. Pickers (harness/model, traits, repo w/ folder browser, branch w/ worktree
   toggle) as gpui popovers with `menu-in` scale/fade.
 - **Terminal**: `alacritty_terminal` (vte state machine, MIT/Apache) + `portable-pty` on the
   engine side; custom gpui grid element; tabs w/ drag-reorder (150ms sliding transforms), height
@@ -262,7 +264,7 @@ Direct ports of zeron behaviors (spec: feature-inventory §3):
   snapshot store.
 - **Harness** (research pending — `docs/research/harness.md`): trait mirroring zeron's
   `HarnessShape`; Claude Code via `claude` CLI stream-json in/out (control protocol for
-  permissions/AskUserQuestion→requestInput, resume, steering); Codex via app-server JSON-RPC or
+  permissions/AskUserQuestion→requestInput, resume, steering); Grok's ACP `_x.ai/ask_user_question` → requestInput; Codex via app-server JSON-RPC or
   `codex exec --json`; model/reasoning/option catalogs ported from `packages/harness`.
 - **Repos/diffs**: git2 or `git` subprocess (subprocess — matches zeron, avoids libgit2 edge
   cases); worktrees under `~/.zeron/worktrees`; fs watchers (`notify`) + 2min repair; diff
