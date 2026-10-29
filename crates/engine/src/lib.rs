@@ -46,6 +46,8 @@ pub mod rpc;
 pub mod run_journal;
 pub mod runner;
 pub mod sessions;
+pub mod skill_library;
+pub mod skill_packs;
 pub mod source_control;
 pub mod spaces;
 pub mod terminals;
@@ -160,6 +162,8 @@ pub struct EngineCore {
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
     pub harness_updates: harness_updates::HarnessUpdateCoordinator,
+    /// Keeps auto-updating skill packs current on this device.
+    pub skill_pack_updates: std::sync::Arc<skill_packs::Updater>,
     pub device_id: String,
     /// Which app windows are focused (desktop banners hold back while one is).
     pub viewport_focus: desktop_notify::ViewportFocus,
@@ -349,6 +353,8 @@ impl EngineCore {
         let harness_updates =
             harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
         harness_updates.start();
+        let skill_pack_updates = std::sync::Arc::new(skill_packs::Updater::default());
+        skill_pack_updates.start();
         sessions.set_titles(TitleGenerator::new(
             workspace.clone(),
             registry.clone(),
@@ -378,6 +384,7 @@ impl EngineCore {
             uploads,
             agent_accounts,
             harness_updates,
+            skill_pack_updates,
             device_id,
             local_import,
             workspace_scope: profile.scope(),
@@ -588,6 +595,7 @@ impl EngineCore {
             .take();
         self.previews.shutdown().await;
         self.harness_updates.shutdown().await;
+        self.skill_pack_updates.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
         // releases the next queued row. Freeze first so quitting never starts
         // recovered work while the engine is being torn down.

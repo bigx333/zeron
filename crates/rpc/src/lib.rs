@@ -62,6 +62,25 @@ pub mod methods {
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
+    /// The shared skill library (`~/.zeron/skills`) every harness loads:
+    /// list it, read one skill, remove one, and search/preview/install from
+    /// skills.sh. Local to this device; paths are checked by the engine.
+    pub const LIST_SKILL_LIBRARY: &str = "ListSkillLibrary";
+    pub const READ_LIBRARY_SKILL: &str = "ReadLibrarySkill";
+    pub const REMOVE_LIBRARY_SKILL: &str = "RemoveLibrarySkill";
+    pub const SEARCH_SKILL_REGISTRY: &str = "SearchSkillRegistry";
+    pub const PREVIEW_REGISTRY_SKILL: &str = "PreviewRegistrySkill";
+    pub const INSTALL_REGISTRY_SKILL: &str = "InstallRegistrySkill";
+    /// Skill packs: git repositories of skills cloned into `~/.zeron/packs`
+    /// and linked into the library. Inspect clones and reports what an
+    /// install would link (and which names clash); Install commits it. Each
+    /// mutation replies with the fresh `ListSkillLibrary` library.
+    pub const INSPECT_SKILL_PACK: &str = "InspectSkillPack";
+    pub const INSTALL_SKILL_PACK: &str = "InstallSkillPack";
+    pub const CHECK_SKILL_PACK_UPDATES: &str = "CheckSkillPackUpdates";
+    pub const UPDATE_SKILL_PACK: &str = "UpdateSkillPack";
+    pub const SET_SKILL_PACK_AUTO_UPDATE: &str = "SetSkillPackAutoUpdate";
+    pub const REMOVE_SKILL_PACK: &str = "RemoveSkillPack";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
     pub const TAKE_PROJECT_ACTION_SETUP: &str = "TakeProjectActionSetup";
