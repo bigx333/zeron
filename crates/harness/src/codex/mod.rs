@@ -1757,6 +1757,7 @@ async fn run_session(session: Session) {
     // Deltas seen per agent-message item, so a model that never streams
     // (item/completed only) still emits its text exactly once.
     let mut streamed_text: HashSet<String> = HashSet::new();
+    let mut async_inputs: HashSet<String> = HashSet::new();
     let mut reasoning_streams: HashMap<String, ReasoningStream> = HashMap::new();
     // Token usage is held until the turn ends, emitted just before Done.
     let mut pending_usage: Option<AgentEvent> = None;
@@ -1944,6 +1945,15 @@ async fn run_session(session: Session) {
                         }
                         if matches!(item_type(item), "agentMessage" | "agent_message") {
                             if phase == Phase::Completed {
+                                // request_user_input_async is carried on an
+                                // agentMessage, not a server request. Answers
+                                // are ordinary user messages; no RPC is held.
+                                if let Some(event) = async_input_request(item)
+                                    && async_inputs.insert(item["id"].as_str().unwrap_or_default().to_owned())
+                                    && !send(&event_tx, event).await
+                                {
+                                    break 'main;
+                                }
                                 // Fallback for non-streamed messages only.
                                 let id = item.get("id").and_then(Value::as_str).unwrap_or("");
                                 let text = item.get("text").and_then(Value::as_str).unwrap_or("");
@@ -2618,6 +2628,42 @@ async fn steer_as_new_turn(
 // Approvals (approval-as-input parity with zeron's UX)
 // ---------------------------------------------------------------------------
 
+fn async_input_request(item: &Value) -> Option<AgentEvent> {
+    let id = item.get("id")?.as_str().filter(|id| !id.is_empty())?;
+    let questions: Vec<_> = item
+        .get("questions")?
+        .as_array()?
+        .iter()
+        .enumerate()
+        .filter_map(|(index, question)| {
+            let title = question.get("title")?.as_str()?;
+            if title.trim().is_empty() {
+                return None;
+            }
+            Some(UserInputQuestion {
+                id: format!("{id}-{index}"),
+                header: String::new(),
+                question: title.into(),
+                options: question
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+                multi_select: false,
+                prefill: None,
+                multiline: false,
+            })
+        })
+        .collect();
+    (!questions.is_empty()).then(|| AgentEvent::AsyncInputRequested {
+        request_id: format!("codex-async-{id}"),
+        questions,
+    })
+}
+
 type RequestInputFn = Box<
     dyn Fn(Vec<UserInputQuestion>) -> tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>
         + Send
@@ -2788,14 +2834,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
             };
             let question = UserInputQuestion {
                 id: new_message_id(),
-                header: {
-                    let h = field(["header", "title", "label"]);
-                    if h.is_empty() {
-                        "Codex question".into()
-                    } else {
-                        h
-                    }
-                },
+                header: field(["header", "title", "label"]),
                 question: field(["question", "prompt", "text"]),
                 options: q
                     .get("options")

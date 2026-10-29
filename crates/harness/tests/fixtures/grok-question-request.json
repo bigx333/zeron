@@ -1,0 +1,40 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "method": "_x.ai/ask_user_question",
+  "params": {
+    "sessionId": "01a144b2-ff0e-7151-adde-e8bf4fbe4eae",
+    "toolCallId": "call-7551de0b-c5cc-49c1-b88f-3ce0f54a38b5-0",
+    "questions": [
+      {
+        "question": "Color",
+        "options": [
+          {
+            "label": "Blue",
+            "description": "Select blue."
+          },
+          {
+            "label": "Green",
+            "description": "Select green."
+          }
+        ],
+        "multiSelect": false
+      },
+      {
+        "question": "Fruit",
+        "options": [
+          {
+            "label": "Apple",
+            "description": "Select apple."
+          },
+          {
+            "label": "Pear",
+            "description": "Select pear."
+          }
+        ],
+        "multiSelect": true
+      }
+    ],
+    "mode": "default"
+  }
+}

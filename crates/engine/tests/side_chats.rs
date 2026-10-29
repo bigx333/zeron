@@ -456,6 +456,7 @@ async fn a_fork_settles_the_running_subagent_chips_it_copies() {
                     }],
                     resolved: false,
                     answers: None,
+                    non_blocking: false,
                 },
             ],
             ..message("a1", MessageRole::Assistant, "", MessageStatus::Complete)

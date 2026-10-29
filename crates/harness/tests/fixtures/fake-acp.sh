@@ -292,6 +292,37 @@ case "$promptline" in
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
 
+*scenario:grok-question*)
+  emit "{\"id\":88,\"method\":\"_x.ai/ask_user_question\",\"params\":{\"sessionId\":\"$SID\",\"toolCallId\":\"grok-ask-1\",\"questions\":[{\"question\":\"Color\",\"options\":[{\"label\":\"Blue\",\"description\":\"Select blue.\"},{\"label\":\"Green\",\"description\":\"Select green.\"}],\"multiSelect\":false},{\"question\":\"Fruit\",\"options\":[{\"label\":\"Apple\",\"description\":\"Select apple.\"},{\"label\":\"Pear\",\"description\":\"Select pear.\"}],\"multiSelect\":true}],\"mode\":\"default\"}}"
+  if has "$promptline" 'scenario:grok-question-timeout'; then
+    sleep 0.1
+    emit '{"method":"_x.ai/session_notification","params":{"sessionId":"foreign","update":{"sessionUpdate":"interaction_resolved","tool_call_id":"grok-ask-1"}}}'
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"foreign withdrawal ignored"}}'
+    sleep 0.1
+    emit "{\"method\":\"_x.ai/session_notification\",\"params\":{\"sessionId\":\"$SID\",\"update\":{\"sessionUpdate\":\"interaction_resolved\",\"tool_call_id\":\"grok-ask-1\"}}}"
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"withdrawn"}}'
+    emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+    exit 0
+  fi
+  read -r ans || exit 1
+  if has "$promptline" 'scenario:grok-question-dismiss'; then
+    has "$ans" '"outcome":"cancelled"' || exit 1
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"dismissed"}}'
+  elif has "$promptline" 'scenario:grok-question-interrupt'; then
+    # Cancellation and its reply race on stdin; either arrival order is valid.
+    if has "$ans" 'session/cancel'; then read -r ans || exit 1; fi
+    has "$ans" '"outcome":"cancelled"' || exit 1
+    emit "{\"id\":$pid,\"result\":{\"stopReason\":\"cancelled\"}}"
+    exit 0
+  else
+    for want in '"id":88' '"outcome":"accepted"' '"Color":["Blue"]' '"Fruit":["Apple","Pear"]'; do
+      has "$ans" "$want" || exit 1
+    done
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"native answered"}}'
+  fi
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
 *scenario:question*)
   # AskUserQuestion-shaped request: options WITHOUT allow/reject kinds are
   # user-facing choices — must round-trip through the input bridge, never

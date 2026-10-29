@@ -295,6 +295,7 @@ mod tests {
                         questions: vec![],
                         resolved: false,
                         answers: None,
+                        non_blocking: false,
                     },
                 ],
             ),
@@ -333,6 +334,7 @@ mod tests {
                 questions: vec![question("q", "Recherche")],
                 resolved: true,
                 answers,
+                non_blocking: false,
             };
         let entries = vec![entry(
             "a1",

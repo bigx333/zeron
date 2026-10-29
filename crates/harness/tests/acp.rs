@@ -409,6 +409,113 @@ async fn resumed_first_class_model_is_switched_before_prompt() {
 }
 
 #[tokio::test]
+async fn grok_native_questions_round_trip_through_the_input_bridge() {
+    let (mut controls, _steer, _token) = controls();
+    controls.request_input = Box::new(|questions| {
+        assert_eq!(questions.len(), 2);
+        assert!(questions[0].header.is_empty(), "Grok sends no header");
+        assert_eq!(questions[0].question, "Color");
+        assert_eq!(questions[0].options, ["Blue", "Green"]);
+        assert!(!questions[0].multi_select);
+        assert!(questions[1].multi_select);
+        let (tx, rx) = oneshot::channel();
+        tx.send(vec![
+            UserInputAnswer {
+                question_id: questions[0].id.clone(),
+                labels: vec!["Blue".into()],
+            },
+            UserInputAnswer {
+                question_id: questions[1].id.clone(),
+                labels: vec!["Apple".into(), "Pear".into()],
+            },
+        ])
+        .unwrap();
+        rx
+    });
+    let events = run_to_end(&harness(), request("scenario:grok-question"), controls).await;
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "native answered".into()
+    }));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AgentEvent::InputRequested { .. } | AgentEvent::InputResolved { .. }
+        )),
+        "the engine bridge owns input lifecycle ids"
+    );
+}
+
+#[tokio::test]
+async fn grok_native_question_dismissal_returns_cancelled() {
+    let (mut controls, _steer, _token) = controls();
+    controls.request_input = Box::new(|_| {
+        let (_tx, rx) = oneshot::channel();
+        rx
+    });
+    let events = run_to_end(
+        &harness(),
+        request("scenario:grok-question-dismiss"),
+        controls,
+    )
+    .await;
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "dismissed".into()
+    }));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn grok_question_timeout_and_interrupt_release_the_bridge() {
+    for interrupted in [false, true] {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (mut controls, _steer, token) = controls();
+            let (asked_tx, mut asked_rx) = mpsc::unbounded_channel();
+            controls.request_input = Box::new(move |_| {
+                let (tx, rx) = oneshot::channel();
+                asked_tx.send(tx).unwrap();
+                rx
+            });
+            let scenario = if interrupted { "scenario:grok-question-interrupt" } else { "scenario:grok-question-timeout" };
+            let mut stream = harness().run(request(scenario), controls).await.unwrap();
+            let mut answer = asked_rx.recv().await.unwrap();
+            assert!(!answer.is_closed());
+            if interrupted { token.cancel(); }
+            let mut events = Vec::new();
+            while let Some(event) = stream.next().await {
+                let event = event.unwrap();
+                if matches!(&event, AgentEvent::TextDelta { text } if text == "foreign withdrawal ignored") {
+                    assert!(!answer.is_closed(), "foreign sessions cannot withdraw this question");
+                }
+                events.push(event);
+            }
+            answer.closed().await;
+            let expected = if interrupted { DoneStatus::Interrupted } else { DoneStatus::Completed };
+            assert_eq!(dones(&events), vec![(expected, None)], "{events:?}");
+        }).await.expect("question lifecycle completes promptly");
+    }
+}
+
+#[tokio::test]
+async fn permission_shaped_questions_still_round_trip() {
+    let (mut controls, _steer, _token) = controls();
+    controls.request_input = Box::new(|questions| {
+        let (tx, rx) = oneshot::channel();
+        tx.send(vec![UserInputAnswer {
+            question_id: questions[0].id.clone(),
+            labels: vec!["Use tokio".into()],
+        }])
+        .unwrap();
+        rx
+    });
+    let events = run_to_end(&harness(), request("scenario:question"), controls).await;
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "answered".into()
+    }));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
 async fn permission_requests_auto_accept_the_preferred_allow_option() {
     // Whatever the run's auto_approve: a Grok edit never waits on the user.
     for auto_approve in [true, false] {

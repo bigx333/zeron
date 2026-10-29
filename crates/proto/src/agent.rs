@@ -888,6 +888,13 @@ pub enum AgentEvent {
         request_id: String,
         questions: Vec<UserInputQuestion>,
     },
+    /// A durable question answered by a later user message. The agent keeps
+    /// working, and the question can outlive the turn that asked it.
+    #[serde(rename_all = "camelCase")]
+    AsyncInputRequested {
+        request_id: String,
+        questions: Vec<UserInputQuestion>,
+    },
     #[serde(rename_all = "camelCase")]
     InputResolved {
         request_id: String,

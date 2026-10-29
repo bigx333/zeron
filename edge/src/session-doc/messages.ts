@@ -39,6 +39,7 @@ export interface DocMessagePart {
   readonly questions?: ReadonlyArray<UserInputQuestion>;
   readonly resolved?: boolean;
   readonly answers?: ReadonlyArray<UserInputAnswer>;
+  readonly nonBlocking?: boolean;
   /** kind === "error". */
   readonly message?: string;
 }
@@ -68,7 +69,8 @@ export const toDocParts = (
           kind: "input",
           questions: p.questions,
           ...(typeof p.resolved === "boolean" ? { resolved: p.resolved } : {}),
-          ...(p.answers ? { answers: p.answers } : {})
+          ...(p.answers ? { answers: p.answers } : {}),
+          ...(typeof p.nonBlocking === "boolean" ? { nonBlocking: p.nonBlocking } : {})
         };
       case "error":
         return { id: p.id, kind: "error", message: p.message };
@@ -101,7 +103,8 @@ export const fromDocParts = (
           requestId: p.id,
           questions: (p.questions ?? []) as never,
           ...(typeof p.resolved === "boolean" ? { resolved: p.resolved } : {}),
-          ...(Array.isArray(p.answers) ? { answers: p.answers } : {})
+          ...(Array.isArray(p.answers) ? { answers: p.answers } : {}),
+          ...(typeof p.nonBlocking === "boolean" ? { nonBlocking: p.nonBlocking } : {})
         };
       case "error":
         return { kind: "error", id: p.id, message: p.message ?? "" };

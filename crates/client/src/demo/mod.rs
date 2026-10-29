@@ -718,6 +718,7 @@ impl DemoHost {
                         questions,
                         resolved: false,
                         answers: None,
+                        non_blocking: false,
                     });
                     sync(&parts, &mut written, &mut index);
                     awaiting = true;
