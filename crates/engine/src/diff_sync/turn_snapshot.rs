@@ -645,6 +645,9 @@ mod tests {
 
     async fn git(cwd: &Path, args: &[&str]) {
         let output = tokio::process::Command::new("git")
+            // A detached maintenance process can create/remove maintenance.lock
+            // while the test compares the checkout's object database.
+            .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
             .args(args)
             .current_dir(cwd)
             .env("GIT_AUTHOR_NAME", "test")
