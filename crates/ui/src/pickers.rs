@@ -780,7 +780,6 @@ enum ModelName {
 /// state; clicking a brand icon picks that harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ModelRail {
-    All,
     Favorites,
     #[default]
     Harness,
@@ -1879,7 +1878,7 @@ impl Pickers {
             self.model_rail = ModelRail::Harness;
         } else if kind == PickerKind::HarnessModel {
             self.model_rail = if self.compact_model_picker(cx) {
-                ModelRail::All
+                ModelRail::Harness
             } else if !self.harness_locked(cx) && !self.defaults.favorites.is_empty() {
                 ModelRail::Favorites
             } else {
@@ -4704,9 +4703,7 @@ impl Pickers {
     /// through the exit animation, and the rail must keep measuring the
     /// closing menu's own handle, not `menu_scroll`'s idle geometry.
     fn active_menu_scroll(&self) -> gpui::ScrollHandle {
-        if self.mounted_kind() == Some(PickerKind::HarnessModel)
-            && (self.model_rail != ModelRail::All || self.compact_model_list)
-        {
+        if self.mounted_kind() == Some(PickerKind::HarnessModel) {
             self.model_scroll_base()
         } else {
             self.menu_scroll.clone()
@@ -5388,7 +5385,7 @@ impl Pickers {
                 == Some(row.model.id.as_str());
         let is_active = ix == self.active;
         let is_fav = self.defaults.is_favorite(row.harness, &row.model.id);
-        let (icon_path, tint) = harness_brand_icon(row.harness);
+        let (icon_path, tint) = model_brand_icon(row.harness, &row.model.id);
         let label: SharedString = row.model.label.clone().into();
         let harness_name = row.harness_name.clone();
         let harness = row.harness;
@@ -6555,7 +6552,6 @@ fn scoped_model_rows<'a>(
         ambiguous: false,
     };
     let in_scope = |descriptor: &HarnessDescriptor, model: &Model| match rail {
-        ModelRail::All => true,
         ModelRail::Favorites => is_favorite(descriptor.id, &model.id),
         ModelRail::Harness => Some(descriptor.id) == effective,
     };
@@ -6592,30 +6588,21 @@ fn scoped_model_rows<'a>(
                 input_ix += 1;
             }
         }
-        ranked.sort_by_key(|(rank, unstarred, ix, _)| {
-            if rail == ModelRail::All {
-                (*unstarred, *rank, *ix)
-            } else {
-                (*rank, *unstarred, *ix)
-            }
-        });
+        ranked.sort_by_key(|(rank, unstarred, ix, _)| (*rank, *unstarred, *ix));
         return ranked.into_iter().map(|(_, _, _, row)| row).collect();
     }
     match rail {
-        ModelRail::All | ModelRail::Favorites => {
+        ModelRail::Favorites => {
             let mut rows = Vec::new();
             for descriptor in descriptors {
                 let Some(models) = models_for(descriptor.id) else {
                     continue;
                 };
                 for model in models {
-                    if rail == ModelRail::All || is_favorite(descriptor.id, &model.id) {
+                    if is_favorite(descriptor.id, &model.id) {
                         rows.push(row(descriptor, model));
                     }
                 }
-            }
-            if rail == ModelRail::All {
-                rows.sort_by_key(|row| !is_favorite(row.harness, &row.model.id));
             }
             rows
         }
@@ -6737,24 +6724,38 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
 }
 
 pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {
-    match harness {
-        HarnessId::ClaudeCode | HarnessId::Mock => (
-            crate::icons::CLAUDE_MARK,
-            Some(crate::icons::claude_brand()),
-        ),
-        HarnessId::Codex => (crate::icons::OPENAI_MARK, None),
-        HarnessId::Cursor => (crate::icons::CURSOR_MARK, None),
-        // Cognition's mark (the Devin product icon), monochrome.
-        HarnessId::Devin => (crate::icons::DEVIN_MARK, None),
-        // Monochrome mark, tinted by the surface like OpenAI's.
-        HarnessId::Grok => (crate::icons::GROK_MARK, None),
+    let mark = match harness {
+        HarnessId::ClaudeCode | HarnessId::Mock => crate::icons::CLAUDE_MARK,
+        HarnessId::Codex => crate::icons::OPENAI_MARK,
+        HarnessId::Cursor => crate::icons::CURSOR_MARK,
+        // Cognition's mark (the Devin product icon).
+        HarnessId::Devin => crate::icons::DEVIN_MARK,
+        HarnessId::Grok => crate::icons::GROK_MARK,
         // Nous Research's mark (the Hermes product icon), monochrome.
-        HarnessId::Hermes => (crate::icons::HERMES_MARK, None),
-        HarnessId::Pi => (crate::icons::PI_MARK, None),
+        HarnessId::Hermes => crate::icons::HERMES_MARK,
+        HarnessId::Pi => crate::icons::PI_MARK,
         // The pixel-"o" from opencode's wordmark (their favicon), monochrome.
-        HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
-        HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
-        HarnessId::Muse => (crate::icons::MUSE_MARK, Some(crate::icons::muse_brand())),
+        HarnessId::Opencode => crate::icons::OPENCODE_MARK,
+        HarnessId::Antigravity => crate::icons::ANTIGRAVITY_MARK,
+        HarnessId::Muse => crate::icons::MUSE_MARK,
+    };
+    (mark, crate::icons::mark_brand(mark))
+}
+
+/// A model's mark: its vendor's (a Gemini model under opencode wears
+/// Gemini's), else its harness's.
+pub(crate) fn model_brand_icon(
+    harness: HarnessId,
+    model_id: &str,
+) -> (&'static str, Option<gpui::Hsla>) {
+    // A first-party harness only runs its maker's models, whatever the id
+    // (`default`, `opus`).
+    if matches!(harness, HarnessId::ClaudeCode | HarnessId::Mock | HarnessId::Codex) {
+        return harness_brand_icon(harness);
+    }
+    match crate::icons::model_vendor_mark(model_id) {
+        Some(mark) => (mark, crate::icons::mark_brand(mark)),
+        None => harness_brand_icon(harness),
     }
 }
 
@@ -7067,13 +7068,14 @@ impl Render for Pickers {
             None => self.effective_harness(cx),
         };
         let harness_icon: (&'static str, Option<gpui::Hsla>) = match chip_harness {
-            Some(harness) => harness_brand_icon(harness),
+            // The picked model's vendor (Gemini under opencode), else the harness.
+            Some(harness) => match self.effective_model_id(cx) {
+                Some(model) => model_brand_icon(harness, model),
+                None => harness_brand_icon(harness),
+            },
             None if self.title.is_some() => (crate::icons::CHAT_ROUND_LINE, Some(theme.text_muted)),
             None if no_agents => (crate::icons::TERMINAL, Some(theme.text_muted)),
-            None => (
-                crate::icons::CLAUDE_MARK,
-                Some(crate::icons::claude_brand()),
-            ),
+            None => harness_brand_icon(HarnessId::ClaudeCode),
         };
         // The chip names the model and its effort only; the other options
         // (context, fast mode, ...) live in the popover. The effort always
@@ -7705,7 +7707,7 @@ mod tests {
             };
             pickers.update(cx, |pickers, cx| {
                 pickers.show_compact_models(cx);
-                assert_eq!(pickers.model_rail, ModelRail::All);
+                assert_eq!(pickers.model_rail, ModelRail::Harness);
                 assert_eq!(providers(pickers, cx).len(), 2, "every provider is offered");
                 pickers.pick_compact_provider(HarnessId::Codex, cx);
                 assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
@@ -7725,7 +7727,7 @@ mod tests {
             state.update(cx, |state, _| state.apply_sessions(Vec::new()));
             pickers.update(cx, |pickers, cx| {
                 pickers.show_compact_models(cx);
-                assert_eq!(pickers.model_rail, ModelRail::All);
+                assert_eq!(pickers.model_rail, ModelRail::Harness);
                 pickers.pick_compact_provider(HarnessId::ClaudeCode, cx);
                 assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
             });
@@ -10199,19 +10201,94 @@ mod tests {
                     Loadable::Ready(vec![bare_model("claude", "Claude model")]),
                 );
                 picker.catalog_rev += 1;
-                // A provider's models become directly selectable when its
-                // catalog finishes loading; no provider-page detour is needed.
-                assert_eq!(picker.model_rows_len(cx), 2);
-                assert_eq!(picker.model_rows(cx)[1].harness, HarnessId::ClaudeCode);
-                picker.activate_model_index(1, cx);
+                // A late catalog stays in its own tab. Switching tabs makes
+                // its models directly selectable, without mixing providers.
+                assert_eq!(picker.model_rows_len(cx), 1);
+                picker.select_compact_tab(Some(HarnessId::ClaudeCode), cx);
+                assert_eq!(picker.model_rows_len(cx), 1);
+                assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::ClaudeCode);
+                picker.activate_model_index(0, cx);
                 assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
                 assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude"));
                 picker.show_compact_models(cx);
-                assert_eq!(picker.model_rows_len(cx), 2);
-                assert_eq!(
-                    picker.model_rows(cx)[picker.active].harness,
-                    HarnessId::ClaudeCode
+                assert_eq!(picker.model_rows_len(cx), 1);
+                assert_eq!(picker.model_rows(cx)[picker.active].harness, HarnessId::ClaudeCode);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn compact_grok_tab_scopes_search_and_increases_effort(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut picker = Pickers::new(state, cx);
+            picker.config.harness = Some(HarnessId::Codex);
+            picker.harnesses = Loadable::Ready(vec![
+                descriptor(HarnessId::Codex, "Codex"),
+                descriptor(HarnessId::Grok, "Grok"),
+            ]);
+            picker.models.insert(
+                HarnessId::Codex,
+                Loadable::Ready(vec![bare_model("gpt-6.1-sol", "GPT-6.1-Sol")]),
+            );
+            let mut grok = bare_model("grok-4.7", "Grok 4.7");
+            grok.reasoning_levels = vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+            ];
+            picker.models.insert(
+                HarnessId::Grok,
+                Loadable::Ready(normalize_model_rows(HarnessId::Grok, vec![grok])),
+            );
+            picker
+        });
+        handle
+            .update(cx, |picker, window, cx| {
+                picker.open_model_menu(window, cx);
+                picker.show_compact_models(cx);
+                assert_eq!(row_ids(&picker.model_rows(cx)), ["gpt-6.1-sol"]);
+                picker.select_compact_tab(Some(HarnessId::Grok), cx);
+                assert_eq!(row_ids(&picker.model_rows(cx)), ["grok-4.7"]);
+                assert_eq!(picker.model_rail, ModelRail::Harness);
+                assert_eq!(picker.effective_harness(cx), Some(HarnessId::Grok));
+                let effort = picker.compact_effort(cx).unwrap();
+                assert_eq!(effort.labels, ["Low", "Medium", "High", "X-High"]);
+                assert_eq!(effort.selected, 2);
+                picker.pick_compact_effort(effort, 0, cx);
+                assert_eq!(picker.resolved(cx).reasoning, Some(ReasoningLevel::Low));
+                let effort = picker.compact_effort(cx).unwrap();
+                picker.pick_compact_effort(effort, 3, cx);
+                assert_eq!(picker.resolved(cx).reasoning, Some(ReasoningLevel::XHigh));
+
+                picker
+                    .search
+                    .update(cx, |input, cx| input.set_text("Grok", cx));
+                assert_eq!(picker.model_rows_len(cx), 1);
+                let tabs = picker.compact_tabs(cx);
+                picker.select_compact_tab(Some(HarnessId::Codex), cx);
+                assert!(
+                    picker.model_rows(cx).is_empty(),
+                    "Search stays within Codex"
                 );
+                assert_eq!(
+                    picker.compact_tabs(cx),
+                    tabs,
+                    "Search keeps the provider tabs"
+                );
+                picker.select_compact_tab(Some(HarnessId::Grok), cx);
+                assert_eq!(row_ids(&picker.model_rows(cx)), ["grok-4.7"]);
+                picker.activate_model_index(0, cx);
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::Grok));
+                assert_eq!(picker.resolved(cx).model.as_deref(), Some("grok-4.7"));
             })
             .unwrap();
     }
@@ -10319,25 +10396,20 @@ mod tests {
                 picker.pick_compact_provider(HarnessId::ClaudeCode, cx);
                 assert_eq!(picker.resolved(cx).model.as_deref(), Some("opus"));
                 assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::High));
-                // The list's tabs are its provider groups, in list order;
-                // starring adds a Starred tab ahead of them, holding the
-                // starred models from every provider.
+                // Provider tabs stay stable; favorites from every provider
+                // live in their own tab.
                 picker.show_compact_models(cx);
                 assert_eq!(
-                    picker.compact_groups(cx),
-                    vec![
-                        (Some(HarnessId::Codex), 0),
-                        (Some(HarnessId::ClaudeCode), 2)
-                    ]
+                    picker.compact_tabs(cx),
+                    vec![None, Some(HarnessId::Codex), Some(HarnessId::ClaudeCode)]
                 );
                 picker.toggle_model_favorite(HarnessId::Codex, "gpt-a", cx);
+                assert_eq!(picker.model_rows_len(cx), 1);
+                assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::ClaudeCode);
+                picker.select_compact_tab(None, cx);
                 assert_eq!(
-                    picker.compact_groups(cx),
-                    vec![
-                        (None, 0),
-                        (Some(HarnessId::Codex), 1),
-                        (Some(HarnessId::ClaudeCode), 2),
-                    ]
+                    picker.compact_tabs(cx),
+                    vec![None, Some(HarnessId::Codex), Some(HarnessId::ClaudeCode)]
                 );
                 let rows = picker.model_rows(cx);
                 assert_eq!(
@@ -10383,15 +10455,15 @@ mod tests {
             .update(cx, |picker, window, cx| {
                 picker.open_model_menu(window, cx);
                 assert!(!picker.compact_model_list);
-                // Models from every offered provider are directly selectable.
+                // Each tab lists only its provider's models.
                 picker.show_compact_models(cx);
-                assert_eq!(picker.model_rows_len(cx), 2);
+                assert_eq!(picker.model_rows_len(cx), 1);
                 assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::Codex);
-                assert_eq!(picker.model_rows(cx)[1].harness, HarnessId::ClaudeCode);
-                // Searching must also find another provider's model.
-                picker
-                    .search
-                    .update(cx, |input, cx| input.set_text("Claude", cx));
+                // Search is scoped to the viewed tab, and switching tabs
+                // reuses the query without hiding the provider strip.
+                picker.search.update(cx, |input, cx| input.set_text("Claude", cx));
+                assert!(picker.model_rows(cx).is_empty());
+                picker.select_compact_tab(Some(HarnessId::ClaudeCode), cx);
                 assert_eq!(picker.model_rows_len(cx), 1);
                 assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::ClaudeCode);
                 picker.activate_model_index(0, cx);
@@ -10399,9 +10471,10 @@ mod tests {
                 assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
                 assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude-model"));
                 picker.pick_harness(HarnessId::Codex, cx);
-                // Clicking a foreign-provider row works without a search too.
+                // Switching tabs works without a search too.
                 picker.show_compact_models(cx);
-                picker.activate_model_index(1, cx);
+                picker.select_compact_tab(Some(HarnessId::ClaudeCode), cx);
+                picker.activate_model_index(0, cx);
                 assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
                 picker.pick_harness(HarnessId::Codex, cx);
                 // Switching provider (Tab on the panel) lands back on the
@@ -10427,8 +10500,11 @@ mod tests {
                     .update(cx, |input, cx| input.set_text("Claude", cx));
                 assert_eq!(picker.model_rows_len(cx), 0);
                 picker.search.update(cx, |input, cx| input.set_text("", cx));
-                // A running turn locks the provider to one tab, its own.
-                assert_eq!(picker.compact_groups(cx), vec![(Some(HarnessId::Codex), 0)]);
+                // A chat's provider is fixed: one tab, its own.
+                assert_eq!(
+                    picker.compact_tabs(cx),
+                    vec![None, Some(HarnessId::Codex)]
+                );
                 picker.compact_model_list = false;
                 picker.focus_on_mount = true;
             })
@@ -10455,42 +10531,6 @@ mod tests {
             .unwrap();
         cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
-    }
-
-    #[test]
-    fn compact_all_models_keeps_favorites_first_in_catalog_and_search() {
-        let descriptors = vec![
-            descriptor(HarnessId::ClaudeCode, "Claude"),
-            descriptor(HarnessId::Codex, "Codex"),
-        ];
-        let claude = vec![
-            bare_model("plain-a", "Model A"),
-            bare_model("star-a", "My Model A"),
-        ];
-        let codex = vec![
-            bare_model("plain-b", "Model B"),
-            bare_model("star-b", "My Model B"),
-        ];
-        for query in ["", "model"] {
-            let rows = scoped_model_rows(
-                query,
-                ModelRail::All,
-                Some(HarnessId::Codex),
-                &descriptors,
-                |harness| match harness {
-                    HarnessId::ClaudeCode => Some(claude.as_slice()),
-                    HarnessId::Codex => Some(codex.as_slice()),
-                    _ => None,
-                },
-                |_, id| id.starts_with("star"),
-            );
-            assert_eq!(
-                rows.iter()
-                    .map(|row| row.model.id.as_str())
-                    .collect::<Vec<_>>(),
-                vec!["star-a", "star-b", "plain-a", "plain-b"]
-            );
-        }
     }
 
     #[test]
@@ -10639,6 +10679,10 @@ mod tests {
             flags.contains(&("glm", false)),
             "other harness: not a clash"
         );
+    }
+
+    fn row_ids(rows: &[ModelRowData]) -> Vec<&str> {
+        rows.iter().map(|row| row.model.id.as_str()).collect()
     }
 
     #[test]

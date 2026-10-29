@@ -27,6 +27,28 @@ struct ComposerChip: Equatable {
     var tint: UIColor? = nil
     /// Brand mark / custom glyph (takes precedence over `symbol`).
     var icon: UIImage? = nil
+    /// A meter's fill (0…1): drawn as a ring on no pill, like the desktop
+    /// footer's context ring.
+    var ring: Double? = nil
+}
+
+/// The desktop footer's 16pt progress ring: a faint full track under an arc
+/// from twelve o'clock. A template image, so the chip's tint colours it.
+enum MeterRing {
+    static func image(_ fraction: Double) -> UIImage {
+        UIGraphicsImageRenderer(size: CGSize(width: 16, height: 16)).image { ctx in
+            let g = ctx.cgContext
+            g.setLineWidth(1.8)
+            g.setStrokeColor(UIColor.black.withAlphaComponent(0.25).cgColor)
+            g.addArc(center: CGPoint(x: 8, y: 8), radius: 6, startAngle: 0, endAngle: .pi * 2, clockwise: false)
+            g.strokePath()
+            let f = min(max(fraction, 0), 1)
+            guard f > 0 else { return }
+            g.setStrokeColor(UIColor.black.cgColor)
+            g.addArc(center: CGPoint(x: 8, y: 8), radius: 6, startAngle: -.pi / 2, endAngle: -.pi / 2 + .pi * 2 * f, clockwise: false)
+            g.strokePath()
+        }.withRenderingMode(.alwaysTemplate)
+    }
 }
 
 /// The composer. One glass surface with two states that morph into each
@@ -426,18 +448,27 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
         for chip in chips {
             var config = UIButton.Configuration.filled()
             config.title = chip.title
-            if let icon = chip.icon {
+            if let ring = chip.ring {
+                config.image = MeterRing.image(ring)
+            } else if let icon = chip.icon {
                 config.image = icon
             } else if let symbol = chip.symbol {
                 config.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 11.5, weight: .semibold))
             }
-            config.imagePadding = chip.id == "pr" ? 5 : 6
+            config.imagePadding = chip.ring != nil || chip.id == "pr" ? 5 : 6
             // Tinted chips (the PR badge) use the desktop's tone wash: fill
-            // @ 0.08, ink @ 0.85.
-            config.baseForegroundColor = chip.tint.map { $0.withAlphaComponent(0.85) } ?? Palette.text
-            config.baseBackgroundColor = chip.tint.map { $0.withAlphaComponent(0.1) } ?? Palette.controlFill
+            // @ 0.08, ink @ 0.85. A meter is bare: ring and figure in its tint.
+            if chip.ring != nil {
+                config.baseForegroundColor = chip.tint ?? Palette.secondary
+                config.baseBackgroundColor = .clear
+            } else {
+                config.baseForegroundColor = chip.tint.map { $0.withAlphaComponent(0.85) } ?? Palette.text
+                config.baseBackgroundColor = chip.tint.map { $0.withAlphaComponent(0.1) } ?? Palette.controlFill
+            }
             config.cornerStyle = .capsule
-            config.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 11, bottom: 7, trailing: 11)
+            config.contentInsets = chip.ring != nil
+                ? NSDirectionalEdgeInsets(top: 7, leading: 6, bottom: 7, trailing: 6)
+                : NSDirectionalEdgeInsets(top: 7, leading: 11, bottom: 7, trailing: 11)
             config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
                 var a = attrs
                 // PR numbers stay mono like the list's PR badges; the checkout

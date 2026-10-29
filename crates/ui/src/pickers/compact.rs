@@ -164,7 +164,7 @@ impl Pickers {
                 .selected_model(cx)
                 .is_some_and(|model| model.id == row.model.id);
         let favorite = self.defaults.is_favorite(row.harness, &row.model.id);
-        let (icon, tint) = harness_brand_icon(row.harness);
+        let (icon, tint) = model_brand_icon(row.harness, &row.model.id);
         let harness = row.harness;
         let model = row.model.id.clone();
         let label: SharedString = row.model.label.clone().into();
@@ -316,50 +316,15 @@ impl Pickers {
     }
 
     pub(super) fn show_compact_models(&mut self, cx: &mut Context<Self>) {
-        // Browse every offered provider, just as the standard picker's rail
-        // allows. rail_descriptors still limits existing chats to their provider.
-        // A foreign-provider row switches the provider before picking its model.
-        let rail = if self.harness_locked(cx) {
-            ModelRail::Harness
-        } else {
-            ModelRail::All
-        };
-        self.show_compact_list(rail, "Search models…", cx);
-    }
-
-    fn show_compact_list(
-        &mut self,
-        rail: ModelRail,
-        placeholder: &'static str,
-        cx: &mut Context<Self>,
-    ) {
         self.setting_menu = None;
         self.compact_model_list = true;
-        self.model_rail = rail;
-        self.reset_compact_search(placeholder, cx);
-        // Open on the current model: its provider's group at the top when
-        // the model sits near the start of it, else centred on the model.
+        self.model_rail = ModelRail::Harness;
+        self.reset_compact_search("Search models…", cx);
         let selected = self.selected_model_index(cx);
         self.active = selected;
-        let start = self
-            .compact_groups(cx)
-            .into_iter()
-            .rev()
-            .find(|(_, start)| *start <= selected)
-            .map_or(0, |(_, start)| start);
-        if selected - start < COMPACT_LIST_ROWS as usize - 2 {
-            // One row of the previous group stays above, under the edge
-            // fade, so the group's first row is never washed out and the
-            // list shows there is more above.
-            self.model_scroll.scroll_to_item_strict_with_offset(
-                start,
-                gpui::ScrollStrategy::Top,
-                usize::from(start > 0),
-            );
-        } else {
-            self.model_scroll
-                .scroll_to_item_strict(selected, gpui::ScrollStrategy::Center);
-        }
+        self.model_scroll_base().set_offset(gpui::Point::default());
+        self.model_scroll
+            .scroll_to_item(selected, gpui::ScrollStrategy::Nearest);
         self.focus_on_mount = true;
         cx.notify();
     }
@@ -391,46 +356,43 @@ impl Pickers {
         self.show_compact_panel(cx);
     }
 
-    /// Where each provider's group starts in the unsearched list: starred
-    /// models first, then one run per provider.
-    pub(super) fn compact_groups(&self, cx: &App) -> Vec<(Option<HarnessId>, usize)> {
-        let rows = self.model_rows(cx);
-        let mut groups: Vec<(Option<HarnessId>, usize)> = Vec::new();
-        for (ix, row) in rows.iter().enumerate() {
-            let group =
-                (!self.defaults.is_favorite(row.harness, &row.model.id)).then_some(row.harness);
-            if groups.last().is_none_or(|(last, _)| *last != group) {
-                groups.push((group, ix));
-            }
-        }
-        groups
+    /// Tabs stay available through searches and catalog loading. A committed
+    /// chat's rail already limits the providers and favorites to its harness.
+    pub(super) fn compact_tabs(&self, cx: &App) -> Vec<Option<HarnessId>> {
+        std::iter::once(None)
+            .chain(self.rail_descriptors(cx).into_iter().map(|d| Some(d.id)))
+            .collect()
     }
 
-    /// The model list's top row: back to the panel, then the providers as
-    /// tabs. Each tab jumps the list to its group, and the group at the top
-    /// of the scroll lights its tab. The strip fades at both edges over the
-    /// tabs scrolled past them.
+    pub(super) fn select_compact_tab(&mut self, harness: Option<HarnessId>, cx: &mut Context<Self>) {
+        self.compact_keyboard = false;
+        self.setting_menu = None;
+        if let Some(harness) = harness {
+            self.model_rail = ModelRail::Harness;
+            self.pick_harness(harness, cx);
+        } else {
+            self.model_rail = ModelRail::Favorites;
+        }
+        self.active = self.selected_model_index(cx);
+        self.model_scroll_base().set_offset(gpui::Point::default());
+        self.model_scroll
+            .scroll_to_item(self.active, gpui::ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// Back to the panel, then provider tabs that scope the list and search.
+    /// Selection is independent of scroll position, including short catalogs.
     pub(super) fn compact_model_back_header(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let theme = Theme::of(cx).for_popup();
-        let searching = !self.search.read(cx).text().trim().is_empty();
-        let groups = if searching {
-            Vec::new()
+        let groups = self.compact_tabs(cx);
+        let current = if self.model_rail == ModelRail::Favorites {
+            None
         } else {
-            self.compact_groups(cx)
+            self.effective_harness(cx)
         };
-        // Rows share one pitch, so the scroll offset names the top row.
-        let top = (f32::from(-self.model_scroll_base().offset().y)
-            / (COMPACT_ROW_HEIGHT + popover::MENU_GAP))
-            .round()
-            .max(0.0) as usize;
-        let current = groups
-            .iter()
-            .rev()
-            .find(|(_, start)| *start <= top)
-            .map(|(group, _)| *group);
         // Many providers overflow the strip: keep the viewed tab in sight
-        // as the list scrolls, without fighting a manual sideways scroll.
-        let viewed_ix = groups.iter().position(|(group, _)| current == Some(*group));
+        // when switching providers, without fighting a manual sideways scroll.
+        let viewed_ix = groups.iter().position(|group| current == *group);
         if viewed_ix != self.compact_strip_viewed {
             self.compact_strip_viewed = viewed_ix;
             if let Some(ix) = viewed_ix {
@@ -448,8 +410,8 @@ impl Pickers {
                 .gap(px(popover::MENU_GAP))
                 .overflow_x_scroll()
                 .track_scroll(&self.compact_strip_scroll)
-                .children(groups.into_iter().map(|(group, start)| {
-                    let viewed = current == Some(group);
+                .children(groups.into_iter().enumerate().map(|(ix, group)| {
+                    let viewed = current == group;
                     let (icon, tint, name): (&'static str, Option<gpui::Hsla>, SharedString) =
                         match group {
                             None => (crate::icons::STAR_BOLD, None, "Starred".into()),
@@ -466,9 +428,10 @@ impl Pickers {
                         };
                     let hint = name.clone();
                     div()
-                        .id(SharedString::from(format!("compact-group-{start}")))
+                        .id(SharedString::from(format!("compact-group-{ix}")))
                         .role(gpui::Role::Button)
-                        .aria_label(SharedString::from(format!("Jump to {name}")))
+                        .aria_label(SharedString::from(format!("Show {name} models")))
+                        .aria_selected(viewed)
                         .tooltip(move |_, cx| cx.new(|_| PickerHint(hint.clone())).into())
                         // A row-height square with the rows' corners, so the
                         // strip sits on the card's grid like the list below.
@@ -485,11 +448,7 @@ impl Pickers {
                                 .hover(|s| s.bg(crate::theme::ink(0.05)).opacity(1.0))
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.compact_keyboard = false;
-                            this.active = start;
-                            this.model_scroll
-                                .scroll_to_item_strict(start, gpui::ScrollStrategy::Top);
-                            cx.notify();
+                            this.select_compact_tab(group, cx);
                         }))
                         .child(crate::icons::icon(icon).size(px(14.0)).text_color(
                             tint.unwrap_or(if viewed { theme.text } else { theme.text_muted }),
