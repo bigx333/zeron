@@ -252,6 +252,9 @@ fun SessionScreen(
     val headerTitle = if (parentId != null) "Side chat" else composer.title
     val subtitle = parentTitle ?: composer.host.name?.let { "$project @ $it" } ?: project
     var overflow by remember { mutableStateOf(false) }
+    var snoozing by remember { mutableStateOf(false) }
+    var pickingWake by remember { mutableStateOf(false) }
+    val mode by model.sidebarMode.collectAsState()
     val clipboard = LocalClipboardManager.current
 
     // Flat Material chrome: the header sits on the page and takes the
@@ -307,10 +310,14 @@ fun SessionScreen(
                             listOfNotNull(
                                 row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
                                 MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
-                                row?.let {
-                                    MenuAction("Archive", ZIcons.Archive) {
-                                        model.archive(chatId)
-                                        onBack()
+                                // T3: snooze lengths in a sheet (touch, no hover); a snoozed chat wakes from here.
+                                row?.takeIf { mode.isT3 && !it.archived }?.let { MenuAction(if (it.snoozed) "Snooze again…" else "Snooze…", ZIcons.Snooze) { snoozing = true } },
+                                row?.let { r ->
+                                    if (r.archived) {
+                                        MenuAction(mode.unsettle, ZIcons.Unarchive) { model.unarchive(chatId) }
+                                    } else {
+                                        // Back to the list only once it's really gone from it.
+                                        MenuAction(mode.settle, if (mode.isT3) ZIcons.Settle else ZIcons.Archive) { if (model.archive(chatId)) onBack() }
                                     }
                                 },
                             ),
@@ -422,6 +429,9 @@ fun SessionScreen(
             dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
         )
     }
+
+    if (snoozing) SnoozeSheet(row, onDismiss = { snoozing = false }, onPickDateTime = { pickingWake = true }) { model.snooze(chatId, it) }
+    if (pickingWake) SnoozeDateTimeDialogs(onDismiss = { pickingWake = false }) { model.snooze(chatId, it) }
 
     sheet?.let { s ->
         ModalBottomSheet(onDismissRequest = { sheet = null }) {

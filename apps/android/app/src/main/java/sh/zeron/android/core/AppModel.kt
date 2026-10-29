@@ -83,6 +83,8 @@ data class LaunchOptions(
     val remoteVoice: Boolean = false,
     /** `--ez voice-selftest true`: log a host-less WebRTC offer (debuggable builds). */
     val voiceSelfTest: Boolean = false,
+    /** `--ez t3 true`: open in T3 Mode, shelves folded (in memory only). */
+    val t3: Boolean = false,
 )
 
 /**
@@ -146,6 +148,27 @@ class AppModel(private val app: Application) {
     fun setGroupByProject(on: Boolean) {
         _groupByProject.value = on
         settings.edit().putBoolean("groupByProject", on).apply()
+    }
+
+    /** Default or T3 Mode (the attention-first inbox), kept on this device. */
+    private val _sidebarMode = MutableStateFlow(SidebarMode.parse(settings.getString("sidebarMode", null)))
+    val sidebarMode: StateFlow<SidebarMode> = _sidebarMode.asStateFlow()
+
+    /** The demo and `t3` launches keep the layout in memory: a run's toggles never touch the real preference. */
+    private val persistsSidebar get() = !launch.demo && !launch.t3 && !isDemo
+
+    fun setSidebarMode(mode: SidebarMode) {
+        _sidebarMode.value = mode
+        if (persistsSidebar) settings.edit().putString("sidebarMode", mode.name).apply()
+    }
+
+    /** Open T3 shelves (Working, Snoozed, Settled), kept on this device. */
+    private val _openShelves = MutableStateFlow(openShelves(settings.getStringSet("openShelves", null)?.toSet()))
+    val openShelves: StateFlow<Set<String>> = _openShelves.asStateFlow()
+
+    fun setShelfOpen(shelf: Shelf, open: Boolean) {
+        _openShelves.value = if (open) _openShelves.value + shelf.id else _openShelves.value - shelf.id
+        if (persistsSidebar) settings.edit().putStringSet("openShelves", _openShelves.value).apply()
     }
 
     /** Folded sidebar groups (pinned, recent, project groups), kept on this device. */
@@ -221,6 +244,11 @@ class AppModel(private val app: Application) {
         if (options.signedOut) credentials.clear()
         // The demo starts from the in-memory defaults, never a real account's options.
         if (options.demo) lastDraft = NewSessionDraft()
+        // `t3` seeds T3 Mode, the demo Default; both start with every shelf folded.
+        if (options.t3 || options.demo) {
+            _sidebarMode.value = if (options.t3) SidebarMode.T3 else SidebarMode.Default
+            _openShelves.value = openShelves(null)
+        }
         watchNetwork()
         // `wallpaper <path>` / `wallpaper none` and `wallpaper-effect <name>`:
         // set the wallpaper at launch (screenshots, tests).
@@ -398,6 +426,7 @@ class AppModel(private val app: Application) {
         lastDeliveryActivity = 0L
         terminals.signOut()
         cloud.reset()
+        main.removeCallbacks(snoozeWake)
         _client.value?.shutdown()
         _client.value = null
         _workspace.value = null
@@ -449,8 +478,22 @@ class AppModel(private val app: Application) {
 
     fun refreshWorkspace() {
         val client = _client.value ?: return
-        _workspace.value = client.workspace()
+        val ws = client.workspace()
+        _workspace.value = ws
         sweepFreshSideChats()
+        scheduleSnoozeWake(ws)
+    }
+
+    private val snoozeWake = Runnable { refreshWorkspace() }
+
+    /** The core wakes a snoozed chat at its deadline; re-read then rather than on the next 30s tick. */
+    private fun scheduleSnoozeWake(ws: WorkspaceSnapshot) {
+        main.removeCallbacks(snoozeWake)
+        val now = System.currentTimeMillis()
+        val rows = ws.t3Front.snoozed + ws.front.activeRows()
+        val next = nextSnoozeDeadline(rows.map { it.snoozedUntilMs }, now) ?: return
+        // A beat past the deadline so the core's own tick has landed.
+        main.postDelayed(snoozeWake, next - now + 500)
     }
 
     fun onForeground() {
@@ -533,13 +576,43 @@ class AppModel(private val app: Application) {
         if (pinned) c.pinSession(id) else c.unpinSession(id)
     }
 
-    /** Archive from anywhere, with an Undo snackbar. */
-    fun archive(id: String) {
-        attempt("archive") { _client.value?.archiveSession(id) }
-        toast("Archived", "Undo") { unarchive(id) }
+    /**
+     * A write the user is watching land: true once the core took it; else a
+     * snackbar saying so and false, so callers neither confirm nor navigate.
+     */
+    private inline fun report(what: String, failure: String, body: (CoreClient) -> Unit): Boolean {
+        val client = _client.value
+        val ok = client != null && try {
+            body(client)
+            true
+        } catch (e: Exception) {
+            Log.w("Zeron", "$what failed", e)
+            false
+        }
+        if (ok) refreshWorkspace() else toast(failure)
+        return ok
     }
 
-    fun unarchive(id: String) = attempt("unarchive") { _client.value?.unarchiveSession(id) }
+    /** Archive (Settle in T3 Mode) from anywhere, with an Undo snackbar. */
+    fun archive(id: String): Boolean {
+        val mode = _sidebarMode.value
+        if (!report("archive", "Couldn't ${mode.settle.lowercase()}. Try again.") { it.archiveSession(id) }) return false
+        toast(mode.settled, "Undo") { unarchive(id) }
+        return true
+    }
+
+    fun unarchive(id: String): Boolean =
+        report("unarchive", "Couldn't ${_sidebarMode.value.unsettle.lowercase()}. Try again.") { it.unarchiveSession(id) }
+
+    /** Snooze out of the inbox until the core wakes it, with an Undo snackbar. */
+    fun snooze(id: String, option: SnoozeOption): Boolean {
+        if (!report("snooze", "Couldn't snooze. Try again.") { it.snoozeSession(id, option.seconds) }) return false
+        toast("Snoozed ${option.phrase}", "Undo") { wake(id) }
+        return true
+    }
+
+    /** Back into the inbox before the deadline (a snooze's Undo). */
+    fun wake(id: String): Boolean = report("wake", "Couldn't undo the snooze. Try again.") { it.wakeSession(id) }
     fun rename(id: String, title: String) = attempt("rename") { _client.value?.renameSession(id, title) }
     fun markSeen(id: String) = attempt("seen") { _client.value?.markSeen(id) }
     fun setSectionCollapsed(id: String, collapsed: Boolean) = attempt("collapse") { _client.value?.setSectionCollapsed(id, collapsed) }

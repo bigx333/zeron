@@ -91,6 +91,7 @@ adb shell am start -n sh.zeron.android/.MainActivity \
 | `--ez cloud true` | Offer Cloud in the demo (its pages read the demo's Cloud) |
 | `--es companion companions` / `terminal` / `side-chat:<id>` / `subagent:<tool id>` / `model-picker` | With `route chat:<id>`, open the companions sheet, a terminal, a side chat, a subagent or the model picker over it (`model-picker` also works with `route new`) |
 | `--ez terminal-demo true` | The opened terminal types a short script (screenshots) |
+| `--ez t3 true` | Open in T3 Mode (attention-first inbox) with Working / Snoozed shelves folded; kept in memory, the saved layout is untouched |
 | `--ez signedout true` | Clear stored credentials |
 | `--es wallpaper <path>` / `none` | Set (or clear) the wallpaper from a file the app can read, e.g. `adb push art.jpg /data/local/tmp/ && adb shell run-as sh.zeron.android cp /data/local/tmp/art.jpg files/` then `--es wallpaper /data/user/0/sh.zeron.android/files/art.jpg` |
 | `--es wallpaper-effect <none\|dither\|ascii\|halftone\|scanlines>` | Wallpaper effect |
