@@ -232,6 +232,14 @@ impl CoreClient {
         Ok(self.client.unarchive_session(&chat_id)?)
     }
 
+    pub fn snooze_session(&self, chat_id: String, duration_secs: u32) -> CoreResult<()> {
+        Ok(self.client.snooze_session(&chat_id, duration_secs)?)
+    }
+
+    pub fn wake_session(&self, chat_id: String) -> CoreResult<()> {
+        Ok(self.client.wake_session(&chat_id)?)
+    }
+
     pub fn rename_session(&self, chat_id: String, title: String) -> CoreResult<()> {
         Ok(self.client.rename_session(&chat_id, &title)?)
     }

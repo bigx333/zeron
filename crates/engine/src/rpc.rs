@@ -747,6 +747,12 @@ enum MutateParams {
     SetChatHost { chat_id: String, device_id: String },
     #[serde(rename_all = "camelCase")]
     SetChatArchived { chat_id: String, archived: bool },
+    /// Timed sidebar parking; None wakes early.
+    #[serde(rename_all = "camelCase")]
+    SetChatSnoozedUntil {
+        chat_id: String,
+        until: Option<chrono::DateTime<chrono::Utc>>,
+    },
     /// Change one pin without replacing another device's edits.
     #[serde(rename_all = "camelCase")]
     ChangeSidebarPin {
@@ -1881,6 +1887,17 @@ impl EngineRpc {
                 .set_chat_archived(&chat_id, archived)
                 .map_err(failed)
                 .map(drop),
+            MutateParams::SetChatSnoozedUntil { chat_id, until } => {
+                if until.is_some_and(|until| until <= chrono::Utc::now()) {
+                    return Err(RpcError::Failed(
+                        "Choose a snooze time in the future".into(),
+                    ));
+                }
+                self.workspace
+                    .set_chat_snoozed_until(&chat_id, until)
+                    .map_err(failed)
+                    .map(drop)
+            }
             MutateParams::ChangeSidebarPin { change } => {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)
             }

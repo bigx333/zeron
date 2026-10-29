@@ -279,16 +279,17 @@ impl ClientInner {
         let _ = self.registry_write(|doc| doc.set_chat_seen(chat_id, Utc::now()));
     }
 
-    /// Sending a message revives a parked thread: the user is acting in it
-    /// again (the engine's `unarchive_on_send` does the same for desktop
-    /// sends, which mobile sends bypass by writing straight to the chat doc).
-    /// Viewing, warming its session and receiving agent output leave it
-    /// alone. Best-effort — the message itself is already durably written.
+    /// Sending a message revives a parked (settled or snoozed) thread: the
+    /// user is acting in it again (the engine's `unarchive_on_send` does the
+    /// same for desktop sends, which mobile sends bypass by writing straight
+    /// to the chat doc). Viewing, warming its session and receiving agent
+    /// output leave it alone. Best-effort — the message itself is already
+    /// durably written. Unarchiving also clears the snooze deadline.
     pub(crate) fn revive_on_send(self: &Arc<Self>, chat_id: &str) {
         let Some(chat) = self.workspace.chat(chat_id) else {
             return;
         };
-        if !chat.archived {
+        if !chat.archived && chat.snoozed_until.is_none() {
             return;
         }
         let result = self.registry_write(|doc| doc.set_chat_archived(chat_id, false));
@@ -809,6 +810,7 @@ impl Client {
             branch: new.branch,
             checkout_id: None,
             source_context: None,
+            snoozed_until: None,
             config: new.config,
             last_message_preview: None,
             last_message_at: None,
@@ -910,6 +912,23 @@ impl Client {
 
     pub fn unarchive_session(&self, chat_id: &str) -> Result<()> {
         self.chat_write(chat_id, |doc| doc.set_chat_archived(chat_id, false))
+    }
+
+    /// Snooze via the synced registry, including while the host is offline.
+    pub fn snooze_session(&self, chat_id: &str, duration_secs: u32) -> Result<()> {
+        if duration_secs == 0 {
+            return Err(ClientError::InvalidArgument(
+                "snooze duration must be positive".into(),
+            ));
+        }
+        let until = Utc::now() + chrono::Duration::seconds(i64::from(duration_secs));
+        self.chat_write(chat_id, |doc| {
+            doc.set_chat_snoozed_until(chat_id, Some(until))
+        })
+    }
+
+    pub fn wake_session(&self, chat_id: &str) -> Result<()> {
+        self.chat_write(chat_id, |doc| doc.set_chat_snoozed_until(chat_id, None))
     }
 
     pub fn rename_session(&self, chat_id: &str, title: &str) -> Result<()> {

@@ -14586,6 +14586,7 @@ mod tests {
             title: None,
             archived: false,
             cwd: cwd.map(str::to_owned),
+            snoozed_until: None,
             branch: None,
             checkout_id: None,
             source_context: source.map(|(source_cwd, repo_root)| {
@@ -17726,6 +17727,7 @@ mod exit_regressions {
                     state.apply_spaces(vec![space("mine", "local"), space("other", "remote")]);
                     state.apply_chats(vec![zeron_proto::Chat {
                         id: "elsewhere".into(),
+                        snoozed_until: None,
                         device_id: "remote".into(),
                         title: None,
                         archived: false,

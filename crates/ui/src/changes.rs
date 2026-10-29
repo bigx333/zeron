@@ -6118,6 +6118,7 @@ rename to new_name.rs
             branch: None,
             checkout_id: checkout.map(Into::into),
             source_context: None,
+            snoozed_until: None,
             config: None,
             last_message_preview: None,
             last_message_at: None,
