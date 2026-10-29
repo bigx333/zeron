@@ -204,6 +204,9 @@ pub struct Chat {
     pub device_id: String,
     pub title: Option<String>,
     pub archived: bool,
+    /// Synced wake deadline. Expired deadlines are awake even after restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<DateTime<Utc>>,
     pub cwd: Option<String>,
     pub branch: Option<String>,
     /// Canonical id of the repo checkout/worktree this chat operates in.
@@ -261,6 +264,10 @@ pub struct Chat {
 }
 
 impl Chat {
+    pub fn is_snoozed(&self, now: DateTime<Utc>) -> bool {
+        !self.archived && self.snoozed_until.is_some_and(|until| until > now)
+    }
+
     /// A session the user sees in chat lists: neither another chat's worker
     /// (`parent_chat_id`) nor a hidden voice orchestrator.
     pub fn is_top_level(&self) -> bool {

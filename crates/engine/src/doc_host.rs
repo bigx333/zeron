@@ -3632,13 +3632,13 @@ impl DocHost {
         Ok(id)
     }
 
-    /// A send revives an archived chat on every device (best-effort).
+    /// A send revives an archived or snoozed chat on every device (best-effort).
     fn unarchive_on_send(&self, chat_id: &str) {
         let Some(workspace) = self.workspace() else {
             return;
         };
         match workspace.chat(chat_id) {
-            Ok(Some(chat)) if chat.archived => {
+            Ok(Some(chat)) if chat.archived || chat.snoozed_until.is_some() => {
                 if let Err(err) = workspace.set_chat_archived(chat_id, false) {
                     tracing::warn!(chat = %chat_id, error = %err, "unarchive on send failed");
                 }

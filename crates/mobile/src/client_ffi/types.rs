@@ -501,6 +501,10 @@ pub struct SessionRow {
     pub created_at_ms: i64,
     pub unseen: bool,
     pub archived: bool,
+    pub snoozed: bool,
+    pub snoozed_until_ms: Option<i64>,
+    /// Already includes "in" (for example "in 2h").
+    pub snooze_label: Option<String>,
     pub pinned: bool,
     pub section_id: Option<String>,
     pub pull_request: Option<PullRequest>,
@@ -543,6 +547,9 @@ impl From<&zc::SessionRow> for SessionRow {
             created_at_ms: r.created_at_ms,
             unseen: r.unseen,
             archived: r.archived,
+            snoozed: r.snoozed,
+            snoozed_until_ms: r.snoozed_until_ms,
+            snooze_label: r.snooze_label.clone(),
             pinned: r.pinned,
             section_id: r.section_id.clone(),
             pull_request: r.pull_request.as_ref().map(PullRequest::from),
@@ -575,6 +582,9 @@ pub struct FrontPage {
     pub sections: Vec<SectionView>,
     /// Everything else, by recency.
     pub recent: Vec<SessionRow>,
+    /// Empty in the default projection.
+    pub working: Vec<SessionRow>,
+    pub snoozed: Vec<SessionRow>,
 }
 
 impl From<&zc::FrontPage> for FrontPage {
@@ -592,6 +602,8 @@ impl From<&zc::FrontPage> for FrontPage {
                 })
                 .collect(),
             recent: rows(&f.recent),
+            working: rows(&f.working),
+            snoozed: rows(&f.snoozed),
         }
     }
 }
@@ -704,6 +716,7 @@ pub struct WorkspaceSnapshot {
     /// The registry reached this device at least once (or demo).
     pub synced: bool,
     pub front: FrontPage,
+    pub t3_front: FrontPage,
     /// Creation order.
     pub projects: Vec<ProjectView>,
     /// Active sessions without a project.
@@ -721,6 +734,7 @@ impl From<&zc::WorkspaceSnapshot> for WorkspaceSnapshot {
             pins_ready: w.pins_ready,
             synced: w.synced,
             front: (&w.front).into(),
+            t3_front: (&w.t3_front).into(),
             projects: w.projects.iter().map(Into::into).collect(),
             projectless: rows(&w.projectless),
             pull_requests: (&w.pull_requests).into(),

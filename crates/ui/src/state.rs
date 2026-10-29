@@ -3406,7 +3406,16 @@ impl AppState {
                     .then(|| clock.began + chrono::TimeDelta::milliseconds(SYNC_STALLED_AFTER_MS));
                 std::iter::once(shown).chain(stalled)
             });
-        stale.chain(offline).chain(grace).chain(syncing)
+        let snooze = self
+            .chats
+            .iter()
+            .filter(|chat| !chat.archived)
+            .filter_map(|chat| chat.snoozed_until);
+        stale
+            .chain(offline)
+            .chain(grace)
+            .chain(syncing)
+            .chain(snooze)
     }
 
     /// Notify this entity at every clock-driven transition, so each state
@@ -5552,6 +5561,7 @@ mod tests {
             branch: None,
             checkout_id: None,
             source_context: None,
+            snoozed_until: None,
             config: None,
             last_message_preview: None,
             last_message_at: last_msg_min.map(|m| base + TimeDelta::minutes(m)),
@@ -7261,6 +7271,17 @@ mod tests {
         );
         assert_eq!(probe.indicator_for("row", cutoff), Indicator::None);
         assert_state_notifies_at(cx, now, cutoff, |state| state.sessions = vec![row]);
+    }
+
+    #[gpui::test]
+    fn snoozed_chat_wakes_at_its_deadline_without_server_activity(cx: &mut gpui::TestAppContext) {
+        let now = clock_epoch();
+        let until = now + TimeDelta::minutes(15);
+        let mut row = chat("snoozed", 0, None);
+        row.snoozed_until = Some(until);
+        assert!(row.is_snoozed(until - TimeDelta::milliseconds(1)));
+        assert!(!row.is_snoozed(until));
+        assert_state_notifies_at(cx, now, until, |state| state.chats = vec![row]);
     }
 
     #[gpui::test]

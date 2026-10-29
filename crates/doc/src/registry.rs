@@ -1261,6 +1261,7 @@ impl RegistryDoc {
             ("deviceId", json!(chat.device_id)),
             ("title", opt_str(chat.title.as_deref())),
             ("archived", json!(chat.archived)),
+            ("snoozedUntil", opt_ms(chat.snoozed_until)),
             ("cwd", opt_str(chat.cwd.as_deref())),
             ("branch", opt_str(chat.branch.as_deref())),
             ("checkoutId", opt_str(chat.checkout_id.as_deref())),
@@ -1395,8 +1396,25 @@ impl RegistryDoc {
             KIND_CHATS,
             chat_id,
             OpKind::Update,
-            fields([("archived", json!(archived))]),
+            fields([("archived", json!(archived)), ("snoozedUntil", Value::Null)]),
         );
+        Ok(true)
+    }
+
+    /// Park until a synced deadline. Only lifecycle fields are changed.
+    pub fn set_chat_snoozed_until(
+        &mut self,
+        chat_id: &str,
+        until: Option<DateTime<Utc>>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        let mut set = fields([("snoozedUntil", opt_ms(until))]);
+        if until.is_some() {
+            set.insert("archived".to_string(), json!(false));
+        }
+        self.write(KIND_CHATS, chat_id, OpKind::Update, set);
         Ok(true)
     }
 
@@ -1715,6 +1733,7 @@ impl RegistryDoc {
                     ("deviceId", json!(chat.device_id)),
                     ("title", opt_str(chat.title.as_deref())),
                     ("archived", json!(chat.archived)),
+                    ("snoozedUntil", opt_ms(chat.snoozed_until)),
                     ("cwd", opt_str(chat.cwd.as_deref())),
                     ("branch", opt_str(chat.branch.as_deref())),
                     ("checkoutId", opt_str(chat.checkout_id.as_deref())),

@@ -216,6 +216,166 @@ fn sidebar_writes_reorder_the_front_page() {
 }
 
 #[test]
+fn t3_lanes_preserve_pins_sections_and_default_order() {
+    let (client, _dir) = demo(fast());
+    let before = client.workspace();
+    assert!(before.front.working.is_empty() && before.front.snoozed.is_empty());
+    assert!(!ids(&before.t3_front.pinned).contains(&"chat-veil"));
+    assert!(ids(&before.t3_front.working).contains(&"chat-veil"));
+    assert_eq!(ids(&before.t3_front.pinned), ["chat-picker"]);
+
+    // Snooze takes precedence over Working and lifts pins/section rows
+    // without editing their shared membership or the Default projection.
+    client.snooze_session("chat-veil", 7_200).unwrap();
+    client.snooze_session("chat-tabs", 3_600).unwrap();
+    client.snooze_session("chat-picker", 900).unwrap();
+    let parked = client.workspace();
+    assert_eq!(ids(&parked.front.pinned), ids(&before.front.pinned));
+    assert_eq!(ids(&parked.front.recent), ids(&before.front.recent));
+    for (parked, before) in parked.front.sections.iter().zip(&before.front.sections) {
+        assert_eq!(parked.id, before.id);
+        assert_eq!(ids(&parked.sessions), ids(&before.sessions));
+    }
+    assert_eq!(
+        ids(&parked.t3_front.snoozed),
+        ["chat-picker", "chat-tabs", "chat-veil"]
+    );
+    assert!(!ids(&parked.t3_front.working).contains(&"chat-veil"));
+    assert!(parked.t3_front.pinned.is_empty());
+    assert_eq!(
+        parked
+            .session("chat-picker")
+            .unwrap()
+            .snooze_label
+            .as_deref(),
+        Some("in 15m")
+    );
+    assert_eq!(
+        parked.session("chat-tabs").unwrap().section_id.as_deref(),
+        Some("section-p0")
+    );
+
+    client.wake_session("chat-veil").unwrap();
+    client.wake_session("chat-tabs").unwrap();
+    client.wake_session("chat-picker").unwrap();
+    let restored = client.workspace();
+    assert_eq!(restored.t3_front, before.t3_front);
+    assert!(restored.session("chat-veil").unwrap().pinned);
+
+    // Settle clears the deadline; Unsettle returns to the original pin slot.
+    client.snooze_session("chat-picker", 900).unwrap();
+    client.archive_session("chat-picker").unwrap();
+    let settled = client.workspace();
+    let row = settled.session("chat-picker").unwrap();
+    assert!(row.archived && !row.snoozed && row.snoozed_until_ms.is_none());
+    assert!(ids(&settled.archived).contains(&"chat-picker"));
+    client.unarchive_session("chat-picker").unwrap();
+    assert_eq!(ids(&client.workspace().t3_front.pinned), ["chat-picker"]);
+    assert!(client.snooze_session("chat-picker", 0).is_err());
+    assert!(client.snooze_session("missing", 60).is_err());
+    assert!(client.wake_session("missing").is_err());
+
+    // Attention outranks placement in sections and recency in Inbox, stably.
+    // Members keep their placed order, so place chat-cjk first.
+    for id in ["chat-tabs", "chat-errored"] {
+        client.assign_section(id, None).unwrap();
+    }
+    for id in ["chat-cjk", "chat-tabs", "chat-errored"] {
+        client.assign_section(id, Some("section-p0".into())).unwrap();
+    }
+    let ws = client.workspace();
+    assert_eq!(
+        ids(&ws.front.sections[0].sessions),
+        ["chat-cjk", "chat-tabs", "chat-errored"]
+    );
+    assert_eq!(
+        ids(&ws.t3_front.sections[0].sessions),
+        ["chat-tabs", "chat-errored", "chat-cjk"]
+    );
+    client.assign_section("chat-cjk", None).unwrap();
+    client.assign_section("chat-tabs", None).unwrap();
+    client.assign_section("chat-errored", None).unwrap();
+    let ws = client.workspace();
+    assert_eq!(ws.front.recent[0].id, "chat-visuals");
+    assert_eq!(
+        ids(&ws.t3_front.recent),
+        [
+            "chat-tabs",
+            "chat-errored",
+            "chat-visuals",
+            "chat-cjk",
+            "chat-home",
+            "chat-deploy",
+            "chat-blog"
+        ]
+    );
+}
+
+#[test]
+fn t3_snooze_deadline_revises_snapshot_without_a_write() {
+    let (client, _dir) = demo(fast());
+    client.snooze_session("chat-home", 1).unwrap();
+    let parked = client.workspace();
+    let row = parked.session("chat-home").unwrap();
+    let deadline = row.snoozed_until_ms;
+    assert!(row.snoozed);
+    assert!(ids(&parked.t3_front.snoozed).contains(&"chat-home"));
+    wait_for("snooze deadline tick", Duration::from_secs(4), || {
+        !client.workspace().session("chat-home").unwrap().snoozed
+    });
+    let awake = client.workspace();
+    assert_ne!(awake.revision, parked.revision);
+    let row = awake.session("chat-home").unwrap();
+    assert_eq!(
+        row.snoozed_until_ms, deadline,
+        "expiry is a derived state, not a write"
+    );
+    assert!(row.snooze_label.is_none());
+    assert!(ids(&awake.t3_front.recent).contains(&"chat-home"));
+    assert!(!ids(&awake.t3_front.snoozed).contains(&"chat-home"));
+}
+
+#[test]
+fn snoozed_threads_resume_only_on_send_not_view_or_preload() {
+    let (client, _dir) = demo(fast());
+    client.pin_session("chat-home").unwrap();
+    client.snooze_session("chat-home", 3_600).unwrap();
+    let deadline = client
+        .workspace()
+        .session("chat-home")
+        .unwrap()
+        .snoozed_until_ms;
+    client.preload_sessions();
+    let session = client.open_session("chat-home").unwrap();
+    let _ = session.snapshot();
+    session.set_view_attached(true);
+    session.mark_seen();
+    let reading = client.workspace();
+    let row = reading.session("chat-home").unwrap();
+    assert!(row.snoozed);
+    assert_eq!(row.snoozed_until_ms, deadline);
+    assert!(ids(&reading.t3_front.snoozed).contains(&"chat-home"));
+    assert!(!ids(&reading.t3_front.pinned).contains(&"chat-home"));
+
+    session.interrupt().unwrap();
+    assert!(client.workspace().session("chat-home").unwrap().snoozed);
+    assert!(session.send(SendRequest::text("")).is_err());
+    assert!(client.workspace().session("chat-home").unwrap().snoozed);
+    session
+        .send(SendRequest::text("Picking this back up."))
+        .unwrap();
+    let sent = client.workspace();
+    let row = sent.session("chat-home").unwrap();
+    assert!(!row.snoozed && row.snoozed_until_ms.is_none());
+    assert!(!ids(&sent.t3_front.snoozed).contains(&"chat-home"));
+    assert!(ids(&sent.front.pinned).contains(&"chat-home"));
+
+    client.snooze_session("chat-home", 3_600).unwrap();
+    session.enqueue("One more thought.", vec![], true).unwrap();
+    assert!(!client.workspace().session("chat-home").unwrap().snoozed);
+}
+
+#[test]
 fn send_streams_a_reply_and_adopts_the_echo() {
     let (client, _dir) = demo(fast());
     let session = client.open_session("chat-home").unwrap();

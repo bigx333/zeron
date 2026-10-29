@@ -259,6 +259,7 @@ impl WorkspaceDoc {
         row.insert("deviceId", chat.device_id.as_str())?;
         set_opt_str(&row, "title", chat.title.as_deref())?;
         row.insert("archived", chat.archived)?;
+        set_opt_ms(&row, "snoozedUntil", chat.snoozed_until)?;
         set_opt_str(&row, "cwd", chat.cwd.as_deref())?;
         set_opt_str(&row, "branch", chat.branch.as_deref())?;
         set_opt_str(&row, "checkoutId", chat.checkout_id.as_deref())?;
@@ -362,6 +363,7 @@ impl WorkspaceDoc {
             return Ok(false);
         };
         row.insert("archived", archived)?;
+        set_opt_ms(&row, "snoozedUntil", None)?;
         self.doc.commit();
         Ok(true)
     }
@@ -716,6 +718,8 @@ pub(crate) struct RawChat {
     #[serde(default)]
     archived: bool,
     #[serde(default)]
+    snoozed_until: Option<i64>,
+    #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
     branch: Option<String>,
@@ -778,6 +782,7 @@ impl From<RawChat> for Chat {
             device_id: raw.device_id,
             title: raw.title,
             archived: raw.archived,
+            snoozed_until: raw.snoozed_until.and_then(DateTime::from_timestamp_millis),
             cwd: raw.cwd,
             branch: raw.branch,
             checkout_id: raw.checkout_id,
@@ -895,6 +900,7 @@ mod tests {
             branch: Some("main".into()),
             checkout_id: None,
             source_context: None,
+            snoozed_until: None,
             config: Some(ChatConfig {
                 harness: HarnessId::Mock,
                 model: Some("mock-1".into()),

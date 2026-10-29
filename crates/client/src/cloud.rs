@@ -679,6 +679,7 @@ impl Client {
             branch: branch.or(Some(repo.default_branch)),
             checkout_id: None,
             source_context: None,
+            snoozed_until: None,
             config,
             last_message_preview: None,
             last_message_at: None,
