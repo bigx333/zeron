@@ -44,6 +44,7 @@ pub mod capabilities {
         SIDEBAR_SECTION_ORDER_V1,
         PROVIDER_SWITCH_V1,
         crate::voice::remote::CAPABILITY,
+        crate::voice::dictation::CAPABILITY,
     ];
 
     pub fn current() -> Vec<String> {
@@ -127,7 +128,8 @@ mod tests {
                     "projectless-scratch-v1",
                     "sidebar-section-order-v1",
                     "provider-switch-v1",
-                    "voice-client-media-v1"
+                    "voice-client-media-v1",
+                    "codex-dictation-v1"
                 ],
             })
         );

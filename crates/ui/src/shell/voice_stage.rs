@@ -79,6 +79,21 @@ impl Shell {
         };
         self.voice
             .update(cx, |voice, cx| voice.check_codex(&engine, force, cx));
+        if settings::current(cx).dictation_engine == settings::DictationEngine::Codex {
+            self.check_codex_dictation(force, cx);
+        }
+    }
+
+    /// Whether the Codex device (the one calls use) can lend Codex dictation
+    /// a ChatGPT credential. Throttled; `force` after the window comes back.
+    pub(super) fn check_codex_dictation(&mut self, force: bool, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let (Some(engine), Some(local)) = (state.engine().cloned(), state.local_device_id.clone())
+        else {
+            return;
+        };
+        let host = settings::current(cx).codex_voice_device.unwrap_or(local);
+        crate::dictation::codex::refresh(&engine, host, force, cx);
     }
 
     pub(super) fn end_voice(&mut self, cx: &mut Context<Self>) {

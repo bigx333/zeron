@@ -135,6 +135,7 @@ fun ComposerSurface(
                 }
                 if (!card) {
                     Spacer(Modifier.width(8.dp))
+                    sh.zeron.android.voice.DictationButton(model)
                     ActionButton(action, model.hasContent, onAction)
                     Spacer(Modifier.width(8.dp))
                 } else {
@@ -167,6 +168,7 @@ fun ComposerSurface(
                         content = chips,
                     )
                     Spacer(Modifier.width(8.dp))
+                    sh.zeron.android.voice.DictationButton(model)
                     ActionButton(action, model.hasContent, onAction)
                 }
             }

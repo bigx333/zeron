@@ -35,6 +35,18 @@ has "$line" '"method":"initialized"' || exit 1
 
 # ---- thread start / resume -------------------------------------------------
 read -r line || exit 1
+if has "$line" '"method":"getAuthStatus"'; then
+  # Dictation credential probe: a ChatGPT login whose JWT carries the
+  # account claim; a forced refresh reports a different account.
+  has "$line" '"includeToken":true' || exit 1
+  if has "$line" '"refreshToken":true'; then
+    token='eyJhbGciOiJub25lIn0.eyJleHAiOjIwMDAwMDAwMDAsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0LXJlZnJlc2hlZCJ9fQ.sig'
+  else
+    token='eyJhbGciOiJub25lIn0.eyJleHAiOjIwMDAwMDAwMDAsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0LWxpdmUifX0.sig'
+  fi
+  emit "{\"id\":$(rid "$line"),\"result\":{\"authMethod\":\"chatgpt\",\"authToken\":\"$token\",\"requiresOpenaiAuth\":true}}"
+  exec sleep 30
+fi
 if has "$line" '"method":"account/read"'; then
   emit "{\"id\":$(rid "$line"),\"result\":{\"account\":null,\"requiresOpenaiAuth\":false}}"
   read -r line || exit 1

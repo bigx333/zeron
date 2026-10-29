@@ -2567,3 +2567,23 @@ async fn an_app_server_that_keeps_dying_reports_what_it_printed() {
         "one launch + three relaunches"
     );
 }
+
+#[tokio::test]
+async fn chatgpt_access_token_reads_the_live_login_through_app_server() {
+    let token = harness()
+        .with_graces(Duration::from_millis(20), Duration::from_millis(200))
+        .chatgpt_access_token(false)
+        .await
+        .unwrap()
+        .expect("a ChatGPT login");
+    assert_eq!(token.account_id.as_deref(), Some("acct-live"));
+    assert_eq!(token.expires_at_ms, Some(2_000_000_000_000));
+    assert!(!format!("{token:?}").contains(&token.access_token));
+    let refreshed = harness()
+        .with_graces(Duration::from_millis(20), Duration::from_millis(200))
+        .chatgpt_access_token(true)
+        .await
+        .unwrap()
+        .expect("a ChatGPT login");
+    assert_eq!(refreshed.account_id.as_deref(), Some("acct-refreshed"));
+}

@@ -104,6 +104,7 @@ pub struct RelayedCallback {
     pub location: Option<String>,
 }
 
+mod dictation;
 mod muse;
 mod oauth;
 mod pool;

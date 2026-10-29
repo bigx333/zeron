@@ -156,6 +156,7 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
             guard let self, id == "model" else { return }
             self.present(self.modelPicker(), animated: true)
         }
+        composer.dictation = app.dictation
         composer.mentionSearch = { [weak self] q in
             guard let self, let p = self.project else { return [] }
             return await self.app.searchFiles(deviceId: p.device, spaceId: p.id, query: q)

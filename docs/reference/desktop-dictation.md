@@ -6,7 +6,17 @@ Dictation is hold to talk: hold the microphone (or Enter/Space while it is focus
 
 The model detects the spoken language automatically and does not translate. Supported languages: Bulgarian, Croatian, Czech, Danish, Dutch, English, Estonian, Finnish, French, German, Greek, Hungarian, Italian, Latvian, Lithuanian, Maltese, Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish, Ukrainian. Technical names may need correction, especially in mixed-language speech.
 
-No audio files are created by production dictation. Audio stays in a bounded, transient buffer on the desktop running the UI; it is not attached, logged, synchronized or sent to the coding-agent host. Dictated text is an ordinary editable draft and is handled like typed text. Model downloads contact Hugging Face; transcription does not use the network.
+No audio files are created by production dictation. Audio stays in a bounded, transient buffer on the desktop running the UI; it is not attached, logged, synchronized or sent to the coding-agent host. Dictated text is an ordinary editable draft and is handled like typed text. Model downloads contact Hugging Face; local transcription does not use the network. Codex dictation (below) uploads the recording to ChatGPT instead.
+
+## Codex dictation
+
+Settings → Voice → Transcription chooses **On this device** (Parakeet, above) or **Codex**. Codex is selectable only while the Codex device (the **Codex voice device** row, this device by default) has a Codex account signed in with ChatGPT: the live login or any saved account, including Account pool members. API-key logins cannot transcribe. When the account goes away, dictation hides and keeps the choice. Hold to talk, limits, Send and failure behavior are the same as local dictation; no model download is needed. Phones offer the same choice in Settings → Voice (iOS and Android), as tap to start, tap to stop.
+
+It follows the realtime voice split. The host owns Codex: `CodexDictationStatusV1` reports whether it can lend a credential (no network), and `CodexDictationCredentialV1` returns the ChatGPT access token, read through `codex app-server`'s `getAuthStatus` the way Codex's desktop app reads it (Codex owns its refresh), or from a saved slot via the account pool's refresh path when the live login is not a ChatGPT one. Both methods honor `targetDeviceId`. The device with the microphone records, fetches the credential while the user talks, and uploads the recording itself to `https://chatgpt.com/backend-api/transcribe`; on a 401 it asks the host for a refreshed token once. Audio never crosses RPC or the relay. Only the short-lived access token does, never the refresh token; clients keep it in memory for at most ten minutes, Debug output redacts it, and it is only ever sent to the fixed transcription URL.
+
+`/transcribe` sits behind a bot check that only admits Codex's desktop app, so uploads present its `originator` and User-Agent (`CODEX_DESKTOP_ORIGINATOR`, `CODEX_DESKTOP_VERSION` in `zeron-proto`). Requests that identify as anything else, including the Codex CLI, get a challenge page. This is not a supported OpenAI integration: it can stop working without notice and its use is the account owner's call. ChatGPT stores each upload on the account (the response reports a 30-day asset) and bills it to the Codex plan. Desktop uploads 16 kHz WAV; phones upload AAC in MPEG-4.
+
+`crates/voice-session/examples/codex_dictation_smoke.rs` uploads one WAV or `.m4a` through the production client with a token from `ZERON_DICTATION_TOKEN`, for development only.
 
 ## Implementation and limits
 
