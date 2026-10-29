@@ -911,9 +911,12 @@ impl Server {
         crate::compose_child_path(&mut cmd, exe);
         crate::apply_run_env(&mut cmd, run_env);
         let restricted = !access.is_full_access();
-        if mcp.is_some() || restricted {
+        let skills = cwd
+            .map(|cwd| crate::skills::zeron_roots(std::path::Path::new(cwd)))
+            .unwrap_or_default();
+        if mcp.is_some() || !skills.is_empty() || restricted {
             // The config shape differs by generation. If even the cold probe
-            // can't tell, run without the Zeron MCP server rather than fail,
+            // can't tell, run without Zeron's MCP server and skills rather than fail,
             // but never without the rules a restricted mode relies on: the
             // run would do unasked what the person chose to approve.
             match preferred {
@@ -926,6 +929,11 @@ impl Server {
                         .or_else(|| std::env::var("OPENCODE_CONFIG_CONTENT").ok());
                     if let Some(mcp) = mcp {
                         inline = Some(mcp_config(inline.as_deref(), mcp, protocol).map_err(fatal)?);
+                    }
+                    if !skills.is_empty() {
+                        inline = Some(
+                            skills_config(inline.as_deref(), &skills, protocol).map_err(fatal)?,
+                        );
                     }
                     if restricted {
                         inline = Some(
@@ -945,7 +953,7 @@ impl Server {
                 }
                 None => tracing::warn!(
                     binary_path = %exe.display(),
-                    "opencode version unknown; starting without the Zeron MCP server"
+                    "opencode version unknown; starting without Zeron's MCP server and skills"
                 ),
             }
         }
@@ -5720,6 +5728,38 @@ fn inline_config(inherited: Option<&str>) -> Result<Value, HarnessError> {
     Ok(config)
 }
 
+/// Zeron's skill folders join the inherited `skills` paths: a plain list on
+/// 2.x, the `{paths}` object on 1.x.
+fn skills_config(
+    inherited: Option<&str>,
+    roots: &[std::path::PathBuf],
+    protocol: Protocol,
+) -> Result<String, HarnessError> {
+    let mut config = inline_config(inherited)?;
+    let object = config.as_object_mut().expect("inline_config is an object");
+    let skills = object.entry("skills").or_insert_with(|| match protocol {
+        Protocol::V1 => json!({"paths": []}),
+        Protocol::V2 => json!([]),
+    });
+    let paths = match skills {
+        Value::Array(paths) => paths,
+        Value::Object(object) => object
+            .entry("paths")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| {
+                HarnessError::Protocol("OPENCODE_CONFIG_CONTENT.skills.paths must be a list".into())
+            })?,
+        _ => {
+            return Err(HarnessError::Protocol(
+                "OPENCODE_CONFIG_CONTENT.skills must be a list or object".into(),
+            ));
+        }
+    };
+    paths.extend(roots.iter().map(|root| json!(root)));
+    Ok(config.to_string())
+}
+
 /// Inline config is the final user config layer. Preserve inherited overrides
 /// and other MCP servers; never write chat identity into a shared config file.
 fn mcp_config(
@@ -5924,6 +5964,31 @@ fn permission_list<'a>(
 mod mcp_injection_tests {
     use super::*;
 
+    #[test]
+    fn skills_config_appends_zeron_roots_in_each_generation_shape() {
+        let roots = [std::path::PathBuf::from("/home/u/.zeron/skills")];
+        let v2: Value =
+            serde_json::from_str(&skills_config(None, &roots, Protocol::V2).unwrap()).unwrap();
+        assert_eq!(v2["skills"], json!(["/home/u/.zeron/skills"]));
+        let v1: Value =
+            serde_json::from_str(&skills_config(None, &roots, Protocol::V1).unwrap()).unwrap();
+        assert_eq!(v1["skills"]["paths"], json!(["/home/u/.zeron/skills"]));
+        let inherited = r#"{"model": "x", "skills": ["/team"]}"#;
+        let merged: Value =
+            serde_json::from_str(&skills_config(Some(inherited), &roots, Protocol::V2).unwrap())
+                .unwrap();
+        assert_eq!(merged["model"], "x");
+        assert_eq!(merged["skills"], json!(["/team", "/home/u/.zeron/skills"]));
+        let legacy = r#"{"skills": {"paths": ["/team"]}}"#;
+        let merged: Value =
+            serde_json::from_str(&skills_config(Some(legacy), &roots, Protocol::V2).unwrap())
+                .unwrap();
+        assert_eq!(
+            merged["skills"]["paths"],
+            json!(["/team", "/home/u/.zeron/skills"])
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn mcp_injection_reaches_isolated_server_processes() {
@@ -6117,7 +6182,10 @@ http.createServer((req, res) => {
             .unwrap();
             let probe = server.get_json("/config-probe", None).await.unwrap();
             server.shutdown(Duration::from_millis(100)).await;
-            let config: Value = serde_json::from_str(probe["config"].as_str().unwrap()).unwrap();
+            let mut config: Value =
+                serde_json::from_str(probe["config"].as_str().unwrap()).unwrap();
+            // The machine's own ~/.zeron/skills, if any, joins the config.
+            config.as_object_mut().unwrap().remove("skills");
             assert_eq!(config["model"], "keep");
             let edit = &config["permission"]["edit"];
             let bash = &config["permission"]["bash"];
