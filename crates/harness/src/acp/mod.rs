@@ -3397,7 +3397,7 @@ fn handle_server_request_live(
         .collect();
     let question = UserInputQuestion {
         id: new_message_id(),
-        header: "Agent question".into(),
+        header: String::new(),
         question: params
             .get("toolCall")
             .and_then(|t| t.get("title"))

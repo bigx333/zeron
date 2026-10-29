@@ -14,7 +14,7 @@ available without advertising anything extra or overriding Grok's feature flags.
 `grok-question-response.json` is the successful result payload sent back on that
 request's JSON-RPC id. Grok continued with `Color: Blue` and `Fruit: Apple, Pear`.
 Answer keys are the original **question text**, not question ids. The wire has
-no separate header; Zeron supplies “Grok question”. Multi-select uses `multiSelect`.
+no separate header, so Zeron leaves `header` empty and clients show their fallback label. Multi-select uses `multiSelect`.
 
 Grok also sent this notification (twice on the successful acceptance):
 

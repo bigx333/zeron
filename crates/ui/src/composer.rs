@@ -10492,7 +10492,11 @@ impl Composer {
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(theme.text_muted.opacity(0.6))
                                     .child(SharedString::from(crate::popover::tracked_upper(
-                                        &question.header,
+                                        if question.header.trim().is_empty() {
+                                            "Question"
+                                        } else {
+                                            &question.header
+                                        },
                                     ))),
                             )
                             .when(wizard.questions.len() > 1, |el| {
