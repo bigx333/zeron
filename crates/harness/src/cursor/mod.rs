@@ -439,7 +439,11 @@ impl Harness for CursorHarness {
         let images = load_images(&request.attachments).await;
         let first = json!({
             "op": "run",
-            "prompt": request.prompt,
+            "prompt": crate::skills::with_zeron_instructions(
+                &request.cwd,
+                request.resume.as_deref(),
+                request.prompt.clone(),
+            ),
             "cwd": request.cwd,
             "model": request.model,
             // Typed parameter picks (thinking/context/effort/fast/…) — the

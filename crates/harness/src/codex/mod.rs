@@ -281,6 +281,9 @@ impl CodexHarness {
                 )
                 .await?;
             client.notify("initialized", None);
+            if let Some(cwd) = cwd {
+                set_zeron_skill_roots(&client, cwd).await;
+            }
             let params = cwd
                 .map(|cwd| json!({ "cwds": [cwd], "forceReload": true }))
                 .unwrap_or_else(|| json!({}));
@@ -1226,6 +1229,22 @@ async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEven
     tx.send(Ok(ev)).await.is_ok()
 }
 
+/// Zeron's own skill folders join Codex's native catalog for this app-server
+/// process (`skills/extraRoots/set`, as bb does). Older Codex builds lack the
+/// method; their skills stay selectable as file references.
+async fn set_zeron_skill_roots(client: &RpcClient, cwd: &std::path::Path) {
+    let roots = crate::skills::zeron_roots(cwd);
+    if roots.is_empty() {
+        return;
+    }
+    if let Err(error) = client
+        .request("skills/extraRoots/set", json!({ "extraRoots": roots }))
+        .await
+    {
+        tracing::warn!(%error, "Codex did not accept Zeron skill roots");
+    }
+}
+
 /// Preserve the selected path in the app-server's native skill input. Text
 /// stays first for command routing; repeated selections do not load a skill twice.
 fn prompt_input(text: &str) -> Value {
@@ -1531,6 +1550,9 @@ async fn run_session(session: Session) {
         return;
     }
     client.notify("initialized", None);
+    if !title_only && !request.cwd.is_empty() {
+        set_zeron_skill_roots(&client, std::path::Path::new(&request.cwd)).await;
+    }
 
     // ---- thread + first turn (interruptible) ------------------------------
     let setup = async {
