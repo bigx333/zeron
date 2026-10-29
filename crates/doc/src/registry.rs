@@ -780,6 +780,26 @@ impl RegistryDoc {
         Utc::now().timestamp_millis()
     }
 
+    /// Advance the clock past the row's newest write (the HLC receive rule),
+    /// so the next local stamp on it is causally after what we have seen.
+    fn observe_row(&mut self, kind: &str, id: &str) {
+        if let Some(clock) = self
+            .overlay_row(kind, id)
+            .and_then(|r| r.max_clock().map(str::to_owned))
+        {
+            let mut parts = clock.splitn(3, '-');
+            if let (Some(ms), Some(counter)) = (
+                parts.next().and_then(|v| v.parse::<i64>().ok()),
+                parts.next().and_then(|v| v.parse::<u32>().ok()),
+            ) {
+                if (ms, counter) > (self.clock.last_ms, self.clock.counter) {
+                    self.clock.last_ms = ms;
+                    self.clock.counter = counter;
+                }
+            }
+        }
+    }
+
     fn next_hlc(&mut self) -> String {
         let device = self.device_id.clone();
         self.clock.next(Self::now_ms(), &device)
@@ -952,6 +972,10 @@ impl RegistryDoc {
     }
 
     fn write(&mut self, kind: &str, id: &str, op: OpKind, set: BTreeMap<String, Value>) {
+        // Stamp after everything this replica has seen of the row: a writer
+        // whose wall clock trails the row's last writer (desktop archives, a
+        // phone a few seconds behind replies) would otherwise lose silently.
+        self.observe_row(kind, id);
         let hlc = self.next_hlc();
         self.enqueue_ops(vec![RowOp {
             kind: kind.to_string(),
@@ -964,6 +988,9 @@ impl RegistryDoc {
     }
 
     fn delete_row_ops(&mut self, keys: &[(&str, &str)]) {
+        for (kind, id) in keys {
+            self.observe_row(kind, id);
+        }
         let hlc = self.next_hlc();
         let ops = keys
             .iter()

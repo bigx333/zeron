@@ -279,6 +279,24 @@ impl ClientInner {
         let _ = self.registry_write(|doc| doc.set_chat_seen(chat_id, Utc::now()));
     }
 
+    /// Sending a message revives a parked thread: the user is acting in it
+    /// again (the engine's `unarchive_on_send` does the same for desktop
+    /// sends, which mobile sends bypass by writing straight to the chat doc).
+    /// Viewing, warming its session and receiving agent output leave it
+    /// alone. Best-effort — the message itself is already durably written.
+    pub(crate) fn revive_on_send(self: &Arc<Self>, chat_id: &str) {
+        let Some(chat) = self.workspace.chat(chat_id) else {
+            return;
+        };
+        if !chat.archived {
+            return;
+        }
+        let result = self.registry_write(|doc| doc.set_chat_archived(chat_id, false));
+        if let Err(error) = result {
+            tracing::warn!(%chat_id, %error, "could not revive chat on send");
+        }
+    }
+
     pub(crate) fn recompute_connectivity(self: &Arc<Self>) {
         let raw = match self.live() {
             None => RawConnectivity {

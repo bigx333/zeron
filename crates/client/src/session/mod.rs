@@ -1179,6 +1179,7 @@ impl SessionHandle {
             let id = message_id.clone();
             self.core.update_state(|st| st.last_submitted = Some(id));
         }
+        client.revive_on_send(&self.core.chat_id);
         client.after_command(&self.core, !refs.is_empty());
         Ok(outcome)
     }
@@ -1241,6 +1242,7 @@ impl SessionHandle {
             attachments,
             hold_for_turn_end,
         )?;
+        client.revive_on_send(&self.core.chat_id);
         client.after_command(&self.core, false);
         Ok(id)
     }
