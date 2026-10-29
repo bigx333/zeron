@@ -67,6 +67,8 @@ struct Row {
 settings_index! {
     (SendMessagesWith, General, None, "Send messages with",
         "enter return submit modifier keyboard composer"),
+    (SteerMode, General, None, "Steer mode",
+        "queue busy running active turn mid-turn steering deliver"),
     (CompactMode, General, None, "Compact mode",
         "collapse thinking tools transcript dense density"),
     (CompactModelPicker, General, None, "Compact model picker",

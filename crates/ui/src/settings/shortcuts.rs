@@ -870,7 +870,8 @@ impl Render for ShortcutsPage {
                         }
                         cx.refresh_windows();
                     })),
-            );
+            )
+            .search_anchor(SettingId::SteerMode);
         let compact_mode_row = widgets::card_row(&theme, false)
             .child(
                 div()
