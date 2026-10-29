@@ -3736,7 +3736,7 @@ impl AppState {
                     log.display()
                 ),
                 None => format!(
-                    "Zeron's engine keeps stopping unexpectedly. Details are in {}.",
+                    "Zeron Nova's engine keeps stopping unexpectedly. Details are in {}.",
                     log.display()
                 ),
             });

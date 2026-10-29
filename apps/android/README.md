@@ -1,4 +1,4 @@
-# Zeron for Android
+# Zeron Nova for Android
 
 A Jetpack Compose viewport onto the zeron mesh, built on the same Rust mobile
 core as the iOS app (`crates/mobile`). **Rust decides what to paint and

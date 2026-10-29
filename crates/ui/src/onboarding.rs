@@ -789,10 +789,7 @@ impl Onboarding {
             .items_center()
             .text_center()
             .child(
-                icon(icons::ZERON_LOGO)
-                    .w(px(36.6))
-                    .h(px(42.0))
-                    .text_color(theme.text),
+                gpui::img(icons::NOVA_LOGO).size(px(72.0)).rounded(px(16.0)),
             )
             .child(
                 div()
@@ -801,7 +798,7 @@ impl Onboarding {
                     .line_height(px(30.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(SharedString::from("Welcome to Zeron")),
+                    .child(SharedString::from("Welcome to Zeron Nova")),
             )
             .child(
                 div()
@@ -1044,7 +1041,7 @@ impl Onboarding {
             .child(heading(
                 theme,
                 "Sync your work",
-                "Log in to keep your chats, projects and settings in step everywhere you use Zeron.",
+                "Log in to keep your chats, projects and settings in step everywhere you use Zeron Nova.",
             ))
             .child(
                 widgets::section_card(theme)
@@ -1129,7 +1126,7 @@ impl Onboarding {
             AgentsSummary::NoneInstalled => (
                 "Install an agent",
                 format!(
-                    "Zeron runs the coding agents you already use, and none are on {place} yet. Install one to continue."
+                    "Zeron Nova runs the coding agents you already use, and none are on {place} yet. Install one to continue."
                 ),
             ),
             AgentsSummary::Installed(names) => (
@@ -1302,7 +1299,7 @@ impl Onboarding {
                     .map(|el| {
                         if has_projects {
                             el.child(
-                                wide_button(theme, "onboarding-finish", "Start using Zeron")
+                                wide_button(theme, "onboarding-finish", "Start using Zeron Nova")
                                     .on_click(cx.listener(|this, _, _, cx| this.finish(false, cx))),
                             )
                         } else {

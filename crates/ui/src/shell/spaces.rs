@@ -10704,7 +10704,7 @@ mod home_folder_search_tests {
             ),
             r"No folder at D:\x"
         );
-        let denied = "Zeron doesn't have access to this folder on the device.";
+        let denied = "Zeron Nova doesn't have access to this folder on the device.";
         assert_eq!(path_open_error("/x", denied), denied);
     }
 

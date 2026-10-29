@@ -14,7 +14,7 @@ Produces `target/package/zeron-<version>-linux-<arch>.tar.gz` containing:
   the installers rewrite `Exec`, `TryExec`, and `Icon` to absolute paths under
   `~/.zeron/app/current`, since `~/.local/bin` is often not on a desktop
   session's `PATH`)
-- `zeron.png` — 1024×1024 Zeron app icon
+- `zeron.png` — 1024×1024 Zeron Nova app icon
 - `install.sh` — installs into `~/.zeron/app/<version>` behind a `current`
   symlink (the curl installer's layout, which the in-app updater manages),
   links `~/.local/bin/zeron` to it, and writes the desktop entry and icon under
@@ -30,10 +30,10 @@ The release profile in the root `Cargo.toml` sets `lto = "thin"` and
 scripts/package-macos.sh    # → target/package/zeron-<version>-macos-<arch>.dmg
 ```
 
-Builds the release binary, assembles `Zeron.app` (Info.plist + icns), ad-hoc
+Builds the release binary, assembles `Zeron Nova.app` (Info.plist + icns), ad-hoc
 signs it (set `CODESIGN_IDENTITY` for a real Developer ID), and wraps it in a
 dmg. The auto-update tarball retains an internal `Zeron.app` path so older
-installed builds can update into Zeron. CI runs this on tags
+installed builds can update into Zeron Nova. Nova never takes upstream releases (`zeron_update::UPSTREAM_RELEASES`). CI runs this on tags
 (`.github/workflows/release.yml`). The manual steps it automates, for reference
 (run on a macOS host — gpui needs Metal; no cross-build from Linux):
 
@@ -47,26 +47,26 @@ installed builds can update into Zeron. CI runs this on tags
    ```
 2. Assemble the bundle:
    ```sh
-   mkdir -p Zeron.app/Contents/{MacOS,Resources}
-   cp zeron Zeron.app/Contents/MacOS/zeron
+   mkdir -p "Zeron Nova.app/Contents/"{MacOS,Resources}
+   cp zeron "Zeron Nova.app/Contents/MacOS/zeron"
    sed "s/__VERSION__/$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')/" \
-     dist/macos/Info.plist > Zeron.app/Contents/Info.plist
+     dist/macos/Info.plist > "Zeron Nova.app/Contents/Info.plist"
    ```
 3. Icon: generate `zeron.icns` from `dist/macos/icon-1024.png` (the macOS-shaped
    variant of the artwork — squircle mask, margins, and shadow pre-baked, since
    `sips` can't apply an alpha mask) and place it at
-   `Zeron.app/Contents/Resources/zeron.icns`:
+   `Zeron Nova.app/Contents/Resources/zeron.icns`:
    ```sh
    mkdir zeron.iconset && sips -z 256 256 dist/macos/icon-1024.png --out zeron.iconset/icon_256x256.png
-   iconutil -c icns zeron.iconset -o Zeron.app/Contents/Resources/zeron.icns
+   iconutil -c icns zeron.iconset -o "Zeron Nova.app/Contents/Resources/zeron.icns"
    ```
 4. Sign + notarize (required for distribution):
    ```sh
-   codesign --deep --force --options runtime --sign "Developer ID Application: …" Zeron.app
+   codesign --deep --force --options runtime --sign "Developer ID Application: …" "Zeron Nova.app"
    xcrun notarytool submit Zeron.zip --keychain-profile … --wait
-   xcrun stapler staple Zeron.app
+   xcrun stapler staple "Zeron Nova.app"
    ```
-5. Ship as a `.dmg` (`hdiutil create -volname Zeron -srcfolder Zeron.app -ov -format UDZO Zeron.dmg`).
+5. Ship as a `.dmg` (`hdiutil create -volname "Zeron Nova" -srcfolder "Zeron Nova.app" -ov -format UDZO "Zeron Nova.dmg"`).
 
 ## Windows
 

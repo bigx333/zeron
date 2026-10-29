@@ -62,16 +62,17 @@ final class SignInViewController: UIViewController {
         wallpaper.frame = view.bounds
         wallpaper.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(wallpaper)
-        let mark = UIImageView(image: CloudUI.zeronMark)
-        mark.tintColor = Palette.text
+        let mark = UIImageView(image: UIImage(named: "NovaLogo"))
         mark.contentMode = .scaleAspectFit
+        mark.layer.cornerRadius = 16
+        mark.clipsToBounds = true
         mark.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            mark.widthAnchor.constraint(equalToConstant: 46),
-            mark.heightAnchor.constraint(equalToConstant: 53),
+            mark.widthAnchor.constraint(equalToConstant: 72),
+            mark.heightAnchor.constraint(equalToConstant: 72),
         ])
         let title = UILabel()
-        title.text = "Welcome to Zeron"
+        title.text = "Welcome to Zeron Nova"
         title.font = Fonts.ui(.sansSemibold, 30)
         title.textColor = Palette.text
         title.textAlignment = .center

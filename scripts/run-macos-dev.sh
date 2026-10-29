@@ -10,14 +10,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 DEV_ROOT="$ROOT/target/macos-dev"
-APP="$DEV_ROOT/Zeron Dev.app"
+APP="$DEV_ROOT/Zeron Nova Dev.app"
 CONTENTS="$APP/Contents"
 DATA_DIR="${ZERON_DEV_DATA_DIR:-$DEV_ROOT/data}"
 IPC_PORT="${ZERON_DEV_IPC_PORT:-49777}"
-BUNDLE_ID="${ZERON_DEV_BUNDLE_ID:-sh.zeron.app.dev}"
+BUNDLE_ID="${ZERON_DEV_BUNDLE_ID:-sh.zeron.app.nova.dev}"
 
 if pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
-  echo "Zeron Dev is already running. Quit it before rebuilding the signed bundle." >&2
+  echo "Zeron Nova Dev is already running. Quit it before rebuilding the signed bundle." >&2
   exit 1
 fi
 # The app's background engine keeps running after the app quits. Rebuilding
@@ -25,14 +25,14 @@ fi
 # matched by its exact path) — its sessions stop with it.
 ENGINE="$CONTENTS/MacOS/Zeron Engine"
 if pgrep -f -x "$ENGINE" >/dev/null 2>&1; then
-  echo "Stopping Zeron Dev's background engine before rebuilding." >&2
+  echo "Stopping Zeron Nova Dev's background engine before rebuilding." >&2
   pkill -TERM -f -x "$ENGINE" || true
   for _ in $(seq 1 100); do
     pgrep -f -x "$ENGINE" >/dev/null 2>&1 || break
     sleep 0.1
   done
   if pgrep -f -x "$ENGINE" >/dev/null 2>&1; then
-    echo "Zeron Dev's background engine didn't stop; quit it and retry." >&2
+    echo "Zeron Nova Dev's background engine didn't stop; quit it and retry." >&2
     exit 1
   fi
 fi
@@ -95,7 +95,7 @@ if [[ "${ZERON_DEV_BUILD_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
-echo "running Zeron Dev (bundle $BUNDLE_ID, data $DATA_DIR, IPC $IPC_PORT)" >&2
+echo "running Zeron Nova Dev (bundle $BUNDLE_ID, data $DATA_DIR, IPC $IPC_PORT)" >&2
 # LaunchServices must own the process. Launching Contents/MacOS/zeron directly
 # makes TCC attribute Screen Recording to the terminal (Warp, Terminal, etc.).
 # -W keeps the script attached until the app exits. Runtime logs remain in the

@@ -167,30 +167,32 @@ pub fn app_menus() -> Vec<Menu> {
 
     // macOS titles the first menu with the bundle/process name regardless of
     // what we pass, but gpui still wants a name.
-    let mut app_items = vec![
-        // The native AppKit about panel; no equivalent elsewhere yet.
-        MenuItem::action("About Zeron", About).disabled(!macos),
-        // Sparkle's placement: directly under About. Other platforms reach
-        // the same check from the account menu.
-        MenuItem::action("Check for Updates…", CheckForUpdates),
+    // The native AppKit about panel; no equivalent elsewhere yet.
+    let mut app_items = vec![MenuItem::action("About Zeron Nova", About).disabled(!macos)];
+    // Sparkle's placement: directly under About. Other platforms reach
+    // the same check from the account menu. Nova has no release feed.
+    if zeron_update::UPSTREAM_RELEASES {
+        app_items.push(MenuItem::action("Check for Updates…", CheckForUpdates));
+    }
+    app_items.extend([
         MenuItem::separator(),
         MenuItem::action("Settings", shell::OpenSettings),
         MenuItem::separator(),
-    ];
+    ]);
     if macos {
         app_items.extend([
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Hide Zeron", Hide),
+            MenuItem::action("Hide Zeron Nova", Hide),
             MenuItem::action("Hide Others", HideOthers),
             MenuItem::action("Show All", ShowAll),
             MenuItem::separator(),
         ]);
     }
-    app_items.push(MenuItem::action("Quit Zeron", Quit));
+    app_items.push(MenuItem::action("Quit Zeron Nova", Quit));
 
     let mut menus = vec![
-        Menu::new("Zeron").items(app_items),
+        Menu::new("Zeron Nova").items(app_items),
         // Standard clipboard verbs tied to the composer's existing actions via
         // their native selectors (`OsAction` → cut:/copy:/paste:/selectAll:),
         // so the OS Edit menu routes through the responder chain to the focused
@@ -246,11 +248,11 @@ mod tests {
     #[test]
     fn app_menu_ends_with_quit() {
         let menus = app_menus();
-        assert_eq!(menus[0].name.as_ref(), "Zeron");
+        assert_eq!(menus[0].name.as_ref(), "Zeron Nova");
         let Some(MenuItem::Action { name, action, .. }) = menus[0].items.last() else {
             panic!("last app-menu item must be an action");
         };
-        assert_eq!(name.as_ref(), "Quit Zeron");
+        assert_eq!(name.as_ref(), "Quit Zeron Nova");
         assert_eq!(action.name(), Quit.name());
     }
 
@@ -280,6 +282,10 @@ mod tests {
     #[test]
     fn check_for_updates_follows_about() {
         let menus = app_menus();
+        if !zeron_update::UPSTREAM_RELEASES {
+            assert!(matches!(menus[0].items.get(1), Some(MenuItem::Separator)));
+            return;
+        }
         let Some(MenuItem::Action {
             name,
             action,
@@ -397,7 +403,7 @@ mod about_panel {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let name = NSString::from_str("Zeron");
+        let name = NSString::from_str("Zeron Nova");
         let version = NSString::from_str(env!("CARGO_PKG_VERSION"));
         // Empty build version: CFBundleVersion equals the marketing version, and
         // AppKit would otherwise render "Version 0.2.61 (0.2.61)".

@@ -315,7 +315,7 @@ final class OnboardingViewController: UIViewController {
     }
 
     private func syncPage() -> UIView {
-        let header = heading("Sync your work", "Log in to keep your chats, projects and settings in step everywhere you use Zeron.")
+        let header = heading("Sync your work", "Log in to keep your chats, projects and settings in step everywhere you use Zeron Nova.")
         let rows = [
             ("iphone.and.arrow.forward", "On every device", "Pick up a chat on your phone or another computer, right where you left it."),
             ("laptopcomputer", "Run agents anywhere", "Start work on any of your machines from whichever one you're at."),
@@ -371,7 +371,7 @@ final class OnboardingViewController: UIViewController {
             if cloud {
                 detail?.text = "Cloud runs \(Self.join(names)) with your own subscriptions. Sign in to any you'd like to use."
             } else if names.isEmpty {
-                detail?.text = "Zeron runs the coding agents you already use, and none are on \(place) yet."
+                detail?.text = "Zeron Nova runs the coding agents you already use, and none are on \(place) yet."
             } else {
                 detail?.text = "Found \(names.count > 3 ? "\(names.count) agents" : Self.join(names)) on \(place). Turn on the ones you'd like to use."
             }

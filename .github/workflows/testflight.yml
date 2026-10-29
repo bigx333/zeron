@@ -167,7 +167,7 @@ jobs:
           # with the ones it finds: ad-hoc sign the app with Zeron.entitlements
           # (push) so the distribution signature keeps them (aps-environment
           # becomes production from the App Store profile).
-          app="$RUNNER_TEMP/Zeron.xcarchive/Products/Applications/Zeron.app"
+          app="$RUNNER_TEMP/Zeron.xcarchive/Products/Applications/Zeron Nova.app"
           codesign --force --sign - --entitlements apps/ios/Zeron.entitlements "$app"
           codesign -d --entitlements :- "$app" | grep -q aps-environment
 

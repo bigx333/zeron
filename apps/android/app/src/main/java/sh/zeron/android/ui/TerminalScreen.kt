@@ -360,7 +360,7 @@ fun TerminalScreen(
 private fun TerminalTab.hasContentNow(): Boolean = session.frame().lines.any { it.runs.isNotEmpty() }
 
 fun describeTerminalError(e: Exception): String = when (e) {
-    is CoreException.Unsupported -> "This computer needs a newer Zeron for terminals"
+    is CoreException.Unsupported -> "This computer needs a newer Zeron Nova for terminals"
     is CoreException.HostUnavailable -> "The computer isn't reachable right now"
     else -> "Couldn't open a terminal"
 }

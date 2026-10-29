@@ -421,7 +421,7 @@ class AppModel(private val app: Application) {
 
     val accountDetail: String
         get() = if (isDemo) "Offline demo workspace" else credentials.profile.let { p ->
-            listOfNotNull(if (p.name != null) p.email else null, p.orgName).joinToString(" · ").ifEmpty { "Zeron account" }
+            listOfNotNull(if (p.name != null) p.email else null, p.orgName).joinToString(" · ").ifEmpty { "Zeron Nova account" }
         }
 
     // ── events ─────────────────────────────────────────────────────────────

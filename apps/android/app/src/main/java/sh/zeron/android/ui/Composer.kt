@@ -500,7 +500,7 @@ private fun SessionModelPicker(client: CoreClient, c: ComposerState, row: Sessio
             canSwitch -> null
             c.live.turnRunning -> "You can switch provider when this turn ends."
             hostSwitches -> null
-            else -> "This computer needs a newer Zeron to switch provider."
+            else -> "This computer needs a newer Zeron Nova to switch provider."
         }
         ModelPickerSheet(
             tabs,

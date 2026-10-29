@@ -24,7 +24,7 @@ const NATIVE_SUBAGENTS_HINT: &str = "Off: delegate through side chats, from each
 fn native_subagents_error(error: zeron_rpc::RpcError) -> String {
     match error {
         zeron_rpc::RpcError::UnknownMethod(_) => {
-            "Update Zeron on the selected device to change this.".to_string()
+            "Update Zeron Nova on the selected device to change this.".to_string()
         }
         error => error.to_string(),
     }
@@ -268,7 +268,7 @@ mod delegation_tests {
     /// switch stays put.
     #[gpui::test]
     fn native_subagents_say_why_a_device_cannot_switch(cx: &mut gpui::TestAppContext) {
-        let update = "Update Zeron on the selected device to change this.";
+        let update = "Update Zeron Nova on the selected device to change this.";
         assert_eq!(
             native_subagents_error(zeron_rpc::RpcError::UnknownMethod(
                 methods::GET_NATIVE_SUBAGENTS.into()

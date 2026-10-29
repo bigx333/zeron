@@ -122,7 +122,7 @@ fun VoiceSettingsScreen(controller: VoiceController, onBack: () -> Unit) {
                             shapes = segmentedShapes(0, 1),
                             colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                             leadingContent = { IconTile(R.drawable.zi_laptop) },
-                            supportingContent = { Text("Open Zeron on your Mac or server with remote voice enabled.") },
+                            supportingContent = { Text("Open Zeron Nova on your Mac or server with remote voice enabled.") },
                         ) { Text("No Mac or server yet") }
                     }
                     devices.forEachIndexed { i, device ->
@@ -142,7 +142,7 @@ fun VoiceSettingsScreen(controller: VoiceController, onBack: () -> Unit) {
                                 Text(
                                     when {
                                         !device.online -> "Offline"
-                                        !compatible -> "Update Zeron and enable remote voice"
+                                        !compatible -> "Update Zeron Nova and enable remote voice"
                                         else -> "Ready"
                                     },
                                 )

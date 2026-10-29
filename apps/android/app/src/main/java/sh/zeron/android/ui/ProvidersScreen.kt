@@ -182,7 +182,7 @@ fun ProvidersScreen(model: AppModel, target: String?, onBack: () -> Unit, onOpen
             val footer = when {
                 onCloud -> "Cloud agents use the account marked in use. Signing in here stores the login in Cloud, not on this phone."
                 !online -> "$name is offline — showing what it last reported."
-                else -> "Agents run with the logins on $name. Switch accounts here; to add one, sign in from Zeron on that computer."
+                else -> "Agents run with the logins on $name. Switch accounts here; to add one, sign in from Zeron Nova on that computer."
             }
             cloudSection("Agents", footer = footer, key = "agents-$selected") {
                 if (onCloud) {
@@ -260,7 +260,7 @@ private fun CloudAgentRows(
         if (cloud.info == null) {
             CloudRow(0, 1, "Loading…", leading = { LoadingIndicator(Modifier.size(32.dp)) })
         } else {
-            CloudRow(0, 1, "No computers yet", "Install Zeron on a computer to run agents and manage their accounts here.", leading = { IconTile(ZIcons.Monitor) })
+            CloudRow(0, 1, "No computers yet", "Install Zeron Nova on a computer to run agents and manage their accounts here.", leading = { IconTile(ZIcons.Monitor) })
         }
         return
     }
