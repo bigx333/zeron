@@ -285,9 +285,10 @@ pub fn mark_brand(mark: &str) -> Option<Hsla> {
         QWEN_MARK => 0x6F69F7,
         MINIMAX_MARK => 0xF0365E,
         MISTRAL_MARK => 0xFA500F,
-        NVIDIA_MARK => 0x76B900,
+        // The two greens are darkened from the brand values to hold 3:1 on white.
+        NVIDIA_MARK => 0x5E9400,
         MUSE_MARK => 0x0081FB,
-        LONGCAT_MARK => 0x29E154,
+        LONGCAT_MARK => 0x1A9E3A,
         _ => return None,
     };
     Some(gpui::rgb(rgb).into())
@@ -297,7 +298,8 @@ pub fn mark_brand(mark: &str) -> Option<Hsla> {
 /// any `provider/`); `None` when unrecognized.
 pub fn model_vendor_mark(model_id: &str) -> Option<&'static str> {
     const VENDORS: &[(&str, &[&str])] = &[
-        (CLAUDE_MARK, &["claude"]),
+        // Cursor names Claude models by family alone (`sonnet-4.5`).
+        (CLAUDE_MARK, &["claude", "opus", "sonnet", "haiku", "fable"]),
         (OPENAI_MARK, &["gpt", "codex", "o1", "o3", "o4", "chatgpt"]),
         (GEMINI_MARK, &["gemini", "gemma"]),
         (GROK_MARK, &["grok"]),
@@ -480,6 +482,7 @@ mod tests {
         assert_eq!(model_vendor_mark("claude-opus-5-5"), Some(CLAUDE_MARK));
         assert_eq!(model_vendor_mark("openrouter/qwen/qwen3.8-max"), Some(QWEN_MARK));
         assert_eq!(model_vendor_mark("GPT-5.5"), Some(OPENAI_MARK));
+        assert_eq!(model_vendor_mark("cursor/sonnet-4.5"), Some(CLAUDE_MARK));
         assert_eq!(model_vendor_mark("opencode/big-pickle"), None);
         assert_eq!(mark_brand(OPENAI_MARK), None);
         assert!(mark_brand(GEMINI_MARK).is_some());
