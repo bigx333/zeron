@@ -63,6 +63,8 @@ button, Enter and Cmd/Ctrl+Enter. Agents that cannot steer hold the message for
 the next turn without interrupting. Idle chats still start a normal turn and
 queue edits still save to their existing row. iOS exposes the same toggle in
 Settings → Messages and applies it to its composer's primary send action.
+Android shows the same toggle in Settings → Messages; its delivery chip starts
+on Steer when the host can steer.
 The choice is an account-wide `preferences/composer.queueSendMode` registry
 field: it persists offline and propagates between mobile and desktop on sync.
 Desktop watches the engine's `WatchQueueSendMode` stream; mobile observes its
