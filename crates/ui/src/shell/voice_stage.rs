@@ -497,6 +497,32 @@ impl Shell {
                     })),
             );
 
+        let voice = self.voice.read(cx);
+        let input_hint = voice.push_to_talk().then(|| {
+            let text = voice.push_to_talk_error.clone().unwrap_or_else(|| {
+                if voice.muted() {
+                    format!(
+                        "Hold {} to talk",
+                        settings::display_combo(&ui_settings.keymap.push_to_talk)
+                    )
+                } else {
+                    "Transmitting · Release to mute".to_owned()
+                }
+            });
+            div()
+                .id("voice-push-to-talk-status")
+                .role(gpui::Role::Status)
+                .aria_label(text.clone())
+                .px(px(24.0))
+                .text_center()
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(if voice.push_to_talk_error.is_some() {
+                    theme.warning
+                } else {
+                    theme.text_muted
+                })
+                .child(text)
+        });
         let controls = self.render_voice_call_bar(&theme, awaiting, chat_id, cx);
         // The stage occludes the conversation titlebar. Restore its native
         // drag and double-click behavior above the stage artwork and controls.
@@ -556,7 +582,10 @@ impl Shell {
                         .right_0()
                         .bottom(px(32.0 - 16.0 * (1.0 - reveal)))
                         .flex()
-                        .justify_center()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(12.0))
+                        .children(input_hint)
                         .child(controls),
                 )
                 .child(titlebar)
@@ -576,6 +605,7 @@ impl Shell {
         let popup = theme.for_popup();
         let voice = self.voice.read(cx);
         let muted = voice.muted();
+        let push_to_talk = voice.push_to_talk();
         let elapsed = voice
             .active_since
             .map(|since| crate::voice::format_elapsed(since.elapsed().as_secs()));
@@ -612,13 +642,19 @@ impl Shell {
         }));
 
         // Microphone: inverted plate while muted.
-        let mic = round_control("voice-bar-mic", &popup, muted)
-            .aria_label(if muted {
+        let mic_active = if push_to_talk { !muted } else { muted };
+        let mic = round_control("voice-bar-mic", &popup, mic_active)
+            .debug_selector(|| "voice-bar-mic".into())
+            .aria_label(if push_to_talk {
+                "Hold to talk"
+            } else if muted {
                 "Unmute microphone"
             } else {
                 "Mute microphone"
             })
-            .tooltip(stage_tooltip(if muted {
+            .tooltip(stage_tooltip(if push_to_talk {
+                "Hold to talk · Release to mute"
+            } else if muted {
                 "Unmute · M"
             } else {
                 "Mute · M"
@@ -626,6 +662,47 @@ impl Shell {
             .on_click(cx.listener(|this, _, _, cx| {
                 this.voice.update(cx, |voice, cx| voice.toggle_mute(cx))
             }))
+            .when(push_to_talk, |mic| {
+                let voice = self.voice.downgrade();
+                mic.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.voice
+                            .update(cx, |voice, cx| voice.hold_button(true, cx));
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.voice
+                            .update(cx, |voice, cx| voice.hold_button(false, cx));
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.voice
+                            .update(cx, |voice, cx| voice.hold_button(false, cx));
+                    }),
+                )
+                .child(
+                    gpui::canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _| {
+                            window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                                if phase == gpui::DispatchPhase::Capture
+                                    && (!bounds.contains(&event.position)
+                                        || event.pressed_button != Some(MouseButton::Left))
+                                {
+                                    let _ = voice.update(cx, |voice, cx| voice.hold_button(false, cx));
+                                }
+                            });
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+            })
             .child(
                 icon(if muted {
                     icons::MICROPHONE_OFF
@@ -633,7 +710,11 @@ impl Shell {
                     icons::MICROPHONE
                 })
                 .size(px(19.0))
-                .text_color(if muted { popup.on_solid } else { popup.text }),
+                .text_color(if mic_active {
+                    popup.on_solid
+                } else {
+                    popup.text
+                }),
             );
 
         let transcript = chat_id.map(|chat_id| {
@@ -780,9 +861,108 @@ fn round_control(id: &'static str, theme: &Theme, active: bool) -> gpui::Statefu
         .focus_visible(|s| s.border_2().border_color(theme.accent))
 }
 
+/// Native visual QA of the production voice stage without a media session.
+#[cfg(feature = "voice-fixture")]
+impl Shell {
+    pub fn fixture_voice_stage(&mut self, held: bool, cx: &mut Context<Self>) {
+        self.route = Route::Chat;
+        self.reduced_motion = true;
+        self.voice.update(cx, |voice, cx| {
+            voice.phase = VoicePhase::Active;
+            voice.chat_id = Some("voice-preview".into());
+            voice.snapshot = Some(zeron_proto::voice::VoiceSnapshot {
+                session_id: "voice-preview".into(),
+                chat_id: "voice-preview".into(),
+                generation: 1,
+                phase: VoicePhase::Active,
+                muted: true,
+                playing: false,
+                work: VoiceWork::Idle,
+                reason: None,
+                voice: None,
+                voices: Vec::new(),
+            });
+            voice.host_name = Some("This device".into());
+            voice.active_since = Some(std::time::Instant::now() - Duration::from_secs(125));
+            voice.set_stage_open(true, cx);
+            voice.hold_button(held, cx);
+        });
+        cx.notify();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn push_to_talk_button_mutes_on_drag_out_and_release_outside(cx: &mut gpui::TestAppContext) {
+        struct StageHost(Entity<Shell>);
+        impl Render for StageHost {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    div()
+                        .size_full()
+                        .children(shell.render_voice_stage(window, cx))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            let mut saved = settings::UiSettings::default();
+            saved.voice_push_to_talk = true;
+            settings::init(saved, dir.path(), cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            StageHost(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.reduced_motion = true;
+                shell.voice.update(cx, |voice, _| {
+                    voice.phase = VoicePhase::Active;
+                    voice.stage_open = true;
+                });
+                shell
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let mic = cx.debug_bounds("voice-bar-mic").unwrap();
+        shell.read_with(cx, |shell, cx| assert!(shell.voice.read(cx).muted()));
+        cx.simulate_mouse_down(mic.center(), MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| assert!(!shell.voice.read(cx).muted()));
+        cx.simulate_mouse_move(mic.center(), MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| assert!(!shell.voice.read(cx).muted()));
+        let outside = gpui::point(mic.left() - px(100.0), mic.top() - px(100.0));
+        cx.simulate_mouse_move(outside, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| assert!(shell.voice.read(cx).muted()));
+        cx.simulate_mouse_move(mic.center(), MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| assert!(shell.voice.read(cx).muted()));
+        cx.simulate_mouse_up(outside, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| assert!(shell.voice.read(cx).muted()));
+        cx.simulate_click(mic.center(), gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert!(
+                shell.voice.read(cx).muted(),
+                "a click cannot latch transmission"
+            )
+        });
+    }
 
     #[gpui::test]
     fn voice_stage_topbar_accepts_window_drag_presses(cx: &mut gpui::TestAppContext) {

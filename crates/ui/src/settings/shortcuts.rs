@@ -656,7 +656,9 @@ fn refusal(
     id: ShortcutId,
     combo: &str,
 ) -> Option<SharedString> {
-    if id == ShortcutId::CaptureAppshot && crate::appshots::validate_shortcut(combo).is_err() {
+    if matches!(id, ShortcutId::CaptureAppshot | ShortcutId::PushToTalk)
+        && crate::appshots::validate_shortcut(combo).is_err()
+    {
         return Some(
             format!(
                 "Use {} with a letter, number, function key or navigation key.",
@@ -731,7 +733,7 @@ pub(super) fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::ToggleFiles
         | ShortcutId::ToggleTerminal => "Panels",
         ShortcutId::NewProject => "Projects",
-        ShortcutId::ToggleDictation => "Voice",
+        ShortcutId::ToggleDictation | ShortcutId::PushToTalk => "Voice",
         ShortcutId::OpenModelPicker
         | ShortcutId::NewSession
         | ShortcutId::NextSession
@@ -1133,6 +1135,43 @@ impl Render for ShortcutsPage {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn push_to_talk_rejects_non_global_keys_and_conflicting_bindings() {
+        let mut keymap = super::KeymapConfig::default();
+        for combo in [
+            "space",
+            "shift-space",
+            "fn-v",
+            "ctrl-mystery",
+            "mod-d",
+            "mod-enter",
+        ] {
+            assert!(
+                super::refusal(
+                    &keymap,
+                    super::ComposerSendBehavior::Enter,
+                    super::ShortcutId::PushToTalk,
+                    combo
+                )
+                .is_some(),
+                "{combo}"
+            );
+        }
+        assert!(
+            super::refusal(
+                &keymap,
+                super::ComposerSendBehavior::Enter,
+                super::ShortcutId::PushToTalk,
+                "mod-alt-v"
+            )
+            .is_none()
+        );
+        keymap.set(super::ShortcutId::PushToTalk, "mod-alt-v".into());
+        assert_eq!(
+            super::conflict_owner(&keymap, super::ShortcutId::ToggleDictation, "mod-alt-v"),
+            Some(super::ShortcutId::PushToTalk)
+        );
+    }
     use super::*;
 
     #[gpui::test]
@@ -1493,6 +1532,7 @@ mod tests {
     #[test]
     fn recording_outcomes() {
         let us = KeyEquivalents::default();
+        let platform = if cfg!(target_os = "macos") { "mod" } else { "super" };
         assert_eq!(
             record_key("escape", false, false, false, false, &us),
             RecordOutcome::Cancelled
@@ -1503,11 +1543,11 @@ mod tests {
         );
         assert_eq!(
             record_key("s", false, false, false, true, &us),
-            RecordOutcome::Set("mod-s".into())
+            RecordOutcome::Set(format!("{platform}-s"))
         );
         assert_eq!(
             record_key("k", false, true, true, true, &us),
-            RecordOutcome::Set("mod-alt-shift-k".into())
+            RecordOutcome::Set(format!("{platform}-alt-shift-k"))
         );
         // macOS-only: elsewhere ctrl IS the primary and records as "mod".
         #[cfg(target_os = "macos")]
@@ -1592,8 +1632,9 @@ mod tests {
         // zeron parity: a combo bound elsewhere is refused at record time (the
         // helper names the owner) — conflicts never persist into the keymap.
         let keymap = KeymapConfig::default();
+        let mac = cfg!(target_os = "macos");
         let RecordOutcome::Set(combo) =
-            record_key("r", false, false, false, true, &KeyEquivalents::default())
+            record_key("r", !mac, false, false, mac, &KeyEquivalents::default())
         else {
             panic!("expected Set");
         };

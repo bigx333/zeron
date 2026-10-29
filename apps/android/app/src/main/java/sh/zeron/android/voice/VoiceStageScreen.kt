@@ -239,66 +239,77 @@ fun VoiceStageScreen(
                 }
             }
 
-            // Mute, speaker and End; after an end, Call again and Close.
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 20.dp),
+            // The disc rises above the PTT bar; reserve its ring's space so
+            // neither the bar nor the caption column clips the touch target.
+            Box(
+                Modifier.align(Alignment.CenterHorizontally).padding(bottom = 20.dp)
+                    .then(if (s.pushToTalk && !ended) Modifier.height(132.dp) else Modifier),
             ) {
-                AnimatedContent(ended, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "voice-controls") { over ->
-                    Row(Modifier.padding(10.dp), horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (!over) {
-                            CallButton(
-                                if (s.muted) R.drawable.zi_microphone_off else R.drawable.zi_microphone,
-                                if (s.muted) "Unmute microphone" else "Mute microphone",
-                                // Inverted plate while muted, like the desktop call bar.
-                                container = if (s.muted) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceContainerHighest,
-                                content = if (s.muted) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurface,
-                            ) {
-                                haptics.performHapticFeedback(if (s.muted) HapticFeedbackType.ToggleOff else HapticFeedbackType.ToggleOn)
-                                controller.toggleMute()
-                            }
-                            CallButton(
-                                if (s.route == VoiceRoute.Earpiece) R.drawable.zi_smartphone else R.drawable.zi_volume_loud,
-                                when (s.route) {
-                                    VoiceRoute.Speaker -> "Speaker on. Switch to the earpiece"
-                                    VoiceRoute.Earpiece -> "Earpiece. Switch to the speaker"
-                                    VoiceRoute.External -> "Playing on a headset"
-                                },
-                                container = if (s.speakerOn && s.route != VoiceRoute.External) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest,
-                                content = if (s.speakerOn && s.route != VoiceRoute.External) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface,
-                            ) {
-                                haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
-                                controller.toggleSpeaker()
-                            }
-                            CallButton(
-                                R.drawable.zi_phone_hang_up,
-                                "End call",
-                                container = endRed(),
-                                content = Color.White,
-                                width = 88.dp,
-                            ) {
-                                haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-                                controller.stop()
-                            }
-                        } else {
-                            PillButton(
-                                if (reason == VoiceEndReason.MICROPHONE_DENIED) "Open Settings" else "Call again",
-                                container = MaterialTheme.colorScheme.primary,
-                                content = Color.White,
-                            ) {
-                                if (reason == VoiceEndReason.MICROPHONE_DENIED) {
-                                    openAppSettings(context)
-                                } else if (!controller.start()) {
-                                    controller.dismissEndReason()
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                ) {
+                    AnimatedContent(ended, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "voice-controls") { over ->
+                        Row(Modifier.padding(10.dp), horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (!over) {
+                                if (!s.pushToTalk) {
+                                    CallButton(
+                                        if (s.muted) R.drawable.zi_microphone_off else R.drawable.zi_microphone,
+                                        if (s.muted) "Unmute microphone" else "Mute microphone",
+                                        container = if (s.muted) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.surfaceContainerHighest,
+                                        content = if (s.muted) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.onSurface,
+                                    ) {
+                                        haptics.performHapticFeedback(if (s.muted) HapticFeedbackType.ToggleOff else HapticFeedbackType.ToggleOn)
+                                        controller.toggleMute()
+                                    }
                                 }
-                            }
-                            PillButton("Close", MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.colorScheme.onSurface) {
-                                controller.dismissEndReason()
-                                close()
+                                CallButton(
+                                    if (s.route == VoiceRoute.Earpiece) R.drawable.zi_smartphone else R.drawable.zi_volume_loud,
+                                    when (s.route) {
+                                        VoiceRoute.Speaker -> "Speaker on. Switch to the earpiece"
+                                        VoiceRoute.Earpiece -> "Earpiece. Switch to the speaker"
+                                        VoiceRoute.External -> "Playing on a headset"
+                                    },
+                                    container = if (s.speakerOn && s.route != VoiceRoute.External) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest,
+                                    content = if (s.speakerOn && s.route != VoiceRoute.External) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface,
+                                ) {
+                                    haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                                    controller.toggleSpeaker()
+                                }
+                                if (s.pushToTalk) Spacer(Modifier.width(132.dp))
+                                CallButton(
+                                    R.drawable.zi_phone_hang_up,
+                                    "End call",
+                                    container = endRed(),
+                                    content = Color.White,
+                                    width = if (s.pushToTalk) 60.dp else 88.dp,
+                                ) {
+                                    haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+                                    controller.stop()
+                                }
+                            } else {
+                                PillButton(
+                                    if (reason == VoiceEndReason.MICROPHONE_DENIED) "Open Settings" else "Call again",
+                                    container = MaterialTheme.colorScheme.primary,
+                                    content = Color.White,
+                                ) {
+                                    if (reason == VoiceEndReason.MICROPHONE_DENIED) {
+                                        openAppSettings(context)
+                                    } else if (!controller.start()) {
+                                        controller.dismissEndReason()
+                                    }
+                                }
+                                PillButton("Close", MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.colorScheme.onSurface) {
+                                    controller.dismissEndReason()
+                                    close()
+                                }
                             }
                         }
                     }
+                }
+                if (s.pushToTalk && !ended) {
+                    TalkDisc(controller, s, Modifier.align(Alignment.TopCenter))
                 }
             }
         }
@@ -366,13 +377,14 @@ private fun CallButton(
     container: Color,
     content: Color,
     width: Dp = 60.dp,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
     FilledIconButton(
         onClick = onClick,
         shapes = IconButtonDefaults.shapes(),
         colors = IconButtonDefaults.filledIconButtonColors(containerColor = container, contentColor = content),
-        modifier = Modifier.size(width, 60.dp),
+        modifier = modifier.size(width, 60.dp),
     ) { ZIcon(icon, description, Modifier.size(26.dp)) }
 }
 

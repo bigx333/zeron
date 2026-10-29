@@ -32,7 +32,7 @@ struct VoiceLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Status(orb: state.orb, size: 16)
+                        Status(orb: state.orb, text: state.status, size: 16)
                         Text("Codex on \(context.attributes.host)")
                             .font(Face.sans(12))
                             .foregroundStyle(.secondary)
@@ -43,7 +43,7 @@ struct VoiceLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     HStack(spacing: 10) {
-                        MuteControl(muted: state.muted, labeled: true)
+                        if state.pushToTalk != true { MuteControl(muted: state.muted, labeled: true) }
                         EndControl(labeled: true)
                     }
                     .padding(.top, 6)
@@ -93,14 +93,14 @@ private struct LockScreenCall: View {
                     .font(Face.mono(12))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Status(orb: state.orb, size: 17)
+                Status(orb: state.orb, text: state.status, size: 17)
                 CallClock(since: state.since)
                     .font(Face.mono(13))
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
             HStack(spacing: 10) {
-                MuteControl(muted: state.muted, labeled: false)
+                if state.pushToTalk != true { MuteControl(muted: state.muted, labeled: false) }
                 EndControl(labeled: false)
             }
         }
@@ -132,10 +132,11 @@ private struct OrbGlyph: View {
 
 private struct Status: View {
     let orb: VoiceActivityOrb
+    let text: String
     let size: CGFloat
 
     var body: some View {
-        Text(orb.status)
+        Text(text)
             .font(Face.sans(size))
             .foregroundStyle(orb == .awaiting ? AnyShapeStyle(Tone.warning) : AnyShapeStyle(.primary))
             .lineLimit(1)

@@ -15,7 +15,12 @@ pub(crate) struct Shortcut {
 
 impl Shortcut {
     pub fn parse(combo: &str) -> Result<Self, ()> {
-        let stroke = Keystroke::parse(&crate::settings::platform_combo(combo)).map_err(|_| ())?;
+        Self::parse_on(cfg!(target_os = "macos"), combo)
+    }
+
+    fn parse_on(mac: bool, combo: &str) -> Result<Self, ()> {
+        let stroke =
+            Keystroke::parse(&crate::settings::platform_combo_on(mac, combo)).map_err(|_| ())?;
         let modifiers = stroke.modifiers;
         let key = stroke.key;
         let supported = (key.len() == 1 && key.as_bytes()[0].is_ascii_alphanumeric())
@@ -148,11 +153,24 @@ pub(super) fn enabled_changed() {
 /// key prints &), since that is how its keycode is looked up. An unusable
 /// combo registers the default.
 fn registered(combo: &str, equivalents: &crate::settings::KeyEquivalents) -> Shortcut {
-    let mut shortcut = Shortcut::parse(combo).unwrap_or_else(|_| {
-        Shortcut::parse(crate::settings::ShortcutId::CaptureAppshot.default_combo()).unwrap()
-    });
+    localized(combo, equivalents).unwrap_or_else(|_| {
+        localized(
+            crate::settings::ShortcutId::CaptureAppshot.default_combo(),
+            equivalents,
+        )
+        .unwrap()
+    })
+}
+
+/// `combo` parsed as a hotkey, its key moved to the one the layout prints
+/// (see [`registered`]).
+pub(crate) fn localized(
+    combo: &str,
+    equivalents: &crate::settings::KeyEquivalents,
+) -> Result<Shortcut, ()> {
+    let mut shortcut = Shortcut::parse(combo)?;
     shortcut.key = crate::settings::localize_key(&shortcut.key, equivalents).into_owned();
-    shortcut
+    Ok(shortcut)
 }
 
 pub fn set_shortcut(combo: &str, equivalents: &crate::settings::KeyEquivalents) {
@@ -167,6 +185,7 @@ pub fn set_shortcut(combo: &str, equivalents: &crate::settings::KeyEquivalents) 
 }
 
 pub fn set_recording(recording: bool) {
+    crate::voice::shortcut::set_recording(recording);
     if !super::is_desktop() || preferences().lock().unwrap().recording == recording {
         return;
     }
@@ -211,6 +230,25 @@ mod tests {
                 .portal_trigger(),
             "CTRL+SHIFT+Page_Up"
         );
+    }
+
+    #[test]
+    fn recorded_global_shortcuts_preserve_the_physical_platform_modifier() {
+        for mac in [false, true] {
+            for control in [false, true] {
+                let combo =
+                    crate::settings::combo_from_keystroke_on(mac, control, true, false, true, "v")
+                        .unwrap();
+                let shortcut = Shortcut::parse_on(mac, &combo).unwrap();
+                assert!(shortcut.platform, "{combo}");
+                assert_eq!(shortcut.control, control, "{combo}");
+                assert!(shortcut.alt);
+                assert_eq!(shortcut.key, "v");
+                let trigger = shortcut.portal_trigger();
+                assert!(trigger.contains("LOGO"));
+                assert_eq!(trigger.contains("CTRL"), control);
+            }
+        }
     }
 }
 
