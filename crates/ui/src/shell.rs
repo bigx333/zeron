@@ -57,6 +57,7 @@ use crate::settings::{
     TERMINAL_MIN_HEIGHT, UiSettings, badge_combo, jump_hints_visible, modifier_send_hint_visible,
     platform_combo, sidebar_pin_profile_key,
 };
+use crate::skills::SkillsPage;
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
     format_time_ago, org_name_valid, parse_orgs, sort_memberships,
@@ -308,8 +309,48 @@ fn composer_target_width(panel_width: f32, content_width: f32, docked: bool) -> 
     (content_width + 2.0 * Theme::SPACE_LG).min(panel_width)
 }
 
+/// A sidebar footer action that opens a top-level route (Skills, Pull
+/// requests): lit while its route shows, a hover fade otherwise.
+fn footer_route_button(
+    id: &'static str,
+    label: &'static str,
+    glyph: &'static str,
+    active: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .tab_index(0)
+        .debug_selector(move || id.into())
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
+        .size(px(SIDEBAR_FOOTER_ACTION_SIZE))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(8.0))
+        .text_color(if active { theme.text } else { theme.text_muted })
+        .bg(if active {
+            theme.glass_hover()
+        } else {
+            motion::hover_blend(id, theme.glass_hover().opacity(0.0), theme.glass_hover())
+        })
+        .on_hover(motion::hover_listener(id))
+        .cursor_pointer()
+        .tooltip(crate::settings::widgets::text_tooltip(label))
+        .child(icon(glyph).size(px(15.0)).text_color(if active {
+            theme.text
+        } else {
+            motion::hover_blend(id, theme.text_muted, theme.text)
+        }))
+}
+
 fn titlebar_new_session_alpha(route: &Route, has_selected_chat: bool) -> f32 {
-    if matches!(route, Route::PullRequests) || (matches!(route, Route::Chat) && has_selected_chat) {
+    if matches!(route, Route::PullRequests | Route::Skills)
+        || (matches!(route, Route::Chat) && has_selected_chat)
+    {
         1.0
     } else {
         0.0
@@ -816,6 +857,8 @@ fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<Setti
 pub enum Route {
     Chat,
     PullRequests,
+    /// The shared skill library and skills.sh.
+    Skills,
     Settings(SettingsSection),
 }
 
@@ -972,6 +1015,7 @@ pub enum NavEntry {
     /// A chat route; the id of the selected chat ("" = the new-chat canvas).
     Chat(String),
     PullRequests,
+    Skills,
     /// One pull request's detail view over the board, and the device whose
     /// `gh` reads it (`None` = this device).
     PullRequest {
@@ -2214,6 +2258,8 @@ pub struct Shell {
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
     pull_requests_page: Option<Entity<PullRequestsPage>>,
+    /// Created on first visit and kept, like the pull requests board.
+    skills_page: Option<Entity<SkillsPage>>,
     /// Opened pull requests, as tabs in a pane beside the board.
     pull_request_pane: pull_request_pane::PullRequestPane,
     /// A detail view a history step landed on, opened by the next render
@@ -2656,6 +2702,7 @@ impl Shell {
         let open_route = std::env::var("ZERON_OPEN_ROUTE").ok();
         let route = match open_route.as_deref() {
             Some("pull-requests") => Route::PullRequests,
+            Some("skills") => Route::Skills,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
                     Some(section) => {
@@ -2706,6 +2753,7 @@ impl Shell {
         let nav = NavHistory::new(match route {
             Route::Chat => NavEntry::Chat(String::new()),
             Route::PullRequests => NavEntry::PullRequests,
+            Route::Skills => NavEntry::Skills,
             Route::Settings(section) => NavEntry::Settings(section),
         });
         // Parent notifications carry presentation changes (session status,
@@ -2793,6 +2841,7 @@ impl Shell {
             settings_search: None,
             nav,
             pull_requests_page: None,
+            skills_page: None,
             pull_request_pane: Default::default(),
             pending_pull_request: None,
             pull_request_cache: Default::default(),
@@ -5311,12 +5360,79 @@ impl Shell {
                 page.update(cx, |page, _| page.on_hidden());
             }
         }
+        let was_skills = matches!(self.route, Route::Skills);
+        let will_show_skills = matches!(route, Route::Skills);
+        if was_skills && !will_show_skills {
+            if let Some(page) = self.skills_page.as_ref().cloned() {
+                page.update(cx, |page, _| page.on_hidden());
+            }
+        }
         self.route = route;
         if !was_pull_requests && will_show_pull_requests {
             if let Some(page) = self.pull_requests_page.as_ref().cloned() {
                 page.update(cx, |page, cx| page.on_visible(cx));
             }
         }
+        if !was_skills && will_show_skills {
+            // A page made now announces itself; see `skills_page`.
+            match self.skills_page.clone() {
+                Some(page) => page.update(cx, |page, cx| page.on_visible(cx)),
+                None => drop(self.skills_page(cx)),
+            }
+        }
+    }
+
+    /// The Skills page, created on first use.
+    fn skills_page(&mut self, cx: &mut Context<Self>) -> Entity<SkillsPage> {
+        if let Some(page) = &self.skills_page {
+            return page.clone();
+        }
+        let page = cx.new(|cx| SkillsPage::new(self.state.clone(), cx));
+        self.skills_page = Some(page.clone());
+        // Booted straight onto the route, so no route change announced it.
+        if matches!(self.route, Route::Skills) {
+            page.update(cx, |page, cx| page.on_visible(cx));
+        }
+        page
+    }
+
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_skills_page(&mut self, cx: &mut Context<Self>) -> Entity<SkillsPage> {
+        self.skills_page(cx)
+    }
+
+    /// The Skills entry: from elsewhere, return to the page as it was left;
+    /// on it already, step back from a skill's detail to the list.
+    fn open_skills(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Skills) {
+            self.skills_page(cx)
+                .update(cx, |page, cx| page.dismiss_on_escape(cx));
+            return;
+        }
+        self.enter_skills_route(cx);
+        if self.nav.current() != &NavEntry::Skills {
+            self.nav.push(NavEntry::Skills);
+        }
+        cx.notify();
+    }
+
+    /// Show the Skills route without recording a navigation.
+    fn enter_skills_route(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Skills) {
+            return;
+        }
+        self.set_route(Route::Skills, cx);
+        self.close_user_menu(cx);
+        self.close_chat_menu(cx);
+        self.close_add_space(cx);
+        self.close_right_plus(cx);
+        if self.spaces_menu.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.spaces_menu);
+        }
+        if self.space_menu.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.space_menu);
+        }
+        cx.notify();
     }
 
     /// Close the user menu through the exit animation (no-op when closed).
@@ -5899,6 +6015,7 @@ impl Shell {
                 self.enter_pull_requests_route(cx);
                 self.dismiss_pull_request_detail(cx);
             }
+            NavEntry::Skills => self.enter_skills_route(cx),
             NavEntry::PullRequest { url, device } => {
                 self.enter_pull_requests_route(cx);
                 // The detail view needs the window; the next render opens it.
@@ -7941,10 +8058,16 @@ impl Shell {
     /// The session titlebar, or on the Pull requests route the bar carrying
     /// the pull request pane's tabs.
     fn render_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        if !matches!(self.route, Route::PullRequests) {
-            return self.render_session_title_bar(cx);
+        match self.route {
+            Route::PullRequests => self.render_pull_request_title_bar(cx),
+            // The page carries its own heading; the bar only drags the window.
+            Route::Skills => {
+                let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().w_full();
+                self.titlebar_drag_region("skills-titlebar", bar, cx)
+                    .into_any_element()
+            }
+            _ => self.render_session_title_bar(cx),
         }
-        self.render_pull_request_title_bar(cx)
     }
 
     /// Make a titlebar strip drag the window — zed's platform-titlebar
@@ -10631,50 +10754,35 @@ impl Shell {
     }
 
     fn render_pull_requests_button(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .id("open-pull-requests")
-            .role(gpui::Role::Button)
-            .aria_label("Pull requests")
-            .tab_index(0)
-            .debug_selector(|| "open-pull-requests".into())
-            .focus_visible(|style| style.border_2().border_color(theme.accent))
-            .size(px(SIDEBAR_FOOTER_ACTION_SIZE))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.0))
-            .text_color(if matches!(self.route, Route::PullRequests) {
-                theme.text
-            } else {
-                theme.text_muted
-            })
-            .bg(if matches!(self.route, Route::PullRequests) {
-                theme.glass_hover()
-            } else {
-                motion::hover_blend(
-                    "open-pull-requests",
-                    theme.glass_hover().opacity(0.0),
-                    theme.glass_hover(),
-                )
-            })
-            .on_hover(motion::hover_listener("open-pull-requests"))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
-                // Leaving Settings through its own footer is a plain route
-                // change; nothing there should grab focus on the way out.
-                this.settings_focus_pending = false;
-                this.open_pull_requests(cx);
-            }))
-            .tooltip(crate::settings::widgets::text_tooltip("Pull requests"))
-            .child(icon(icons::PULL_REQUEST).size(px(15.0)).text_color(
-                if matches!(self.route, Route::PullRequests) {
-                    theme.text
-                } else {
-                    motion::hover_blend("open-pull-requests", theme.text_muted, theme.text)
-                },
-            ))
-            .into_any_element()
+        footer_route_button(
+            "open-pull-requests",
+            "Pull requests",
+            icons::PULL_REQUEST,
+            matches!(self.route, Route::PullRequests),
+            theme,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            // Leaving Settings through its own footer is a plain route
+            // change; nothing there should grab focus on the way out.
+            this.settings_focus_pending = false;
+            this.open_pull_requests(cx);
+        }))
+        .into_any_element()
+    }
+
+    fn render_skills_button(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        footer_route_button(
+            "open-skills",
+            "Skills",
+            icons::MAGIC_STICK_3,
+            matches!(self.route, Route::Skills),
+            theme,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.settings_focus_pending = false;
+            this.open_skills(cx);
+        }))
+        .into_any_element()
     }
 
     fn render_sidebar_footer(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -10692,7 +10800,9 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // Pull requests sits just left of Settings, in the same action group.
+        // Skills and Pull requests sit just left of Settings, in the same
+        // action group.
+        let skills = self.render_skills_button(theme, cx);
         let pull_requests = self.render_pull_requests_button(theme, cx);
         let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
@@ -10914,6 +11024,7 @@ impl Shell {
                     .items_center()
                     .gap(px(2.0))
                     .children(voice_trigger)
+                    .child(skills)
                     .child(pull_requests)
                     .child(
                         div()
@@ -11588,6 +11699,17 @@ impl Shell {
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
 
+        if matches!(self.route, Route::Skills) {
+            let outlet = self.skills_page(cx).into_any_element();
+            return div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0().child(outlet))
+                .into_any_element();
+        }
         if matches!(self.route, Route::PullRequests) {
             if self.pull_requests_page.is_none() {
                 self.pull_requests_page =

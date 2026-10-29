@@ -91,10 +91,12 @@ impl Shell {
         let right_open = match self.route {
             Route::Chat => self.right_pane_open(cx),
             Route::PullRequests => self.pull_request_pane_open(),
-            Route::Settings(_) => false,
+            Route::Skills | Route::Settings(_) => false,
         };
         if matches!(self.route, Route::Settings(_)) {
             (self.settings_focus.clone(), self.unfocused.clone())
+        } else if let (Route::Skills, Some(page)) = (self.route, &self.skills_page) {
+            (page.focus_handle(cx), self.unfocused.clone())
         } else if right_open && self.navigation_focus.right_was_focused {
             (
                 self.navigation_focus.right.clone(),

@@ -329,6 +329,10 @@ pub mod process;
 mod scratch;
 pub mod shell_env;
 pub(crate) mod skills;
+pub use skills::{
+    declared_name as skill_declared_name, document as skill_document,
+    read_manifest as read_skill_manifest, shared_root as shared_skills_root,
+};
 #[cfg(windows)]
 pub mod windows_process;
 
