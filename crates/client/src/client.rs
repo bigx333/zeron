@@ -1004,6 +1004,16 @@ impl Client {
         Ok(())
     }
 
+    /// Shared across the account; absent until explicitly chosen on any device.
+    pub fn queue_send_mode(&self) -> Option<zeron_proto::QueueSendMode> {
+        self.workspace().queue_send_mode
+    }
+
+    pub fn set_queue_send_mode(&self, mode: zeron_proto::QueueSendMode) -> Result<()> {
+        self.inner
+            .registry_write(|doc| doc.set_queue_send_mode(mode))
+    }
+
     fn pin_change(&self, change: SidebarPinChange) -> Result<()> {
         if !self.workspace().pins_ready {
             return Err(ClientError::Unsupported("pins are not synced yet".into()));
@@ -1237,9 +1247,10 @@ impl Client {
         if let Some(core) = self.inner.session_core(chat_id) {
             return Ok(SessionHandle { core });
         }
-        if self.inner.workspace.chat(chat_id).is_none() {
+        let Some(chat) = self.inner.workspace.chat(chat_id) else {
             return Err(ClientError::NotFound(chat_id.to_owned()));
-        }
+        };
+        self.ensure_harness_catalog(&chat.device_id);
         let (doc, cursor, hydrated) = match self.inner.backend() {
             Backend::Demo(demo) => (demo.session_doc(chat_id)?, 0, true),
             Backend::Live(live) => {
@@ -1278,6 +1289,29 @@ impl Client {
         }
         self.inner.evict_sessions();
         Ok(SessionHandle { core })
+    }
+
+    /// Mid-turn steering is gated on the host's harness catalog, which only
+    /// the new-session picker used to load: a chat opened straight from the
+    /// list queued every send even with Steer mode on. Fetch it in the
+    /// background the first time a chat on that host opens.
+    fn ensure_harness_catalog(&self, device_id: &str) {
+        if lock(&self.inner.harness_catalogs).contains_key(device_id) {
+            return;
+        }
+        let weak = Arc::downgrade(&self.inner);
+        let cancel = self.inner.cancel.clone();
+        let device_id = device_id.to_owned();
+        crate::runtime::shared().spawn(async move {
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            let client = Client { inner };
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = client.list_harnesses(&device_id) => {}
+            }
+        });
     }
 
     /// An already-open session, if any.

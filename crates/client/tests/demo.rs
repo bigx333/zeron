@@ -557,6 +557,28 @@ fn steering_while_busy_sends_a_steer_not_a_queue_row() {
 }
 
 #[test]
+fn opening_a_chat_learns_steering_without_the_new_session_picker() {
+    let (client, _dir) = demo(DemoOptions::default());
+    // Straight from the session list: nothing has listed the host's harnesses.
+    let session = client.open_session("chat-home").unwrap();
+    session.send(SendRequest::text("first")).unwrap();
+    wait_for("turn running and steerable", Duration::from_secs(5), || {
+        let composer = session.composer();
+        composer.live.turn_running && composer.host.capabilities.mid_turn_steering == Some(true)
+    });
+    let outcome = session
+        .send(SendRequest {
+            busy: zeron_client::BusyPolicy::Steer,
+            ..SendRequest::text("also this")
+        })
+        .unwrap();
+    assert!(
+        matches!(outcome, SendOutcome::Steered { .. }),
+        "steer, not queue: {outcome:?}"
+    );
+}
+
+#[test]
 fn queueing_while_busy_at_realistic_speed() {
     let (client, _dir) = demo(DemoOptions::default());
     let session = client.open_session("chat-home").unwrap();
@@ -635,4 +657,23 @@ fn provider_switch_needs_a_host_that_switches() {
     let mut model = before.clone();
     model.model = Some("another-model".into());
     client.set_session_config("chat-blog", &model).unwrap();
+}
+
+#[test]
+fn queue_send_mode_changes_publish_workspace_updates() {
+    use zeron_proto::QueueSendMode::{Queue, Steer};
+    let (client, _directory) = demo(fast());
+    assert_eq!(client.queue_send_mode(), None);
+    let before = client.workspace().revision;
+    client.set_queue_send_mode(Steer).unwrap();
+    assert_eq!(client.queue_send_mode(), Some(Steer));
+    let after = client.workspace().revision;
+    assert!(
+        after > before,
+        "preference-only writes must notify mobile observers"
+    );
+    client.set_queue_send_mode(Queue).unwrap();
+    assert_eq!(client.queue_send_mode(), Some(Queue));
+    assert!(client.workspace().revision > after);
+    client.shutdown();
 }

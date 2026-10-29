@@ -148,6 +148,20 @@ class AppModel(private val app: Application) {
         settings.edit().putBoolean("groupByProject", on).apply()
     }
 
+    /** Send into the active turn by default; stored in the shared registry, so every device agrees. */
+    private val _steerMode = MutableStateFlow(false)
+    val steerMode: StateFlow<Boolean> = _steerMode.asStateFlow()
+
+    fun setSteerMode(on: Boolean) {
+        val client = _client.value ?: return
+        try {
+            client.setSteerMode(on)
+            refreshWorkspace()
+        } catch (e: Exception) {
+            Log.w("Zeron", "Could not save steer mode", e)
+        }
+    }
+
     /** Folded sidebar groups (pinned, recent, project groups), kept on this device. */
     private val _collapsed = MutableStateFlow(settings.getStringSet("collapsedGroups", emptySet())!!.toSet())
     val collapsed: StateFlow<Set<String>> = _collapsed.asStateFlow()
@@ -401,6 +415,7 @@ class AppModel(private val app: Application) {
         _client.value?.shutdown()
         _client.value = null
         _workspace.value = null
+        _steerMode.value = false
         _connectivity.value = null
         if (!wasDemo) {
             credentials.clear()
@@ -450,6 +465,7 @@ class AppModel(private val app: Application) {
     fun refreshWorkspace() {
         val client = _client.value ?: return
         _workspace.value = client.workspace()
+        _steerMode.value = client.steerMode()
         sweepFreshSideChats()
     }
 

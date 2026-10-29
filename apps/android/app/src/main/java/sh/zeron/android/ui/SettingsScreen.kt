@@ -65,6 +65,7 @@ fun SettingsScreen(
 ) {
     val appearance by model.appearance.collectAsState()
     val groupByProject by model.groupByProject.collectAsState()
+    val steerMode by model.steerMode.collectAsState()
     var confirmSignOut by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     val workspace by model.workspace.collectAsState()
     val devices = workspace?.devices.orEmpty()
@@ -187,6 +188,18 @@ fun SettingsScreen(
                     trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline) },
                 ) { Text("Archived sessions") }
             }
+        }
+        section("Messages")
+        item {
+            SegmentedListItem(
+                onClick = { model.setSteerMode(!steerMode) },
+                shapes = segmentedShapes(0, 1),
+                colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                leadingContent = { IconTile(ZIcons.Send) },
+                supportingContent = { Text("Send into the active turn without confirmation.") },
+                trailingContent = { Switch(steerMode, { model.setSteerMode(it) }) },
+                modifier = Modifier.padding(horizontal = 16.dp),
+            ) { Text("Steer mode") }
         }
         item {
             // Voice: once any registered host can run it (iOS More → Voice).

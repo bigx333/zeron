@@ -2377,3 +2377,29 @@ fn a_deleted_device_row_reads_as_deleted_not_unknown() {
     ws.upsert_device(&back).unwrap();
     assert!(!ws.device_deleted("cloud-1"));
 }
+
+#[test]
+fn queue_send_mode_syncs_between_devices_and_survives_reopen() {
+    use zeron_proto::QueueSendMode::{Queue, Steer};
+    let mut desktop = RegistryDoc::new("desktop");
+    let mut phone = RegistryDoc::new("phone");
+    assert_eq!(desktop.queue_send_mode(), None);
+    assert_eq!(phone.queue_send_mode(), None);
+    let mut server = HashMap::new();
+    let mut sequence = 0;
+    desktop.set_queue_send_mode(Steer).unwrap();
+    // A pending offline preference survives relaunch before it reaches the server.
+    desktop = RegistryDoc::from_bytes(&desktop.to_bytes().unwrap(), "desktop").unwrap();
+    assert_eq!(desktop.queue_send_mode(), Some(Steer));
+    server_round(&mut server, &mut sequence, &mut [&mut desktop, &mut phone]);
+    assert_eq!(phone.queue_send_mode(), Some(Steer));
+    phone.set_queue_send_mode(Queue).unwrap();
+    server_round(&mut server, &mut sequence, &mut [&mut phone, &mut desktop]);
+    assert_eq!(desktop.queue_send_mode(), Some(Queue));
+    // Concurrent choices converge using the registry's per-field HLC clocks.
+    desktop.set_queue_send_mode(Steer).unwrap();
+    phone.set_queue_send_mode(Queue).unwrap();
+    server_round(&mut server, &mut sequence, &mut [&mut desktop, &mut phone]);
+    assert_eq!(desktop.queue_send_mode(), phone.queue_send_mode());
+    assert!(desktop.sidebar_preferences().is_none());
+}

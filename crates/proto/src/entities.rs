@@ -8,6 +8,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AccessMode, HarnessId, ReasoningLevel, SandboxLevel};
 
+/// Delivery policy for messages submitted during an active turn.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QueueSendMode {
+    #[default]
+    Queue,
+    Steer,
+}
+
 /// Admission limit for new pins. Concurrent offline additions may exceed it;
 /// existing pins remain visible, reorderable and removable without truncation.
 pub const MAX_SIDEBAR_PINS: usize = 200;

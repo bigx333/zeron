@@ -1565,6 +1565,26 @@ impl RegistryDoc {
 
     // ── whole-doc read ──────────────────────────────────────────────────────
 
+    /// Account-wide composer preference. Missing rows preserve the default Queue mode.
+    pub fn queue_send_mode(&self) -> Option<zeron_proto::QueueSendMode> {
+        let row = self.overlay_row(KIND_PREFERENCES, "composer")?;
+        serde_json::from_value(row.fields.get("queueSendMode")?.clone()).ok()
+    }
+
+    pub fn set_queue_send_mode(
+        &mut self,
+        mode: zeron_proto::QueueSendMode,
+    ) -> Result<(), DocError> {
+        self.observe_sidebar_row(KIND_PREFERENCES, "composer");
+        self.write(
+            KIND_PREFERENCES,
+            "composer",
+            OpKind::Upsert,
+            fields([("queueSendMode", serde_json::to_value(mode)?)]),
+        );
+        Ok(())
+    }
+
     pub fn sidebar_preferences(&self) -> Option<SidebarPreferences> {
         self.sidebar_pins_initialized().then(|| SidebarPreferences {
             sections: self.sidebar_sections(),

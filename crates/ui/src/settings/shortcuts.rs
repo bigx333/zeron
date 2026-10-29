@@ -101,7 +101,7 @@ pub struct ShortcutsPage {
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
     worktrees: Entity<super::worktrees::WorktreeSettingsCard>,
-    _state: Entity<AppState>,
+    state: Entity<AppState>,
 }
 
 impl EventEmitter<ShortcutsEvent> for ShortcutsPage {}
@@ -119,6 +119,15 @@ impl ShortcutsPage {
     ) -> Self {
         cx.on_release(|_, _| crate::appshots::set_recording(false))
             .detach();
+        let mut observed_mode = state.read(cx).queue_send_mode;
+        cx.observe(&state, move |_, state, cx| {
+            let mode = state.read(cx).queue_send_mode;
+            if mode != observed_mode {
+                observed_mode = mode;
+                cx.notify();
+            }
+        })
+        .detach();
         Self {
             appshots_page: false,
             general_page: false,
@@ -146,7 +155,7 @@ impl ShortcutsPage {
                 cx.new(|cx| crate::settings::thread_naming::ThreadNamingCard::new(state, cx))
             },
             worktrees: cx.new(|cx| super::worktrees::WorktreeSettingsCard::new(state.clone(), cx)),
-            _state: state,
+            state,
         }
     }
 
@@ -799,6 +808,70 @@ impl Render for ShortcutsPage {
             )
             .child(send_behavior_control)
             .search_anchor(SettingId::SendMessagesWith);
+        let steer_mode = self
+            .state
+            .read(cx)
+            .queue_send_mode
+            .unwrap_or_else(|| crate::settings::queue_send_mode(cx))
+            == crate::settings::QueueSendMode::Steer;
+        let queue_mode_row = widgets::card_row(&theme, false)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(&theme, "Steer mode"))
+                    .child(widgets::meta_line(
+                        &theme,
+                        vec![div()
+                            .child("Send into the active turn without confirmation.")
+                            .into_any_element()],
+                    )),
+            )
+            .child(
+                widgets::toggle_switch(&theme, steer_mode, "queue-steer-mode")
+                    .id("queue-steer-mode-toggle")
+                    .debug_selector(|| "queue-steer-mode-toggle".into())
+                    .tab_index(0)
+                    .role(gpui::Role::Switch)
+                    .aria_label("Steer mode")
+                    .aria_toggled(if steer_mode {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let mode = if steer_mode {
+                            crate::settings::QueueSendMode::Queue
+                        } else {
+                            crate::settings::QueueSendMode::Steer
+                        };
+                        crate::settings::update(SavePolicy::Immediate, cx, |settings| {
+                            settings.queue_send_mode = mode;
+                        });
+                        let engine = this.state.update(cx, |state, cx| {
+                            state.queue_send_mode = Some(mode);
+                            cx.notify();
+                            state.engine().cloned()
+                        });
+                        if let Some(engine) = engine {
+                            cx.spawn(async move |_, cx| {
+                                if let Err(error) = crate::attachments::call_with_timeout(
+                                    &engine,
+                                    cx.background_executor(),
+                                    zeron_rpc::methods::MUTATE,
+                                    serde_json::json!({ "op": "setQueueSendMode", "mode": mode }),
+                                    std::time::Duration::from_secs(30),
+                                ).await {
+                                    tracing::warn!(%error, "could not sync queue mode; local preference retained");
+                                }
+                            }).detach();
+                        }
+                        cx.refresh_windows();
+                    })),
+            )
+            .search_anchor(SettingId::SteerMode);
         let compact_mode_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -975,6 +1048,7 @@ impl Render for ShortcutsPage {
                                     .child(
                                         widgets::section_card(&theme)
                                             .child(send_behavior_row)
+                                            .child(queue_mode_row)
                                             .child(compact_mode_row)
                                             .child(compact_model_picker_row)
                                             .child(escape_behavior_row),
