@@ -35,12 +35,6 @@
             </array>
         </dict>
     </array>
-    <!-- This fork is built locally; upstream releases must not replace it. -->
-    <key>LSEnvironment</key>
-    <dict>
-        <key>ZERON_AUTO_UPDATE</key>
-        <string>0</string>
-    </dict>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>NSMicrophoneUsageDescription</key>

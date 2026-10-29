@@ -23,7 +23,7 @@ swift scripts/generate-nova-icons.swift
 
 The iOS icon is opaque and full bleed; iOS supplies its own rounded mask. Android uses a navy adaptive background and a 10% foreground inset to keep the face and nova accent inside launcher masks. macOS packaging turns its framed PNG into the complete `.icns` size set.
 
-The visible product name is **Zeron Nova** across desktop, Android, and iOS. The macOS bundle identity is `sh.zeron.app.nova`. Mobile application identifiers, authentication URL schemes, Rust and Swift module names, CLI commands, and existing data locations remain compatible with previous builds. The iOS app product is `Zeron Nova.app`, with the `Zeron` scheme and executable retained for tooling. The macOS updater archive retains its legacy internal `Zeron.app` path for compatibility; the installer presents `Zeron Nova.app`. Upstream automatic updates are disabled in the Nova macOS bundle.
+The visible product name is **Zeron Nova** across desktop, Android, and iOS. The macOS bundle identity is `sh.zeron.app.nova`. Mobile application identifiers, authentication URL schemes, Rust and Swift module names, CLI commands, and existing data locations remain compatible with previous builds. The iOS app product is `Zeron Nova.app`, with the `Zeron` scheme and executable retained for tooling. The macOS updater archive retains its legacy internal `Zeron.app` path for compatibility; the installer presents `Zeron Nova.app`. Nova never checks for, offers or installs upstream releases (`zeron_update::UPSTREAM_RELEASES`); reinstall a local build with `scripts/install-nova-macos.sh`.
 
 ## ImageGen prompt
 

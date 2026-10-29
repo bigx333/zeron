@@ -168,6 +168,9 @@ pub fn version_newer(latest: &str, current: &str) -> bool {
 /// Fetch the newest release metadata: `manifest.json`, falling back to
 /// `latest.txt` (version only, no checksums) for pre-manifest releases.
 pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
+    if !UPSTREAM_RELEASES {
+        bail!("Zeron Nova doesn't take upstream releases; rebuild it from source to update");
+    }
     let base = release_base(edge_url)?;
     let client = http_client()?;
     let manifest_url = format!("{base}/manifest.json");
@@ -317,6 +320,15 @@ fn validate_release_override(value: &str) -> anyhow::Result<String> {
 /// The project's GitHub releases page — the advisory update strip opens this
 /// for unmanaged installs (source builds, hand-copied binaries), where no
 /// updater flow exists to drive.
+/// Zeron Nova is a fork built from its own source; upstream's release feed
+/// would offer upstream's app over it (and install it — the bundle swap keeps
+/// the Nova bundle's path). Off, every release fetch fails before any
+/// network I/O: the background checker stays quiet, the desktop app skips
+/// its update UI and `zeron update` refuses. Superseded-binary restarts
+/// (an in-place reinstall) still work. On in this crate's own tests, which
+/// exercise the feed against local servers.
+pub const UPSTREAM_RELEASES: bool = cfg!(test);
+
 pub const RELEASES_PAGE: &str = "https://github.com/zeronsh/zeron/releases";
 
 /// The newest release's page — the download destination offered when this
@@ -1203,7 +1215,7 @@ impl Updater {
                 let mut superseded = SupersededRestart::default();
                 loop {
                     let forced = self.forced.swap(false, Ordering::SeqCst);
-                    if forced || schedule.due(SystemTime::now()) {
+                    if UPSTREAM_RELEASES && (forced || schedule.due(SystemTime::now())) {
                         let ok = self.check_once().await;
                         schedule.record(SystemTime::now(), ok);
                         if ok

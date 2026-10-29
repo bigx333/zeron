@@ -167,16 +167,18 @@ pub fn app_menus() -> Vec<Menu> {
 
     // macOS titles the first menu with the bundle/process name regardless of
     // what we pass, but gpui still wants a name.
-    let mut app_items = vec![
-        // The native AppKit about panel; no equivalent elsewhere yet.
-        MenuItem::action("About Zeron Nova", About).disabled(!macos),
-        // Sparkle's placement: directly under About. Other platforms reach
-        // the same check from the account menu.
-        MenuItem::action("Check for Updates…", CheckForUpdates),
+    // The native AppKit about panel; no equivalent elsewhere yet.
+    let mut app_items = vec![MenuItem::action("About Zeron Nova", About).disabled(!macos)];
+    // Sparkle's placement: directly under About. Other platforms reach
+    // the same check from the account menu. Nova has no release feed.
+    if zeron_update::UPSTREAM_RELEASES {
+        app_items.push(MenuItem::action("Check for Updates…", CheckForUpdates));
+    }
+    app_items.extend([
         MenuItem::separator(),
         MenuItem::action("Settings", shell::OpenSettings),
         MenuItem::separator(),
-    ];
+    ]);
     if macos {
         app_items.extend([
             MenuItem::os_submenu("Services", SystemMenuType::Services),
@@ -280,6 +282,10 @@ mod tests {
     #[test]
     fn check_for_updates_follows_about() {
         let menus = app_menus();
+        if !zeron_update::UPSTREAM_RELEASES {
+            assert!(matches!(menus[0].items.get(1), Some(MenuItem::Separator)));
+            return;
+        }
         let Some(MenuItem::Action {
             name,
             action,
