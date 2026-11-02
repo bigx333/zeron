@@ -47,6 +47,7 @@ cat >NOVA.md <<'EOF'
 | --- | --- | --- | --- | --- |
 | Pool | #9 | `nova/pool.rs` | `hook.rs`, `missing.rs` | |
 | Mover | #10 | | `other.rs` | |
+| Merger | #11 | | `merged.rs` | |
 <!-- ledger:end -->
 EOF
 git add NOVA.md && git commit -qm "nova ledger" && git push -q origin nova
@@ -57,16 +58,24 @@ expect_in "Nothing to sync" "$out"
 git -C "$tmp/up" mv other.rs moved.rs
 git -C "$tmp/up" commit -qm "upstream renames other"
 git -C "$tmp/up" tag -a v999.0.0 -m release
+git -C "$tmp/up" switch -qc side
+git -C "$tmp/up" commit -q --allow-empty -m "upstream side work"
+git -C "$tmp/up" switch -q main
+git -C "$tmp/up" merge -q --no-ff --no-commit side >/dev/null
+printf 'm\n' >"$tmp/up/merged.rs"
+git -C "$tmp/up" add merged.rs
+git -C "$tmp/up" commit -qm "upstream merge edits merged.rs"
 printf 'b\n' >"$tmp/up/hook.rs"
 git -C "$tmp/up" commit -qam "upstream edits hook"
 sha=$(git -C "$tmp/up" rev-parse --short HEAD)
 
 head_before=$(git rev-parse HEAD)
 out=$("$SCRIPT" --dry-run)
-expect_in "2 commit(s) ahead" "$out"
+expect_in "4 commit(s) ahead" "$out"
 expect_in "upstream edits hook" "$out"
 expect_in "- Pool: \`hook.rs\`" "$out"
 expect_in "- Mover: \`other.rs\`" "$out"
+expect_in "- Merger: \`merged.rs\`" "$out"
 [[ "$out" != *missing.rs* ]] || fail "dry run flagged an untouched hook"
 [[ "$(git rev-parse HEAD)" == "$head_before" ]] || fail "dry run moved HEAD"
 git ls-remote --exit-code origin "sync/upstream-$sha" >/dev/null && fail "dry run pushed"

@@ -45,10 +45,15 @@ ledger_hooks() {
     }'
 }
 
+# Per-commit names keep hooks a later commit reverted; the three-dot diff adds
+# edits made only inside upstream merge commits, which git log does not list.
 touched=$(
   join -t $'\t' -1 2 -2 1 -o 1.1,1.2 \
     <(ledger_hooks | sort -t $'\t' -k2,2) \
-    <(git log --format= --name-only --no-renames "$BASE..$UPSTREAM" | sort -u) |
+    <({
+      git log --format= --name-only --no-renames "$BASE..$UPSTREAM"
+      git diff --name-only --no-renames "$BASE...$UPSTREAM"
+    } | sed '/^$/d' | sort -u) |
     sort -u | awk -F'\t' '{ printf "- %s: `%s`\n", $1, $2 }'
 )
 touched=${touched:-"- none"}
