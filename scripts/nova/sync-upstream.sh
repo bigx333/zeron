@@ -48,7 +48,7 @@ ledger_hooks() {
 touched=$(
   join -t $'\t' -1 2 -2 1 -o 1.1,1.2 \
     <(ledger_hooks | sort -t $'\t' -k2,2) \
-    <(git diff --name-only "$BASE...$UPSTREAM" | sort) |
+    <(git log --format= --name-only --no-renames "$BASE..$UPSTREAM" | sort -u) |
     sort -u | awk -F'\t' '{ printf "- %s: `%s`\n", $1, $2 }'
 )
 touched=${touched:-"- none"}
@@ -102,7 +102,7 @@ if ! git merge-base --is-ancestor "$UPSTREAM" HEAD; then
   fi
 fi
 
-git push --quiet -u origin "$branch"
+git push --quiet --no-follow-tags -u origin "$branch"
 
 body=$(
   cat <<EOF

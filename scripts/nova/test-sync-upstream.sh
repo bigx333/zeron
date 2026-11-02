@@ -46,6 +46,7 @@ cat >NOVA.md <<'EOF'
 | Feature | PR | Nova-only files | Upstream hook files | Notes |
 | --- | --- | --- | --- | --- |
 | Pool | #9 | `nova/pool.rs` | `hook.rs`, `missing.rs` | |
+| Mover | #10 | | `other.rs` | |
 <!-- ledger:end -->
 EOF
 git add NOVA.md && git commit -qm "nova ledger" && git push -q origin nova
@@ -53,7 +54,9 @@ git add NOVA.md && git commit -qm "nova ledger" && git push -q origin nova
 out=$("$SCRIPT" --dry-run)
 expect_in "Nothing to sync" "$out"
 
-git -C "$tmp/up" commit -q --allow-empty -m "upstream empty"
+git -C "$tmp/up" mv other.rs moved.rs
+git -C "$tmp/up" commit -qm "upstream renames other"
+git -C "$tmp/up" tag -a v999.0.0 -m release
 printf 'b\n' >"$tmp/up/hook.rs"
 git -C "$tmp/up" commit -qam "upstream edits hook"
 sha=$(git -C "$tmp/up" rev-parse --short HEAD)
@@ -63,6 +66,7 @@ out=$("$SCRIPT" --dry-run)
 expect_in "2 commit(s) ahead" "$out"
 expect_in "upstream edits hook" "$out"
 expect_in "- Pool: \`hook.rs\`" "$out"
+expect_in "- Mover: \`other.rs\`" "$out"
 [[ "$out" != *missing.rs* ]] || fail "dry run flagged an untouched hook"
 [[ "$(git rev-parse HEAD)" == "$head_before" ]] || fail "dry run moved HEAD"
 git ls-remote --exit-code origin "sync/upstream-$sha" >/dev/null && fail "dry run pushed"
@@ -71,6 +75,7 @@ out=$("$SCRIPT")
 expect_in "pull/1" "$out"
 git ls-remote --exit-code origin "sync/upstream-$sha" >/dev/null || fail "branch not pushed"
 git -C "$tmp/origin.git" merge-base --is-ancestor "$sha" "sync/upstream-$sha" || fail "pushed branch lacks upstream"
+git ls-remote --exit-code --tags origin >/dev/null && fail "tags pushed"
 grep -A1 -x -- "--base" "$tmp/create-args" | grep -qx nova || fail "PR not based on nova"
 
 out=$("$SCRIPT")
@@ -80,6 +85,7 @@ rm "$tmp/pr"
 git switch -q nova
 printf 'nova\n' >hook.rs
 git commit -qam "nova edits hook" && git push -q origin nova
+git config push.followTags true
 printf 'c\n' >"$tmp/up/hook.rs"
 git -C "$tmp/up" commit -qam "upstream edits hook again"
 csha=$(git -C "$tmp/up" rev-parse --short HEAD)
@@ -98,5 +104,6 @@ git add hook.rs && git commit -q --no-edit
 out=$("$SCRIPT")
 expect_in "pull/1" "$out"
 git ls-remote --exit-code origin "sync/upstream-$csha" >/dev/null || fail "resolved branch not pushed"
+git ls-remote --exit-code --tags origin >/dev/null && fail "tags pushed with push.followTags"
 
 echo "ok: sync-upstream.sh"
