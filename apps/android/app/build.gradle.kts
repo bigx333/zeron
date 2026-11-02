@@ -22,6 +22,13 @@ val buildNumber = providers.gradleProperty("zeronVersionCode").orNull?.toInt() ?
 // secrets), so each build installs over the last. Without it, the debug key.
 val releaseKeystore = System.getenv("ZERON_ANDROID_KEYSTORE")?.takeIf { file(it).exists() }
 
+// Settings › About shows it, so two installs of one version can be told apart.
+fun git(vararg args: String): String =
+    providers.exec { workingDir = repoRoot; commandLine("git", *args) }.standardOutput.asText.get().trim()
+val gitCommit: String = runCatching {
+    git("rev-parse", "--short=8", "HEAD") + if (git("status", "--porcelain").isEmpty()) "" else "+dirty"
+}.getOrDefault("unknown")
+
 val buildCore by tasks.registering(Exec::class) {
     description = "Builds crates/mobile for Android and generates Kotlin bindings."
     val ndk = System.getenv("ANDROID_NDK_HOME")
@@ -61,6 +68,7 @@ android {
         // The ABIs the core was built for (`ZERON_ANDROID_ABIS`): a dependency's
         // native libraries for others would only add weight.
         ndk { abiFilters += (System.getenv("ZERON_ANDROID_ABIS") ?: "arm64-v8a x86_64").split(" ").filter { it.isNotBlank() } }
+        buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
     }
 
     signingConfigs {
@@ -86,7 +94,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
 
     sourceSets["main"].apply {
         kotlin.directories.add(coreOut.resolve("kotlin").path)
