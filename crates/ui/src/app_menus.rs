@@ -160,6 +160,11 @@ fn app_key_bindings(macos: bool) -> Vec<KeyBinding> {
     bindings
 }
 
+fn is_check_for_updates(item: &MenuItem) -> bool {
+    use gpui::Action as _;
+    matches!(item, MenuItem::Action { action, .. } if action.name() == CheckForUpdates.name())
+}
+
 /// The zeron menu bar. macOS renders this natively; mac-only entries are gated
 /// at runtime (`cfg!`) so the whole module compiles and tests on Linux.
 pub fn app_menus() -> Vec<Menu> {
@@ -177,6 +182,9 @@ pub fn app_menus() -> Vec<Menu> {
         MenuItem::action("Settings", shell::OpenSettings),
         MenuItem::separator(),
     ];
+    if !zeron_update::UPSTREAM_RELEASES {
+        app_items.retain(|item| !is_check_for_updates(item));
+    }
     if macos {
         app_items.extend([
             MenuItem::os_submenu("Services", SystemMenuType::Services),
@@ -280,6 +288,10 @@ mod tests {
     #[test]
     fn check_for_updates_follows_about() {
         let menus = app_menus();
+        if !zeron_update::UPSTREAM_RELEASES {
+            assert!(!menus[0].items.iter().any(is_check_for_updates));
+            return;
+        }
         let Some(MenuItem::Action {
             name,
             action,

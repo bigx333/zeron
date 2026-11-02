@@ -165,9 +165,17 @@ pub fn version_newer(latest: &str, current: &str) -> bool {
     }
 }
 
+/// Zeron Nova builds from its own source. Upstream's feed would offer and
+/// install upstream's app over it, so every release fetch fails before any
+/// network I/O. On in this crate's unit tests, which drive the feed locally.
+pub const UPSTREAM_RELEASES: bool = cfg!(test);
+
 /// Fetch the newest release metadata: `manifest.json`, falling back to
 /// `latest.txt` (version only, no checksums) for pre-manifest releases.
 pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
+    if !UPSTREAM_RELEASES {
+        bail!("Zeron Nova doesn't take upstream releases; rebuild it from source to update");
+    }
     let base = release_base(edge_url)?;
     let client = http_client()?;
     let manifest_url = format!("{base}/manifest.json");
@@ -1204,7 +1212,7 @@ impl Updater {
                 loop {
                     let forced = self.forced.swap(false, Ordering::SeqCst);
                     if forced || schedule.due(SystemTime::now()) {
-                        let ok = self.check_once().await;
+                        let ok = !UPSTREAM_RELEASES || self.check_once().await;
                         schedule.record(SystemTime::now(), ok);
                         if ok
                             && self.status_tx.borrow().update_available
