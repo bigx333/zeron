@@ -201,7 +201,7 @@ mod macos {
     }
 
     /// The production app's id: the default identity to adopt.
-    const DEFAULT_BUNDLE_ID: &str = "sh.zeron.app";
+    const DEFAULT_BUNDLE_ID: &str = "sh.zeron.app.nova";
 
     pub(super) static APP_BUNDLE_ID: OnceLock<String> = OnceLock::new();
 
@@ -444,7 +444,7 @@ fn post_impl(title: &str, body: &str, _target: Option<&str>) {
         // `--` ends option parsing: session titles are model-generated, so a
         // `-`-leading one must land as the summary, not as a flag.
         let result = std::process::Command::new("notify-send")
-            .args(["--app-name=Zeron", "--", &title, &body])
+            .args(["--app-name=Zeron Nova", "--", &title, &body])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
