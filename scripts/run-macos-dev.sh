@@ -10,11 +10,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 DEV_ROOT="$ROOT/target/macos-dev"
-APP="$DEV_ROOT/Zeron Dev.app"
+DEV_PLIST="$ROOT/dist/macos/Info-dev.plist"
+APP="$DEV_ROOT/$(plutil -extract CFBundleName raw "$DEV_PLIST").app"
 CONTENTS="$APP/Contents"
 DATA_DIR="${ZERON_DEV_DATA_DIR:-$DEV_ROOT/data}"
 IPC_PORT="${ZERON_DEV_IPC_PORT:-49777}"
-BUNDLE_ID="${ZERON_DEV_BUNDLE_ID:-sh.zeron.app.dev}"
+BUNDLE_ID="${ZERON_DEV_BUNDLE_ID:-$(plutil -extract CFBundleIdentifier raw "$DEV_PLIST")}"
 
 if pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
   echo "Zeron Dev is already running. Quit it before rebuilding the signed bundle." >&2
