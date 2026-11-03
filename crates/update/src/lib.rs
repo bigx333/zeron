@@ -553,7 +553,7 @@ fn detect_install_from_for_os(exe: &Path, home: Option<&Path>, os: &str) -> Inst
     }
     if let Some(home) = home {
         // `current_exe` resolves the `current` symlink to the versioned dir.
-        let app_root = home.join(".zeron").join("app");
+        let app_root = home.join(zeron_nova::DATA_DIR).join("app");
         if exe.starts_with(&app_root) {
             return InstallKind::Managed { app_root };
         }
@@ -817,7 +817,7 @@ pub fn running_as_installed_service() -> bool {
         return true;
     }
     if cfg!(target_os = "macos") {
-        std::env::var("XPC_SERVICE_NAME").is_ok_and(|label| label == "sh.zeron.app")
+        std::env::var("XPC_SERVICE_NAME").is_ok_and(|label| label == zeron_nova::BUNDLE_ID)
     } else if cfg!(target_os = "linux") {
         std::fs::read_to_string("/proc/self/cgroup")
             .is_ok_and(|cgroups| in_zeron_service_cgroup(&cgroups))
@@ -830,7 +830,7 @@ fn in_zeron_service_cgroup(cgroups: &str) -> bool {
     cgroups
         .lines()
         .filter_map(|line| line.rsplit(':').next())
-        .any(|path| path.split('/').any(|part| part == "zeron.service"))
+        .any(|path| path.split('/').any(|part| part == zeron_nova::SYSTEMD_UNIT))
 }
 
 /// Restart the installed engine service (the same units `zeron daemon` and the
@@ -847,12 +847,16 @@ pub fn restart_service() -> anyhow::Result<()> {
         let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
         run(
             "launchctl",
-            &["kickstart", "-k", &format!("gui/{uid}/sh.zeron.app")],
+            &[
+                "kickstart",
+                "-k",
+                &format!("gui/{uid}/{}", zeron_nova::BUNDLE_ID),
+            ],
         )
     } else {
         run(
             "systemctl",
-            &["--user", "--no-block", "restart", "zeron.service"],
+            &["--user", "--no-block", "restart", zeron_nova::SYSTEMD_UNIT],
         )
     }
 }
@@ -1681,12 +1685,12 @@ mod tests {
     fn install_kind_detection() {
         assert_eq!(
             detect_install_from_for_os(
-                Path::new("/home/u/.zeron/app/0.1.1/zeron"),
+                Path::new("/home/u/.zeron-nova/app/0.1.1/zeron"),
                 Some(Path::new("/home/u")),
                 "linux",
             ),
             InstallKind::Managed {
-                app_root: PathBuf::from("/home/u/.zeron/app")
+                app_root: PathBuf::from("/home/u/.zeron-nova/app")
             }
         );
         assert_eq!(
@@ -1887,16 +1891,16 @@ mod tests {
     #[test]
     fn systemd_service_cgroup_is_recognized() {
         assert!(in_zeron_service_cgroup(
-            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/zeron.service\n"
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/zeron-nova.service\n"
         ));
         assert!(in_zeron_service_cgroup(
-            "12:pids:/user.slice/user@1000.service/zeron.service\n1:name=systemd:/x\n"
+            "12:pids:/user.slice/user@1000.service/zeron-nova.service\n1:name=systemd:/x\n"
         ));
         assert!(!in_zeron_service_cgroup(
             "0::/user.slice/user-1000.slice/session-3.scope\n"
         ));
         assert!(!in_zeron_service_cgroup(
-            "0::/user.slice/user@1000.service/app.slice/zeron.service.d\n"
+            "0::/user.slice/user@1000.service/app.slice/zeron-nova.service.d\n"
         ));
     }
 

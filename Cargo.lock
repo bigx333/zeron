@@ -13586,6 +13586,7 @@ dependencies = [
  "zeron-engine",
  "zeron-mcp",
  "zeron-notify",
+ "zeron-nova",
  "zeron-rpc",
  "zeron-ui",
  "zeron-update",
@@ -13689,6 +13690,7 @@ dependencies = [
  "zeron-harness",
  "zeron-mcp",
  "zeron-notify",
+ "zeron-nova",
  "zeron-preview",
  "zeron-proto",
  "zeron-rpc",
@@ -13724,6 +13726,7 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
+ "zeron-nova",
  "zeron-proto",
  "zeron-voice-media",
  "zip",
@@ -13752,6 +13755,7 @@ dependencies = [
  "tracing",
  "uuid",
  "zeron-doc",
+ "zeron-nova",
  "zeron-proto",
  "zeron-rpc",
  "zeron-visual",
@@ -13797,7 +13801,12 @@ version = "0.2.131"
 dependencies = [
  "objc",
  "tracing",
+ "zeron-nova",
 ]
+
+[[package]]
+name = "zeron-nova"
+version = "0.2.131"
 
 [[package]]
 name = "zeron-orb"
@@ -14046,6 +14055,7 @@ dependencies = [
  "zeron-harness",
  "zeron-markdown",
  "zeron-notify",
+ "zeron-nova",
  "zeron-orb",
  "zeron-proto",
  "zeron-rpc",
@@ -14075,6 +14085,7 @@ dependencies = [
  "tokio",
  "tracing",
  "windows-sys 0.61.2",
+ "zeron-nova",
 ]
 
 [[package]]

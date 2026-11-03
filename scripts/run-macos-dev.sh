@@ -14,7 +14,7 @@ DEV_PLIST="$ROOT/dist/macos/Info-dev.plist"
 APP="$DEV_ROOT/$(plutil -extract CFBundleName raw "$DEV_PLIST").app"
 CONTENTS="$APP/Contents"
 DATA_DIR="${ZERON_DEV_DATA_DIR:-$DEV_ROOT/data}"
-IPC_PORT="${ZERON_DEV_IPC_PORT:-49777}"
+IPC_PORT="${ZERON_DEV_IPC_PORT:-49778}"
 BUNDLE_ID="${ZERON_DEV_BUNDLE_ID:-$(plutil -extract CFBundleIdentifier raw "$DEV_PLIST")}"
 
 if pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then

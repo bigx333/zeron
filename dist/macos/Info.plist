@@ -28,10 +28,10 @@
     <array>
         <dict>
             <key>CFBundleURLName</key>
-            <string>sh.zeron.app.conversation</string>
+            <string>sh.zeron.app.nova.conversation</string>
             <key>CFBundleURLSchemes</key>
             <array>
-                <string>zeron</string>
+                <string>zeron-nova</string>
             </array>
         </dict>
     </array>

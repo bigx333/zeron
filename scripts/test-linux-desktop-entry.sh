@@ -20,7 +20,9 @@ mkdir -p "$WORK/site/releases" "$WORK/pkg/$PKG" "$WORK/shim"
 printf '#!/bin/sh\nexit 0\n' >"$WORK/pkg/$PKG/zeron"
 chmod 755 "$WORK/pkg/$PKG/zeron"
 cp "$ROOT/dist/zeron.desktop" "$WORK/pkg/$PKG/zeron.desktop"
+cp "$ROOT/dist/zeron.desktop" "$WORK/pkg/$PKG/zeron-nova.desktop"
 printf 'not-really-a-png' >"$WORK/pkg/$PKG/zeron.png"
+printf 'not-really-a-png' >"$WORK/pkg/$PKG/zeron-nova.png"
 echo "$VERSION" >"$WORK/site/releases/latest.txt"
 tar -czf "$WORK/site/releases/$PKG.tar.gz" -C "$WORK/pkg" "$PKG"
 printf '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) exec /usr/bin/uname "$@" ;; esac\n' >"$WORK/shim/uname"
@@ -31,10 +33,11 @@ sed -n "/<<'INSTALL'/,/^INSTALL\$/p" "$ROOT/scripts/package-linux.sh" | sed '1d;
   | sed "s/__VERSION__/$VERSION/" >"$WORK/pkg/$PKG/install.sh"
 chmod 755 "$WORK/pkg/$PKG/install.sh"
 
-# The two copies of install_desktop_entry must stay identical.
+# The two copies of install_desktop_entry must stay identical, apart from
+# Nova's own file names.
 fn_body() { sed -n '/^install_desktop_entry() {$/,/^}$/p' "$1"; }
 [ -n "$(fn_body "$ROOT/edge/src/install.sh")" ] || fail "install_desktop_entry not found"
-[ "$(fn_body "$ROOT/edge/src/install.sh")" = "$(fn_body "$ROOT/scripts/package-linux.sh")" ] \
+[ "$(fn_body "$ROOT/edge/src/install.sh")" = "$(fn_body "$ROOT/scripts/package-linux.sh" | sed 's/zeron-nova\./zeron./g')" ] \
   || fail "install_desktop_entry differs between edge/src/install.sh and scripts/package-linux.sh"
 
 # run_curl HOME [ENV=VALUE ...] / run_tarball HOME [ENV=VALUE ...]
@@ -58,13 +61,13 @@ run_tarball() {
 
 # check HOME DATA_HOME
 check() {
-  local home="$1" data="$2" entry="$2/applications/zeron.desktop"
+  local home="$1" data="$2" entry="$2/applications/$name.desktop"
   [ -f "$entry" ] || fail "missing $entry"
-  [ -f "$data/icons/hicolor/1024x1024/apps/zeron.png" ] || fail "missing hicolor icon"
+  [ -f "$data/icons/hicolor/1024x1024/apps/$name.png" ] || fail "missing hicolor icon"
   # `$(...)` strips nothing needed here: paths in these tests have no newlines.
-  grep -qxF "TryExec=$home/.zeron/app/current/zeron" "$entry" || fail "TryExec: $(grep '^TryExec' "$entry")"
-  grep -qxF "Icon=$home/.zeron/app/current/zeron.png" "$entry" || fail "Icon: $(grep '^Icon' "$entry")"
-  grep -qxF "StartupWMClass=zeron" "$entry" || fail "StartupWMClass changed"
+  grep -qxF "TryExec=$home/$dir/app/current/zeron" "$entry" || fail "TryExec: $(grep '^TryExec' "$entry")"
+  grep -qxF "Icon=$home/$dir/app/current/$name.png" "$entry" || fail "Icon: $(grep '^Icon' "$entry")"
+  grep -qxF "StartupWMClass=zeron-nova" "$entry" || fail "StartupWMClass changed"
   [ "$(grep -c '^\[Desktop Entry\]' "$entry")" = 1 ] || fail "duplicated entry"
   [ "$(grep -c '^Exec=' "$entry")" = 1 ] || fail "Exec lines"
   [ -z "$(find "$data" -name '.zeron*')" ] || fail "temp files left behind"
@@ -75,19 +78,21 @@ check() {
   fi
 }
 
+# The curl installer is upstream's; the tarball's is Nova's.
 for installer in curl tarball; do
   run() { "run_$installer" "$@"; }
+  if [ "$installer" = curl ]; then name=zeron dir=.zeron; else name=zeron-nova dir=.zeron-nova; fi
 
   # Default XDG location, then a re-run (how updates are installed) is stable.
   home="$WORK/$installer-a/home"; mkdir -p "$home"
   run "$home"
   check "$home" "$home/.local/share"
-  grep -qxF "Exec=$home/.zeron/app/current/zeron %u" "$home/.local/share/applications/zeron.desktop" \
+  grep -qxF "Exec=$home/$dir/app/current/zeron %u" "$home/.local/share/applications/$name.desktop" \
     || fail "$installer: Exec line"
-  before="$(cat "$home/.local/share/applications/zeron.desktop")"
+  before="$(cat "$home/.local/share/applications/$name.desktop")"
   run "$home"
   check "$home" "$home/.local/share"
-  [ "$before" = "$(cat "$home/.local/share/applications/zeron.desktop")" ] || fail "$installer: re-run changed the entry"
+  [ "$before" = "$(cat "$home/.local/share/applications/$name.desktop")" ] || fail "$installer: re-run changed the entry"
 
   # XDG_DATA_HOME wins when absolute; a relative value is ignored per the spec.
   home="$WORK/$installer-b/home"; mkdir -p "$home"
@@ -104,8 +109,8 @@ for installer in curl tarball; do
   check "$home" "$home/.local/share"
   # Spec: quote the argument, `\` before " and $ (doubled again for the file's
   # string escaping), and `%%` for a literal `%`.
-  want="Exec=\"$WORK/$installer-d/"'h o\\$me\\"x%%y'"/.zeron/app/current/zeron\" %u"
-  grep -qxF "$want" "$home/.local/share/applications/zeron.desktop" \
-    || fail "$installer: Exec quoting: $(grep '^Exec=' "$home/.local/share/applications/zeron.desktop")"
+  want="Exec=\"$WORK/$installer-d/"'h o\\$me\\"x%%y'"/$dir/app/current/zeron\" %u"
+  grep -qxF "$want" "$home/.local/share/applications/$name.desktop" \
+    || fail "$installer: Exec quoting: $(grep '^Exec=' "$home/.local/share/applications/$name.desktop")"
   echo "ok: $installer installer"
 done

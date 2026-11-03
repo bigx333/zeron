@@ -20,6 +20,7 @@ name = "zeron-engine"
 path = "src/bin/zeron-engine.rs"
 
 [dependencies]
+zeron-nova.workspace = true
 zeron-engine.workspace = true
 zeron-rpc.workspace = true
 zeron-ui.workspace = true

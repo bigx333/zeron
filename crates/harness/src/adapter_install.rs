@@ -90,17 +90,17 @@ fn adapters_root_with(
     }
     if platform == crate::executable::Platform::Windows {
         value("LOCALAPPDATA")
-            .map(|dir| dir.join("Zeron").join("adapters"))
+            .map(|dir| dir.join(zeron_nova::WINDOWS_DATA_DIR).join("adapters"))
             .or_else(|| {
                 value("USERPROFILE").map(|home| {
                     home.join("AppData")
                         .join("Local")
-                        .join("Zeron")
+                        .join(zeron_nova::WINDOWS_DATA_DIR)
                         .join("adapters")
                 })
             })
     } else {
-        value("HOME").map(|home| home.join(".zeron").join("adapters"))
+        value("HOME").map(|home| home.join(zeron_nova::DATA_DIR).join("adapters"))
     }
 }
 
@@ -796,7 +796,7 @@ mod tests {
                 &env(&[("LOCALAPPDATA", local.clone().into_os_string())]),
                 crate::executable::Platform::Windows,
             ),
-            Some(local.join("Zeron").join("adapters"))
+            Some(local.join("Zeron Nova").join("adapters"))
         );
         assert_eq!(
             adapters_root_with(
@@ -807,7 +807,7 @@ mod tests {
                 profile
                     .join("AppData")
                     .join("Local")
-                    .join("Zeron")
+                    .join("Zeron Nova")
                     .join("adapters")
             )
         );

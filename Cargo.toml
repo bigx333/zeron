@@ -31,6 +31,7 @@ members = [
     "crates/visual-gpu",
     "crates/zatex",
     "apps/zeron",
+    "crates/nova",
 ]
 
 [workspace.package]
@@ -67,6 +68,7 @@ zeron-text = { path = "crates/text" }
 zatex = { path = "crates/zatex" }
 zeron-visual = { path = "crates/visual" }
 zeron-visual-gpu = { path = "crates/visual-gpu" }
+zeron-nova = { path = "crates/nova" }
 
 # CRDT
 loro = "1.17"
