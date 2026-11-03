@@ -1823,13 +1823,13 @@ async fn run_session(session: Session) {
                 Some(Incoming::Notification { method, params }) => {
                 // The server withdrew one of its requests, because it was
                 // answered elsewhere or its turn ended. Drop the question still
-                // waiting on it. This runs before thread routing, because a
-                // child thread's requests come through here too.
-                if method == "serverRequest/resolved" {
-                    if let Some(id) = params.get("requestId").filter(|id| id.is_string() || id.is_number()) {
-                        input_tasks.cancel(&id.to_string());
-                    }
-                    continue;
+                // waiting on it, then route the notification as before. This
+                // runs before thread routing, because a child thread's
+                // requests come through here too.
+                if method == "serverRequest/resolved"
+                    && let Some(id) = params.get("requestId").filter(|id| id.is_string() || id.is_number())
+                {
+                    input_tasks.cancel(&id.to_string());
                 }
                 // Foreign-thread traffic FIRST: a child thread's turn/thread
                 // bookkeeping must never reach the parent turn router below
