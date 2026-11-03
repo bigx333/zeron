@@ -93,4 +93,5 @@ changes touch.
 <!-- ledger:start -->
 | Feature | PR | Nova-only files | Upstream hook files | Notes |
 | --- | --- | --- | --- | --- |
+| Registry row clocks; revive archived chat on mobile send | #26 | none | `crates/doc/src/registry.rs`, `crates/client/src/client.rs`, `crates/client/src/session/mod.rs` | Writes observe the row's received clock; the clock stays ahead of every pending op. `revive_on_send` is where un-snooze goes later. |
 <!-- ledger:end -->
