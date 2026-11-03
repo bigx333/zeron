@@ -93,4 +93,5 @@ changes touch.
 <!-- ledger:start -->
 | Feature | PR | Nova-only files | Upstream hook files | Notes |
 | --- | --- | --- | --- | --- |
+| Zeron skills: `~/.zeron/skills` and `<project>/.zeron/skills` load natively in every harness | #PR | `crates/harness/src/skills/zeron.rs`, `crates/harness/tests/zeron_skills.rs` | `crates/harness/src/skills.rs`, `crates/harness/src/acp/mod.rs`, `crates/harness/src/claude/mod.rs`, `crates/harness/src/codex/mod.rs`, `crates/harness/src/cursor/mod.rs`, `crates/harness/src/opencode/mod.rs`, `crates/harness/src/pi/mod.rs` | Claude via a session `zeron` plugin (`--plugin-dir`, `/zeron:<name>`), Codex via `skills/extraRoots/set`, Pi via `--skill`, OpenCode via inline `skills` paths, ACP agents (fx included) and Cursor via a first-prompt skills list. Muse is not hooked. `skills/zeron.rs` is a child module of `skills.rs` and uses its private scanner. |
 <!-- ledger:end -->

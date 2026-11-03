@@ -281,6 +281,9 @@ impl CodexHarness {
                 )
                 .await?;
             client.notify("initialized", None);
+            if let Some(cwd) = cwd {
+                crate::skills::zeron::codex_set_roots(&client, cwd).await;
+            }
             let params = cwd
                 .map(|cwd| json!({ "cwds": [cwd], "forceReload": true }))
                 .unwrap_or_else(|| json!({}));
@@ -1528,6 +1531,9 @@ async fn run_session(session: Session) {
         return;
     }
     client.notify("initialized", None);
+    if !title_only && !request.cwd.is_empty() {
+        crate::skills::zeron::codex_set_roots(&client, std::path::Path::new(&request.cwd)).await;
+    }
 
     // ---- thread + first turn (interruptible) ------------------------------
     let setup = async {

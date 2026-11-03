@@ -4571,7 +4571,11 @@ async fn run_session(session: Session) {
     // The prompt in flight (re-sent by a preempt when the agent drops an
     // unstarted cancelled prompt).
     let mut current_prompt = PromptInput::new(
-        prompt_transform(request.reasoning, &request.prompt),
+        crate::skills::zeron::with_instructions(
+            &request.cwd,
+            request.resume.as_deref() == Some(session_id.as_str()),
+            prompt_transform(request.reasoning, &request.prompt),
+        ),
         &request.attachments,
         inline_images,
     )

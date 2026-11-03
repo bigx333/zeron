@@ -490,6 +490,11 @@ impl ClaudeHarness {
                 cmd.arg("--disallowedTools=Agent,Task,Workflow");
             }
         }
+        if !title_only && !request.cwd.is_empty() {
+            cmd.args(crate::skills::zeron::claude_args(std::path::Path::new(
+                &request.cwd,
+            )));
+        }
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }
@@ -563,6 +568,7 @@ impl ClaudeHarness {
         let mut cmd = Command::new(&exe);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
+            cmd.args(crate::skills::zeron::claude_args(cwd));
         }
         crate::process::owned::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
@@ -851,7 +857,7 @@ impl Harness for ClaudeHarness {
         // The native advertised catalog controls availability (including plugin
         // enablement and skillOverrides). Shared Agent Skills can use file delivery.
         Ok(Some(
-            skills
+            crate::skills::zeron::bind_claude_commands(skills, &commands, self.id())
                 .into_iter()
                 .filter_map(|mut skill| {
                     if crate::skills::is_shared_skill(&skill.path) {
