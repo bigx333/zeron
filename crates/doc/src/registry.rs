@@ -88,6 +88,26 @@ impl HlcClock {
         }
         encode_hlc(self.last_ms, self.counter, device)
     }
+
+    /// The HLC receive rule: the next stamp lands after `clock`.
+    fn observe(&mut self, clock: &str) {
+        let mut parts = clock.splitn(3, '-');
+        if let (Some(Ok(ms)), Some(Ok(counter))) = (
+            parts.next().map(str::parse::<i64>),
+            parts.next().map(str::parse::<u32>),
+        ) && (ms, counter) > (self.last_ms, self.counter)
+        {
+            self.last_ms = ms;
+            self.counter = counter;
+        }
+    }
+
+    fn observe_op(&mut self, op: &RowOp) {
+        self.observe(&op.hlc);
+        for clock in op.clocks.iter().flat_map(BTreeMap::values) {
+            self.observe(clock);
+        }
+    }
 }
 
 // ── rows and ops (wire-compatible with edge/src/registry-core.ts) ───────────
@@ -616,6 +636,10 @@ impl RegistryDoc {
         doc.clock = state.clock;
         doc.local_writes = state.local_writes;
         doc.pending = state.pending;
+        // Snapshots saved before `enqueue_ops` observed its ops.
+        for op in doc.pending.iter().flat_map(|batch| &batch.ops) {
+            doc.clock.observe_op(op);
+        }
         for row in state.rows {
             doc.authoritative
                 .entry(row.kind.clone())
@@ -789,6 +813,10 @@ impl RegistryDoc {
         if ops.is_empty() {
             return;
         }
+        // Re-seeds and migration carry other devices' clocks.
+        for op in &ops {
+            self.clock.observe_op(op);
+        }
         if self.local_only {
             self.generation += 1;
             self.local_writes = true;
@@ -952,6 +980,7 @@ impl RegistryDoc {
     }
 
     fn write(&mut self, kind: &str, id: &str, op: OpKind, set: BTreeMap<String, Value>) {
+        self.observe_received_row(kind, id);
         let hlc = self.next_hlc();
         self.enqueue_ops(vec![RowOp {
             kind: kind.to_string(),
@@ -963,7 +992,25 @@ impl RegistryDoc {
         }]);
     }
 
+    /// Stamp after the row's newest received clock, tombstone included: a
+    /// writer whose wall clock trails the row's last writer would otherwise
+    /// lose last-writer-wins silently. `enqueue_ops` keeps `clock` ahead of
+    /// every pending op, so the overlay isn't scanned.
+    fn observe_received_row(&mut self, kind: &str, id: &str) {
+        if let Some(clock) = self
+            .authoritative
+            .get(kind)
+            .and_then(|rows| rows.get(id))
+            .and_then(RegistryRow::max_clock)
+        {
+            self.clock.observe(clock);
+        }
+    }
+
     fn delete_row_ops(&mut self, keys: &[(&str, &str)]) {
+        for (kind, id) in keys {
+            self.observe_received_row(kind, id);
+        }
         let hlc = self.next_hlc();
         let ops = keys
             .iter()

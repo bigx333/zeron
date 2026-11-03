@@ -201,6 +201,8 @@ fn sidebar_writes_reorder_the_front_page() {
     client.archive_session("chat-cjk").unwrap();
     assert!(ids(&client.workspace().archived).contains(&"chat-cjk"));
     client.unarchive_session("chat-cjk").unwrap();
+    assert!(!ids(&client.workspace().archived).contains(&"chat-cjk"));
+    assert!(ids(&client.workspace().front.recent).contains(&"chat-cjk"));
     client.rename_session("chat-cjk", "Renamed").unwrap();
     assert_eq!(
         client.workspace().session("chat-cjk").unwrap().title,
@@ -275,6 +277,22 @@ fn send_streams_a_reply_and_adopts_the_echo() {
     });
     let row = client.workspace().session("chat-home").unwrap().clone();
     assert_eq!(row.preview.as_deref(), Some("| Stage | Per token |"));
+}
+
+#[test]
+fn sending_revives_an_archived_chat() {
+    let (client, _dir) = demo(fast());
+    let session = client.open_session("chat-oklch").unwrap();
+    assert!(ids(&client.workspace().archived).contains(&"chat-oklch"));
+    session.send(SendRequest::text("back again")).unwrap();
+    assert!(!ids(&client.workspace().archived).contains(&"chat-oklch"));
+
+    // A direct queue row counts too; an interrupt does not.
+    client.archive_session("chat-oklch").unwrap();
+    session.interrupt().unwrap();
+    assert!(ids(&client.workspace().archived).contains(&"chat-oklch"));
+    session.enqueue("later", Vec::new(), true).unwrap();
+    assert!(!ids(&client.workspace().archived).contains(&"chat-oklch"));
 }
 
 #[test]
