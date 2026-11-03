@@ -1815,11 +1815,22 @@ async fn run_session(session: Session) {
     // [`crate::shutdown_agent`]).
     #[cfg_attr(not(unix), allow(unused_mut))]
     let mut torn_down: Vec<crate::process::Tracked> = Vec::new();
+    let mut input_tasks = crate::input_tasks::InputTasks::default();
 
     'main: loop {
         tokio::select! {
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
+                // The server withdrew one of its requests, because it was
+                // answered elsewhere or its turn ended. Drop the question still
+                // waiting on it. This runs before thread routing, because a
+                // child thread's requests come through here too.
+                if method == "serverRequest/resolved" {
+                    if let Some(id) = params.get("requestId").filter(|id| id.is_string() || id.is_number()) {
+                        input_tasks.cancel(&id.to_string());
+                    }
+                    continue;
+                }
                 // Foreign-thread traffic FIRST: a child thread's turn/thread
                 // bookkeeping must never reach the parent turn router below
                 // (a child's turn/completed would settle the PARENT turn).
@@ -2270,6 +2281,7 @@ async fn run_session(session: Session) {
                         run_access(&live),
                         &request_input,
                         &request_slots,
+                        &mut input_tasks,
                     );
                 }
 
@@ -2489,6 +2501,8 @@ async fn run_session(session: Session) {
             _ = event_tx.closed() => break 'main,
         }
     }
+
+    drop(input_tasks);
 
     // Terminal bookkeeping: never end the stream without a Done unless the
     // consumer already hung up.
@@ -2772,7 +2786,9 @@ fn approval_action(method: &str) -> crate::approval::Action {
 /// keeps flowing), a refusal declining. MCP elicitations are asked or
 /// declined. Anything else is rejected as unsupported so the server never
 /// wedges awaiting a reply. At most [`MAX_PENDING_SERVER_REQUESTS`] wait on
-/// a person at once; the rest are refused as overloaded.
+/// a person at once; the rest are refused as overloaded. Each wait is owned
+/// by `input_tasks` under its wire id, so `serverRequest/resolved` drops it.
+#[allow(clippy::too_many_arguments)]
 fn handle_server_request(
     client: &RpcClient,
     id: Value,
@@ -2781,6 +2797,7 @@ fn handle_server_request(
     access: AccessMode,
     request_input: &Arc<RequestInputFn>,
     slots: &Arc<tokio::sync::Semaphore>,
+    input_tasks: &mut crate::input_tasks::InputTasks,
 ) {
     let slot = || {
         let permit = Arc::clone(slots).try_acquire_owned().ok();
@@ -2805,7 +2822,7 @@ fn handle_server_request(
         let Some(permit) = slot() else { return };
         let client = client.clone();
         let request_input = Arc::clone(request_input);
-        tokio::spawn(async move {
+        input_tasks.spawn(id.to_string(), async move {
             let _permit = permit;
             let asked: Vec<UserInputQuestion> = questions.iter().map(|(_, q)| q.clone()).collect();
             let answers = (request_input)(asked).await.unwrap_or_default();
@@ -2838,7 +2855,7 @@ fn handle_server_request(
         let Some(permit) = slot() else { return };
         let client = client.clone();
         let request_input = Arc::clone(request_input);
-        tokio::spawn(async move {
+        input_tasks.spawn(id.to_string(), async move {
             let _permit = permit;
             let answers = (request_input)(form.questions.clone())
                 .await
@@ -2879,7 +2896,7 @@ fn handle_server_request(
     let params = params.clone();
     let client = client.clone();
     let request_input = Arc::clone(request_input);
-    tokio::spawn(async move {
+    input_tasks.spawn(id.to_string(), async move {
         let _permit = permit;
         // The engine's input bridge owns the `InputRequested`/`InputResolved`
         // lifecycle (it mints the request id the resolver is parked under);
