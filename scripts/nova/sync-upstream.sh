@@ -4,6 +4,7 @@
 #
 #   scripts/nova/sync-upstream.sh [--dry-run]
 set -euo pipefail
+export LC_ALL=C
 
 REPO=bigx333/zeron
 BASE=origin/nova
@@ -18,7 +19,14 @@ case "${1:-}" in
 esac
 
 cd "$(git rev-parse --show-toplevel)"
-git fetch --quiet --multiple origin upstream
+
+origin_push=$(git remote get-url --push origin)
+if ! [[ "$origin_push" =~ (^|[@/:])github\.com[:/]$REPO(\.git)?/?$ ]]; then
+  echo "origin pushes to $origin_push, not $REPO. Refusing to sync." >&2
+  exit 1
+fi
+
+git fetch --quiet --no-tags --multiple origin upstream
 
 ahead=$(git rev-list --count "$BASE..$UPSTREAM")
 if [[ "$ahead" == 0 ]]; then
@@ -73,41 +81,53 @@ if [[ "$dry_run" == 1 ]]; then
   exit 0
 fi
 
-existing=$(gh pr list --repo "$REPO" --head "$branch" --state all \
-  --json url,state --jq '.[0] | select(.) | "\(.url) (\(.state | ascii_downcase))"')
+existing=$(gh pr list --repo "$REPO" --head "$branch" --state open --json url --jq '.[0].url // empty')
 if [[ -n "$existing" ]]; then
-  echo "PR for $branch already exists: $existing"
+  echo "PR for $branch already open: $existing"
   exit 0
 fi
 
-if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
-  echo "A merge is in progress. Resolve it, commit, then rerun." >&2
-  git diff --name-only --diff-filter=U >&2
-  exit 1
-fi
-if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
-  echo "Working tree has uncommitted changes. Commit or set them aside first." >&2
-  exit 1
-fi
-
-if git rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
-  git switch --quiet "$branch"
-else
-  git switch --quiet --no-track -c "$branch" "$BASE"
-fi
-
-if ! git merge-base --is-ancestor "$UPSTREAM" HEAD; then
-  if ! git -c rerere.enabled=true -c rerere.autoupdate=true \
-    merge --no-ff --no-edit -m "chore(nova): merge upstream main $sha" "$UPSTREAM"; then
-    echo >&2
-    echo "Merge stopped on conflicts in $branch. Conflicted files:" >&2
-    git diff --name-only --diff-filter=U >&2
-    echo "Resolve per NOVA.md, commit, then rerun to push and open the PR." >&2
-    exit 1
+# The merge runs in its own worktree so the caller's checkout never changes.
+# A conflicted merge stays there for the next run to pick up.
+wt="$(git rev-parse --path-format=absolute --git-common-dir)/nova-sync/upstream-$sha"
+git worktree prune
+if [[ ! -d "$wt" ]]; then
+  if git rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
+    git worktree add --quiet "$wt" "$branch"
+  else
+    git worktree add --quiet --no-track -b "$branch" "$wt" "$BASE"
   fi
 fi
 
+stop_unresolved() {
+  local unmerged
+  unmerged=$(git -C "$wt" diff --name-only --diff-filter=U)
+  echo >&2
+  if [[ -n "$unmerged" ]]; then
+    echo "Merge has conflicts in $wt. Conflicted files:" >&2
+    echo "$unmerged" >&2
+    echo "Resolve per NOVA.md, commit there, then rerun to push and open the PR." >&2
+  else
+    echo "rerere resolved all conflicts in $wt; review and commit there, then rerun." >&2
+  fi
+  exit 1
+}
+
+if git -C "$wt" rev-parse -q --verify MERGE_HEAD >/dev/null; then
+  stop_unresolved
+fi
+if [[ -n "$(git -C "$wt" status --porcelain --untracked-files=no)" ]]; then
+  echo "$wt has uncommitted changes. Commit or discard them, then rerun." >&2
+  exit 1
+fi
+
+if ! git -C "$wt" merge-base --is-ancestor "$UPSTREAM" HEAD; then
+  git -C "$wt" -c rerere.enabled=true -c rerere.autoupdate=true \
+    merge --no-ff --no-edit -m "chore(nova): merge upstream main $sha" "$UPSTREAM" || stop_unresolved
+fi
+
 git push --quiet --no-follow-tags -u origin "$branch"
+git worktree remove "$wt"
 
 body=$(
   cat <<EOF

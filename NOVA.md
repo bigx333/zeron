@@ -31,24 +31,37 @@ gitGraph
 
 ## Syncing upstream
 
-Remotes: `origin` is bigx333/zeron, `upstream` is zeronsh/zeron.
+Set up each clone once:
+
+```sh
+git remote add upstream https://github.com/zeronsh/zeron.git
+git remote set-url --push upstream DISABLED   # nothing can be pushed to zeronsh/zeron
+git config remote.upstream.tagOpt --no-tags   # upstream v* tags stay out of local refs
+git config rerere.enabled true                # reuse recorded conflict resolutions
+```
+
+`origin` must push to bigx333/zeron. The script refuses to run otherwise.
 
 ```sh
 scripts/nova/sync-upstream.sh --dry-run   # ahead count, commits, touched ledger hooks
 scripts/nova/sync-upstream.sh             # merge, push the sync branch, open the PR
 ```
 
-The script fetches both remotes. It exits 0 when `nova` already has upstream
-`main`, or when the sync PR for that upstream commit already exists. Otherwise
-it creates `sync/upstream-<shortsha>` from `origin/nova` and merges
-`upstream/main` with rerere on. On a clean merge it pushes the branch and opens
-the PR. The PR body lists the upstream commits and the ledger hook files they
-touch.
+The script fetches both remotes without tags. It exits 0 when `nova` already
+has upstream `main`, or when an open sync PR for that upstream commit exists. A
+closed sync PR does not block a new one. Otherwise it creates
+`sync/upstream-<shortsha>` from `origin/nova` and merges `upstream/main` with
+rerere on. The merge runs in a separate worktree at
+`.git/nova-sync/upstream-<shortsha>`, so your checkout stays on its branch. On a
+clean merge it pushes only the sync branch, without tags, opens the PR and
+removes the worktree. The PR body lists the upstream commits and the ledger hook
+files they touch.
 
-On conflict the script stops with the merge still in progress and lists the
-conflicted files. Resolve them, commit, and run the script again to push and
-open the PR. rerere records each resolution, so the same conflict resolves
-itself next time. Turn it on once per clone with `git config rerere.enabled true`.
+On conflict the script stops with the merge still in progress in that worktree
+and lists the conflicted files. Resolve them there, commit, and run the script
+again to push and open the PR. rerere records each resolution, so the same
+conflict resolves itself next time. When rerere resolves every conflict, the
+script still stops so you can review the result before you commit.
 
 `scripts/nova/test-sync-upstream.sh` runs the script against throwaway local
 repos with a stub `gh`.
