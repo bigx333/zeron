@@ -105,7 +105,26 @@ async fn run(harness: &impl Harness, req: RunRequest) -> Vec<AgentEvent> {
     .expect("run finished in time")
 }
 
-#[tokio::test]
+/// One test, so the process env is set before any other thread exists: no
+/// case reads the real home's `~/.zeron/skills` or writes under it.
+#[test]
+fn every_harness_loads_project_zeron_skills_at_launch() {
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: the only test in this binary, before its runtime starts threads.
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("ZERON_DATA_DIR", home.path().join("data"));
+    }
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(pi_launches_with_each_root_as_a_skill_nearest_first());
+    runtime.block_on(claude_launches_with_a_zeron_plugin_linking_the_skill(
+        home.path(),
+    ));
+    runtime.block_on(codex_sets_the_roots_after_initialized());
+    runtime.block_on(fx_lists_the_skills_in_each_fresh_sessions_first_prompt_only());
+    runtime.block_on(cursor_lists_the_skills_in_the_first_run_prompt());
+}
+
 async fn pi_launches_with_each_root_as_a_skill_nearest_first() {
     let project = project();
     let nested = project.repo.join("packages/web");
@@ -132,8 +151,7 @@ async fn pi_launches_with_each_root_as_a_skill_nearest_first() {
     assert!(nearest < project_root, "{argv}");
 }
 
-#[tokio::test]
-async fn claude_launches_with_a_zeron_plugin_linking_the_skill() {
+async fn claude_launches_with_a_zeron_plugin_linking_the_skill(home: &Path) {
     let project = project();
     let exe = argv_recorder(project.repo.parent().unwrap(), "claude");
     run(
@@ -148,6 +166,10 @@ async fn claude_launches_with_a_zeron_plugin_linking_the_skill() {
         .position(|line| *line == "--plugin-dir")
         .expect(&argv);
     let plugin = Path::new(lines[at + 1]);
+    assert!(
+        plugin.starts_with(home.join("data/claude-skills")),
+        "{argv}"
+    );
     let manifest = std::fs::read_to_string(plugin.join(".claude-plugin/plugin.json")).unwrap();
     assert!(manifest.contains(r#""name":"zeron""#), "{manifest}");
     assert_eq!(
@@ -156,7 +178,6 @@ async fn claude_launches_with_a_zeron_plugin_linking_the_skill() {
     );
 }
 
-#[tokio::test]
 async fn codex_sets_the_roots_after_initialized() {
     let project = project();
     let exe = executable(
@@ -204,7 +225,6 @@ for line in sys.stdin:
     );
 }
 
-#[tokio::test]
 async fn fx_lists_the_skills_in_each_fresh_sessions_first_prompt_only() {
     let project = project();
     let exe = executable(
@@ -274,7 +294,6 @@ for line in sys.stdin:
     );
 }
 
-#[tokio::test]
 async fn cursor_lists_the_skills_in_the_first_run_prompt() {
     let project = project();
     let exe = executable(

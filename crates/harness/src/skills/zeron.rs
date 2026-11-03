@@ -25,15 +25,9 @@ pub(crate) fn roots(cwd: &Path) -> Vec<PathBuf> {
 }
 
 pub(crate) fn roots_at(cwd: &Path, home: &Path) -> Vec<PathBuf> {
-    let mut scope = Vec::new();
-    for dir in cwd.ancestors() {
-        scope.push(dir);
-        if dir.join(".git").exists() || dir == home {
-            break;
-        }
-    }
+    let scope = project_scope(cwd, |dir| dir.join(".git").exists() || dir == home);
     let mut roots: Vec<PathBuf> = Vec::new();
-    for dir in std::iter::once(home).chain(scope.into_iter().rev()) {
+    for dir in std::iter::once(home).chain(scope) {
         let root = dir.join(DIR);
         if root.is_dir() && !roots.contains(&root) {
             roots.push(root);
@@ -42,12 +36,33 @@ pub(crate) fn roots_at(cwd: &Path, home: &Path) -> Vec<PathBuf> {
     roots
 }
 
-/// Folder skills under `roots`, keyed by name; the nearest root wins.
+/// From the nearest boundary (git root or home) down to `cwd`, outermost
+/// first. With no boundary above, only `cwd` itself, so `/` and `/tmp` never
+/// count.
+fn project_scope(cwd: &Path, boundary: impl Fn(&Path) -> bool) -> Vec<&Path> {
+    let mut scope = Vec::new();
+    for dir in cwd.ancestors() {
+        scope.push(dir);
+        if boundary(dir) {
+            scope.reverse();
+            return scope;
+        }
+    }
+    vec![cwd]
+}
+
+/// Folder skills under `roots`, keyed by name; the nearest root wins. Roots
+/// are scanned nearest first, so a huge global root cannot spend the shared
+/// entry budget before a project root is read.
 pub(crate) fn skills(roots: &[PathBuf]) -> Vec<Skill> {
     let mut found = BTreeMap::new();
     let mut remaining = MAX_DISCOVERY_ENTRIES;
-    for root in roots {
-        let _ = scan_root(root, "", HarnessId::ClaudeCode, &mut found, &mut remaining);
+    for root in roots.iter().rev() {
+        let mut scope = BTreeMap::new();
+        let _ = scan_root(root, "", HarnessId::ClaudeCode, &mut scope, &mut remaining);
+        for (name, skill) in scope {
+            found.entry(name).or_insert(skill);
+        }
     }
     found.into_values().collect()
 }
@@ -124,13 +139,84 @@ pub(crate) fn opencode_config(
 /// Claude Code loads extra skills only from plugins, so `--plugin-dir` names a
 /// session-only plugin whose `skills/` links each Zeron skill.
 pub(crate) fn claude_args(cwd: &Path) -> Vec<OsString> {
-    let base = std::env::temp_dir().join("zeron-claude-skills");
+    let Some(base) = plugin_base(&|key| std::env::var_os(key)) else {
+        return Vec::new();
+    };
     match claude_plugin(&roots(cwd), &base) {
         Ok(Some(plugin)) => vec!["--plugin-dir".into(), plugin.into_os_string()],
         Ok(None) => Vec::new(),
         Err(error) => {
             tracing::warn!(%error, "could not assemble the Zeron skills plugin");
             Vec::new()
+        }
+    }
+}
+
+/// A per-user directory beside the harness's other managed state (see
+/// `adapter_install::adapters_root`): `$ZERON_DATA_DIR/claude-skills`, else
+/// `%LOCALAPPDATA%\Zeron\claude-skills` on Windows or `~/.zeron/claude-skills`.
+/// Never the shared temp dir, where another user could plant a plugin.
+fn plugin_base(env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let value = |key| env(key).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(dir) = value("ZERON_DATA_DIR") {
+        return Some(dir.join("claude-skills"));
+    }
+    if cfg!(windows) {
+        value("LOCALAPPDATA")
+            .map(|dir| dir.join("Zeron"))
+            .or_else(|| value("USERPROFILE").map(|home| home.join("AppData/Local/Zeron")))
+            .map(|dir| dir.join("claude-skills"))
+    } else {
+        value("HOME").map(|home| home.join(".zeron/claude-skills"))
+    }
+}
+
+/// Create `base` private to this user, or refuse one another user could write.
+fn private_dir(base: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        if let Some(parent) = base.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::DirBuilder::new().mode(0o700).create(base) {
+            Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => return Err(error),
+            _ => {}
+        }
+        let meta = std::fs::symlink_metadata(base)?;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::geteuid() };
+        if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o022 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} must be a directory owned by this user and writable only by it",
+                    base.display()
+                ),
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(base)
+}
+
+/// Plugins unused this long are removed when another one is published.
+const PLUGIN_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+
+fn prune(base: &Path, keep: &Path) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age > PLUGIN_TTL));
+        if path != keep && stale {
+            // Removes the links, never the skill folders they point to.
+            let _ = std::fs::remove_dir_all(&path);
         }
     }
 }
@@ -164,12 +250,14 @@ pub(crate) fn claude_plugin(roots: &[PathBuf], base: &Path) -> std::io::Result<O
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
+    private_dir(base)?;
     let plugin = base.join(digest);
     let manifest = Path::new(".claude-plugin/plugin.json");
     if plugin.join(manifest).is_file() {
+        // Marks it in use, so pruning spares it.
+        let _ = filetime::set_file_mtime(&plugin, filetime::FileTime::now());
         return Ok(Some(plugin));
     }
-    std::fs::create_dir_all(base)?;
     let staging = base.join(format!(".{}", uuid::Uuid::new_v4()));
     let result = (|| {
         std::fs::create_dir_all(staging.join(".claude-plugin"))?;
@@ -198,6 +286,7 @@ pub(crate) fn claude_plugin(roots: &[PathBuf], base: &Path) -> std::io::Result<O
             result?;
         }
     }
+    prune(base, &plugin);
     Ok(Some(plugin))
 }
 
@@ -441,6 +530,120 @@ mod tests {
             .map(|s| s.command.as_ref().map(|c| c.name.as_str()))
             .collect();
         assert_eq!(names, [Some("zeron:deploy"), None, None]);
+    }
+
+    #[test]
+    fn the_plugin_lives_in_zerons_per_user_data_dir_never_the_temp_dir() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| OsString::from(v))
+            }
+        };
+        assert_eq!(
+            plugin_base(&env(&[("ZERON_DATA_DIR", "/data"), ("HOME", "/home/u")])),
+            Some(PathBuf::from("/data/claude-skills"))
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            plugin_base(&env(&[("HOME", "/home/u")])),
+            Some(PathBuf::from("/home/u/.zeron/claude-skills"))
+        );
+        assert_eq!(plugin_base(&env(&[])), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_plugin_dir_is_created_private_and_a_writable_one_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(DIR);
+        write(&root, "deploy/SKILL.md", "---\nname: deploy\n---\nBody");
+        let base = temp.path().join("data/claude-skills");
+        claude_plugin(std::slice::from_ref(&root), &base)
+            .unwrap()
+            .unwrap();
+        let mode = std::fs::metadata(&base).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+
+        let shared = temp.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let error = claude_plugin(std::slice::from_ref(&root), &shared).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read_dir(&shared).unwrap().count(),
+            0,
+            "nothing reused or written"
+        );
+
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&base, &link).unwrap();
+        assert!(
+            claude_plugin(&[root], &link).is_err(),
+            "a symlinked base is refused"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publishing_prunes_plugins_unused_for_a_month() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(DIR);
+        write(&root, "deploy/SKILL.md", "---\nname: deploy\n---\nBody");
+        let base = temp.path().join("plugins");
+        let old = base.join("old");
+        let recent = base.join("recent");
+        std::fs::create_dir(temp.path().join("plugins")).unwrap();
+        std::fs::set_permissions(
+            &base,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        std::fs::create_dir_all(old.join("skills")).unwrap();
+        std::os::unix::fs::symlink(root.join("deploy"), old.join("skills/deploy")).unwrap();
+        std::fs::create_dir_all(&recent).unwrap();
+        let month_ago = filetime::FileTime::from_unix_time(
+            filetime::FileTime::now().unix_seconds() - 31 * 24 * 60 * 60,
+            0,
+        );
+        filetime::set_file_mtime(&old, month_ago).unwrap();
+        claude_plugin(std::slice::from_ref(&root), &base)
+            .unwrap()
+            .unwrap();
+        assert!(!old.exists());
+        assert!(recent.exists());
+        assert!(
+            root.join("deploy/SKILL.md").is_file(),
+            "link targets survive"
+        );
+    }
+
+    #[test]
+    fn a_huge_global_root_cannot_hide_the_nearest_project_skill() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("home").join(DIR);
+        let project = temp.path().join("repo").join(DIR);
+        std::fs::create_dir_all(&global).unwrap();
+        for i in 0..MAX_DISCOVERY_ENTRIES {
+            std::fs::write(global.join(format!("filler-{i}.txt")), "").unwrap();
+        }
+        write(&project, "deploy/SKILL.md", "---\nname: deploy\n---\nBody");
+        let found = skills(&[global, project]);
+        assert!(found.iter().any(|s| s.name == "deploy"), "{found:?}");
+    }
+
+    #[test]
+    fn project_scope_stops_at_the_nearest_boundary_or_is_only_cwd() {
+        let cwd = Path::new("/srv/repo/packages/web");
+        let at_repo = |dir: &Path| dir == Path::new("/srv/repo");
+        assert_eq!(
+            project_scope(cwd, at_repo),
+            [Path::new("/srv/repo"), Path::new("/srv/repo/packages"), cwd]
+        );
+        assert_eq!(project_scope(cwd, |_| false), [cwd]);
     }
 
     #[test]
