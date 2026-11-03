@@ -93,4 +93,5 @@ changes touch.
 <!-- ledger:start -->
 | Feature | PR | Nova-only files | Upstream hook files | Notes |
 | --- | --- | --- | --- | --- |
+| Withdrawn approvals | #PR | `crates/harness/src/input_tasks.rs`, `crates/harness/tests/approval_cancellation.rs` | `crates/harness/src/lib.rs`, `crates/harness/src/claude/mod.rs`, `crates/harness/src/claude/wire.rs`, `crates/harness/src/claude/normalize.rs`, `crates/harness/src/codex/mod.rs`, `crates/harness/tests/fixtures/fake-claude.sh`, `crates/harness/tests/fixtures/fake-codex.sh` | Claude `control_cancel_request` and Codex `serverRequest/resolved` abort the `InputTasks` wait for that request id, and the engine's `tx.closed()` path emits `InputResolved`. Hooks: `Frame::ControlCancelRequest`, `input_tasks.spawn` in place of `tokio::spawn` for each input wait, and one `serverRequest/resolved` branch ahead of Codex child-thread routing. ACP `$/cancel_request` is not handled yet. |
 <!-- ledger:end -->
