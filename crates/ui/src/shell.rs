@@ -13168,7 +13168,10 @@ impl Shell {
                             .line_height(px(28.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text)
-                            .child(SharedString::from("Log in to Zeron Nova")),
+                            .child(SharedString::from(format!(
+                                "Log in to {}",
+                                crate::app_menus::APP_NAME
+                            ))),
                     )
                     .child(
                         div()

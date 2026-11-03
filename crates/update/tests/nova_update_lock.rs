@@ -56,3 +56,17 @@ async fn background_checker_never_connects() {
     assert_eq!(status.error, None);
     updater.shutdown().await;
 }
+
+#[tokio::test]
+async fn release_download_fails_without_connecting() {
+    let (listener, url) = local_edge().await;
+    let dest = std::env::temp_dir().join(format!("nova-lock-{}", std::process::id()));
+    let manifest = zeron_update::Manifest::default();
+    assert!(
+        zeron_update::download_release_file(&url, &manifest, "zeron.tar.gz", &dest)
+            .await
+            .is_err()
+    );
+    assert!(!accepted(&listener).await);
+    assert!(!dest.exists());
+}

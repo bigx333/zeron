@@ -160,7 +160,7 @@ fn app_key_bindings(macos: bool) -> Vec<KeyBinding> {
     bindings
 }
 
-const APP_NAME: &str = "Zeron Nova";
+pub(crate) const APP_NAME: &str = "Zeron Nova";
 
 fn is_check_for_updates(item: &MenuItem) -> bool {
     use gpui::Action as _;
