@@ -93,6 +93,8 @@ struct Inner {
     catalog: Catalog,
     stop: CancellationToken,
     started: AtomicBool,
+    /// Direct links pair over loopback only (see [`PreviewService::pair_over_loopback`]).
+    loopback_links: AtomicBool,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Sign-in callbacks peers may reach on this device (see [`login`]).
     callback_routes: CallbackRoutes,
@@ -195,6 +197,7 @@ impl PreviewService {
             catalog: Catalog::open(file, device_id, device_name)?,
             stop: CancellationToken::new(),
             started: AtomicBool::new(false),
+            loopback_links: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
             callback_routes: CallbackRoutes::notifying(signaling_wake.clone()),
             callback_tunnels: CallbackTunnels::default(),
@@ -202,6 +205,14 @@ impl PreviewService {
             peers: std::sync::OnceLock::new(),
             streams: StreamServices::default(),
         })))
+    }
+    /// Pair direct links over loopback only, without STUN — for tests that
+    /// run several devices on one host. ICE over every interface of a host
+    /// with many (container bridges) checks thousands of candidate pairs and
+    /// can't pair within [`Peers::connect`]'s timeout. Call before
+    /// [`Self::start`].
+    pub fn pair_over_loopback(&self) {
+        self.0.loopback_links.store(true, Ordering::SeqCst);
     }
     /// Serve stream ids starting with `prefix` from `handler` — to peers and
     /// to this device alike. Registering a prefix again replaces its handler.
@@ -303,11 +314,19 @@ impl PreviewService {
             self.0.streams.clone(),
         ));
         let local = mux::local(connector.clone(), self.0.stop.child_token());
-        let (peers, output) = Peers::new(
+        let (mut peers, output) = Peers::new(
             self.0.catalog.device_id().into(),
             connector,
             self.0.stop.child_token(),
         );
+        if self.0.loopback_links.load(Ordering::SeqCst) {
+            peers
+                .set_ice_servers(Vec::new())
+                .expect("peers not yet shared");
+            peers
+                .set_udp_addrs(vec!["127.0.0.1:0".into()])
+                .expect("peers not yet shared");
+        }
         let _ = self.0.peers.set(peers.clone());
         let router = proxy::Router {
             catalog: self.0.catalog.clone(),
