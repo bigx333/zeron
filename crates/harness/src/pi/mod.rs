@@ -157,6 +157,7 @@ impl PiHarness {
         crate::apply_run_env(&mut cmd, run_env);
         cmd.args(["--mode", "rpc", "--no-themes"])
             .args(args)
+            .args(crate::skills::zeron::pi_args(cwd))
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

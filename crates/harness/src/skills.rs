@@ -7,6 +7,8 @@ use std::{
 };
 use zeron_proto::{HarnessId, invocation::Skill};
 
+pub(crate) mod zeron;
+
 const MAX_DISCOVERY_ENTRIES: usize = 4096;
 
 /// Commands and skill metadata both need the provider's advertised catalog.
@@ -55,7 +57,7 @@ pub(crate) fn is_shared_skill(path: &str) -> bool {
             && dir
                 .parent()
                 .and_then(Path::file_name)
-                .is_some_and(|name| name == ".agents")
+                .is_some_and(|name| name == ".agents" || name == ".zeron")
     })
 }
 
@@ -128,8 +130,7 @@ fn project_dirs(harness: HarnessId) -> &'static [&'static str] {
 }
 
 fn discover_at(harness: HarnessId, cwd: &Path, home: &Path) -> Result<Vec<Skill>, HarnessError> {
-    let mut roots: Vec<(PathBuf, String)> = project_dirs(harness)
-        .iter()
+    let mut roots: Vec<(PathBuf, String)> = zeron::dirs(harness)
         .map(|dir| (home.join(dir), String::new()))
         .collect();
     match harness {
@@ -218,7 +219,7 @@ fn discover_at(harness: HarnessId, cwd: &Path, home: &Path) -> Result<Vec<Skill>
         }
     }
     for dir in ancestors.into_iter().rev() {
-        for suffix in project_dirs(harness) {
+        for suffix in zeron::dirs(harness) {
             roots.push((dir.join(suffix), String::new()));
         }
     }
@@ -289,7 +290,9 @@ fn scan_root(
             }
             let legacy_commands = root.file_name().is_some_and(|name| name == "commands");
             let flat = legacy_commands
-                || (matches!(harness, HarnessId::Opencode | HarnessId::Pi) && depth == 0);
+                || (matches!(harness, HarnessId::Opencode | HarnessId::Pi)
+                    && depth == 0
+                    && !zeron::is_root(root));
             if entry.file_name() != "SKILL.md"
                 && !(flat && path.extension().is_some_and(|ext| ext == "md"))
             {
