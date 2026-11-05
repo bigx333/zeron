@@ -5132,10 +5132,17 @@ mod tests {
         };
 
         assert!(!format!("{error:#}").is_empty());
+        // Once released, the port may go to any other process on the host;
+        // only this engine's server accepts the data dir's IPC token.
+        let token = std::fs::read_to_string(zeron_rpc::ipc_auth::token_path(dir.path()))
+            .expect("bootstrap served IPC before failing");
+        let attached = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{port}"), Some(token.trim())),
+        )
+        .await;
         assert!(
-            tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_err(),
+            !matches!(attached, Ok(Ok(_))),
             "failed bootstrap must release the IPC listener"
         );
     }
