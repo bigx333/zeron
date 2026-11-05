@@ -123,8 +123,8 @@ impl SessionDoc {
         if item.text.trim().is_empty() {
             return Err(DocError::Schema("queued message text required".into()));
         }
-        let queue = self.doc().get_movable_list("queue");
-        let map = queue.push_container(loro::LoroMap::new())?;
+        let _queue = self.lock_queue();
+        let map = insert_row(&self.doc().get_movable_list("queue"), usize::MAX)?;
         write_queued_map(&map, item)?;
         self.doc().commit();
         Ok(())
@@ -141,8 +141,8 @@ impl SessionDoc {
         if item.text.trim().is_empty() {
             return Err(DocError::Schema("queued message text required".into()));
         }
-        let queue = self.doc().get_movable_list("queue");
-        let map = queue.insert_container(index.min(queue.len()), loro::LoroMap::new())?;
+        let _queue = self.lock_queue();
+        let map = insert_row(&self.doc().get_movable_list("queue"), index)?;
         write_queued_map(&map, item)?;
         self.doc().commit();
         Ok(())
@@ -155,6 +155,7 @@ impl SessionDoc {
         if text.trim().is_empty() {
             return self.remove_queued(id);
         }
+        let _queue = self.lock_queue();
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -183,6 +184,7 @@ impl SessionDoc {
         id: &str,
         gate: Option<&QueueDeliveryGate>,
     ) -> Result<bool, DocError> {
+        let _queue = self.lock_queue();
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -232,6 +234,7 @@ impl SessionDoc {
         if replacement.is_some_and(|text| text.trim().is_empty()) {
             return self.remove_queued(id);
         }
+        let _queue = self.lock_queue();
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -266,6 +269,7 @@ impl SessionDoc {
     /// Move a row to `to` (clamped to the queue's bounds). `false` when the row
     /// is missing or already sits there.
     pub fn move_queued(&self, id: &str, to: usize) -> Result<bool, DocError> {
+        let _queue = self.lock_queue();
         let queue = self.doc().get_movable_list("queue");
         let Some(from) = index_of(&queue, id) else {
             return Ok(false);
@@ -281,6 +285,7 @@ impl SessionDoc {
 
     /// Drop a row. `false` when it was already gone (another device took it).
     pub fn remove_queued(&self, id: &str) -> Result<bool, DocError> {
+        let _queue = self.lock_queue();
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(false);
@@ -294,6 +299,7 @@ impl SessionDoc {
     /// `None` when it is already gone, which is the race we want: two devices
     /// popping the same row means exactly one of them gets it.
     pub fn take_queued(&self, id: &str) -> Result<Option<QueuedMessage>, DocError> {
+        let _queue = self.lock_queue();
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(None);
@@ -313,12 +319,30 @@ impl SessionDoc {
         Ok(item)
     }
 
+    fn lock_queue(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Remove and return the head — the host's turn-end flush.
     pub fn take_queue_head(&self) -> Result<Option<QueuedMessage>, DocError> {
         let Some(head) = self.read_queue()?.into_iter().next() else {
             return Ok(None);
         };
         self.take_queued(&head.id)
+    }
+}
+
+/// Insert an empty row at `index`, clamped to the queue's length. Loro reads
+/// the length before taking its transaction lock, so a row an import removes
+/// in between (another device took it) makes the position stale: clamp again.
+fn insert_row(queue: &loro::LoroMovableList, index: usize) -> Result<loro::LoroMap, DocError> {
+    loop {
+        match queue.insert_container(index.min(queue.len()), loro::LoroMap::new()) {
+            Err(loro::LoroError::OutOfBound { .. }) => continue,
+            inserted => return Ok(inserted?),
+        }
     }
 }
 
@@ -432,6 +456,45 @@ mod tests {
             .into_iter()
             .map(|i| i.text)
             .collect()
+    }
+
+    /// The host drains the queue on its own task while a device appends to
+    /// it: an append must neither fail because a row vanished under it nor
+    /// let the drain take its row before every field is written.
+    #[test]
+    fn appends_survive_a_concurrent_drain() {
+        use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
+        let doc = Arc::new(doc());
+        let appending = Arc::new(AtomicBool::new(true));
+        let drainer = {
+            let (doc, appending) = (doc.clone(), appending.clone());
+            std::thread::spawn(move || {
+                let mut taken = Vec::new();
+                while appending.load(Ordering::Relaxed) {
+                    taken.extend(doc.take_queue_head().unwrap());
+                }
+                taken
+            })
+        };
+        let appended: Result<Vec<()>, DocError> = (0..2_000)
+            .map(|n| {
+                doc.push_queued(&QueuedMessage {
+                    attachments: vec!["upload.png".into()],
+                    hold_for_turn_end: true,
+                    ..item(&format!("q{n}"), "queued")
+                })
+            })
+            .collect();
+        appending.store(false, Ordering::Relaxed);
+        let mut rows = drainer.join().unwrap();
+        appended.expect("append while the host drains");
+        rows.extend(doc.read_queue().unwrap());
+        assert_eq!(rows.len(), 2_000);
+        assert!(
+            rows.iter()
+                .all(|row| row.hold_for_turn_end && row.attachments == ["upload.png"]),
+            "the drain took a row before it was fully written"
+        );
     }
 
     /// A send that fails after the row was taken puts it back where it was,
