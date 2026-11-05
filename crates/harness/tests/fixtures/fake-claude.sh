@@ -111,6 +111,21 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"wrapped up","errors":[],"usage":{"input_tokens":3,"output_tokens":3},"session_id":"sess-wake"}'
   ;;
 
+*scenario:withdraw-approval*)
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-withdraw"}'
+  emit '{"type":"control_request","request_id":"cr-first","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"first"}}}'
+  emit '{"type":"control_request","request_id":"cr-second","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"second"}}}'
+  read -r signal || exit 1
+  emit '{"type":"control_cancel_request","request_id":"cr-first"}'
+  emit '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"withdrawn"}}}'
+  read -r answer || exit 1
+  case "$answer" in
+    *'"request_id":"cr-second"'*'"behavior":"allow"'*)
+      emit '{"type":"result","subtype":"success","result":"withdrawal verified","session_id":"sess-withdraw"}' ;;
+    *) emit '{"type":"result","subtype":"error_during_execution","errors":["unexpected approval response"],"session_id":"sess-withdraw"}' ;;
+  esac
+  ;;
+
 *scenario:askuser*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-ask"}'
   # A plain tool permission request: must be auto-allowed.

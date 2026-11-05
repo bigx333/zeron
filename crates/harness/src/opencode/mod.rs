@@ -911,7 +911,10 @@ impl Server {
         crate::compose_child_path(&mut cmd, exe);
         crate::apply_run_env(&mut cmd, run_env);
         let restricted = !access.is_full_access();
-        if mcp.is_some() || restricted {
+        let skills = cwd
+            .map(|cwd| crate::skills::zeron::roots(std::path::Path::new(cwd)))
+            .unwrap_or_default();
+        if mcp.is_some() || !skills.is_empty() || restricted {
             // The config shape differs by generation. If even the cold probe
             // can't tell, run without the Zeron MCP server rather than fail,
             // but never without the rules a restricted mode relies on: the
@@ -926,6 +929,11 @@ impl Server {
                         .or_else(|| std::env::var("OPENCODE_CONFIG_CONTENT").ok());
                     if let Some(mcp) = mcp {
                         inline = Some(mcp_config(inline.as_deref(), mcp, protocol).map_err(fatal)?);
+                    }
+                    if !skills.is_empty() {
+                        inline = Some(
+                            skills_config(inline.as_deref(), &skills, protocol).map_err(fatal)?,
+                        );
                     }
                     if restricted {
                         inline = Some(
@@ -5720,6 +5728,17 @@ fn inline_config(inherited: Option<&str>) -> Result<Value, HarnessError> {
     Ok(config)
 }
 
+fn skills_config(
+    inherited: Option<&str>,
+    roots: &[std::path::PathBuf],
+    protocol: Protocol,
+) -> Result<String, HarnessError> {
+    let mut config = inline_config(inherited)?;
+    crate::skills::zeron::opencode_config(&mut config, roots, protocol == Protocol::V1)
+        .map_err(|error| HarnessError::Protocol(format!("OPENCODE_CONFIG_CONTENT: {error}")))?;
+    Ok(config.to_string())
+}
+
 /// Inline config is the final user config layer. Preserve inherited overrides
 /// and other MCP servers; never write chat identity into a shared config file.
 fn mcp_config(
@@ -6117,7 +6136,13 @@ http.createServer((req, res) => {
             .unwrap();
             let probe = server.get_json("/config-probe", None).await.unwrap();
             server.shutdown(Duration::from_millis(100)).await;
-            let config: Value = serde_json::from_str(probe["config"].as_str().unwrap()).unwrap();
+            let mut config: Value =
+                serde_json::from_str(probe["config"].as_str().unwrap()).unwrap();
+            // The host's own ~/.zeron/skills, if any, joins the config.
+            let roots = crate::skills::zeron::roots(fixture.path());
+            let skills = config.as_object_mut().unwrap().remove("skills");
+            let expected = (!roots.is_empty()).then(|| json!({ "paths": roots }));
+            assert_eq!(skills, expected);
             assert_eq!(config["model"], "keep");
             let edit = &config["permission"]["edit"];
             let bash = &config["permission"]["bash"];

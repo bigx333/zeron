@@ -490,6 +490,11 @@ impl ClaudeHarness {
                 cmd.arg("--disallowedTools=Agent,Task,Workflow");
             }
         }
+        if !title_only && !request.cwd.is_empty() {
+            cmd.args(crate::skills::zeron::claude_args(std::path::Path::new(
+                &request.cwd,
+            )));
+        }
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
         }
@@ -563,6 +568,7 @@ impl ClaudeHarness {
         let mut cmd = Command::new(&exe);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
+            cmd.args(crate::skills::zeron::claude_args(cwd));
         }
         crate::process::owned::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
@@ -851,7 +857,7 @@ impl Harness for ClaudeHarness {
         // The native advertised catalog controls availability (including plugin
         // enablement and skillOverrides). Shared Agent Skills can use file delivery.
         Ok(Some(
-            skills
+            crate::skills::zeron::bind_claude_commands(skills, &commands, self.id())
                 .into_iter()
                 .filter_map(|mut skill| {
                     if crate::skills::is_shared_skill(&skill.path) {
@@ -1296,6 +1302,7 @@ async fn run_session(session: Session) {
     // The typed fork whose transcript is read off disk (see [`fork_tail`]).
     let claude_root = config_root(&launched.env);
     let mut tail: Option<ForkTail> = None;
+    let mut input_tasks = crate::input_tasks::InputTasks::default();
     // The session's background shells, for the host's list (see
     // [`background`]), and the stops asked of them.
     let mut shells = background::BackgroundShells::default();
@@ -1439,8 +1446,19 @@ async fn run_session(session: Session) {
                             _ => {}
                         }
                     }
+                    if let Frame::ControlCancelRequest(id) = &frame {
+                        input_tasks.cancel(id);
+                        continue;
+                    }
                     if let Frame::ControlRequest(req) = frame {
-                        handle_control_request(req, title_only, &config, &request_input, &stdin.tx);
+                        handle_control_request(
+                            req,
+                            title_only,
+                            &config,
+                            &request_input,
+                            &stdin.tx,
+                            &mut input_tasks,
+                        );
                         continue;
                     }
                     // Only the CLI confirms that a prompt joined its
@@ -1803,6 +1821,8 @@ async fn run_session(session: Session) {
         turn_open = false;
     }
 
+    drop(input_tasks);
+
     // Terminal bookkeeping: never end the stream without a Done unless the
     // consumer already hung up.
     if !event_tx.is_closed() {
@@ -1959,7 +1979,9 @@ type RequestInputFn = Box<
 /// flowing, and only a yes allows it. `AskUserQuestion` is intercepted —
 /// surface the questions through the engine's input bridge (which owns the
 /// `InputRequested`/`InputResolved` lifecycle), wait for the user's answers,
-/// and hand them back keyed by question text, as the tool expects.
+/// and hand them back keyed by question text, as the tool expects. Both
+/// waits are owned by `input_tasks`, so a `control_cancel_request` drops the
+/// pending input instead of leaving it to linger.
 ///
 /// Any other request is answered with an error: the CLI waits for a reply to
 /// every request it sends, and one left unanswered would stall the run.
@@ -1969,6 +1991,7 @@ fn handle_control_request(
     config: &RunRequest,
     request_input: &Arc<RequestInputFn>,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
+    input_tasks: &mut crate::input_tasks::InputTasks,
 ) {
     if req.request.subtype != "can_use_tool" {
         tracing::debug!(
@@ -2021,7 +2044,7 @@ fn handle_control_request(
         };
         let answers = (request_input)(vec![question.clone()]);
         let stdin_tx = stdin_tx.clone();
-        tokio::spawn(async move {
+        input_tasks.spawn(req.request_id.clone(), async move {
             // A dropped sender or no answer is a refusal, like a no.
             let answers = answers.await.unwrap_or_default();
             let response = if approval::approved(&question, &answers) {
@@ -2036,7 +2059,7 @@ fn handle_control_request(
     }
     let request_input = Arc::clone(request_input);
     let stdin_tx = stdin_tx.clone();
-    tokio::spawn(async move {
+    input_tasks.spawn(req.request_id.clone(), async move {
         let request_id = req.request_id;
         let input = req.request.input;
         let questions = parse_questions(&input);
