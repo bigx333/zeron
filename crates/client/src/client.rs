@@ -279,6 +279,20 @@ impl ClientInner {
         let _ = self.registry_write(|doc| doc.set_chat_seen(chat_id, Utc::now()));
     }
 
+    /// Mobile sends write straight to the chat doc and skip the engine's
+    /// `unarchive_on_send`, so the client revives the chat itself.
+    pub(crate) fn revive_on_send(self: &Arc<Self>, chat_id: &str) {
+        let Some(chat) = self.workspace.chat(chat_id) else {
+            return;
+        };
+        if !chat.archived {
+            return;
+        }
+        if let Err(error) = self.registry_write(|doc| doc.set_chat_archived(chat_id, false)) {
+            tracing::warn!(%chat_id, %error, "could not revive chat on send");
+        }
+    }
+
     pub(crate) fn recompute_connectivity(self: &Arc<Self>) {
         let raw = match self.live() {
             None => RawConnectivity {

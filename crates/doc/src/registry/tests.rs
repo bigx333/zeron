@@ -614,6 +614,74 @@ fn field_mutators_round_trip() {
 }
 
 #[test]
+fn a_write_after_a_skewed_peer_still_wins() {
+    // `a` (the desktop) runs five minutes ahead of `b` (the phone).
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    a.upsert_chat(&chat("chat-1", "a")).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    a.clock.last_ms = Utc::now().timestamp_millis() + 300_000;
+    a.set_chat_archived("chat-1", true).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert!(b.chat("chat-1").unwrap().unwrap().archived);
+
+    // The phone replies seconds later by its own clock: the revive must land.
+    b.set_chat_archived("chat-1", false).unwrap();
+    assert!(
+        !b.chat("chat-1").unwrap().unwrap().archived,
+        "local write lost"
+    );
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for doc in [&a, &b] {
+        let row = doc.chat("chat-1").unwrap().unwrap();
+        assert!(!row.archived);
+    }
+}
+
+#[test]
+fn a_write_after_a_seeded_peer_clock_still_wins() {
+    // A re-seed or migration queues another device's clocks, five minutes
+    // ahead, that no received row carries.
+    let mut doc = RegistryDoc::new("b");
+    doc.upsert_chat(&chat("chat-1", "b")).unwrap();
+    let ahead = Utc::now().timestamp_millis() + 300_000;
+    doc.enqueue_ops(vec![RowOp {
+        kind: KIND_CHATS.into(),
+        id: "chat-1".into(),
+        op: OpKind::Update,
+        set: Some(fields([("archived", json!(true))])),
+        hlc: encode_hlc(ahead, 0, "a"),
+        clocks: None,
+    }]);
+    assert!(doc.chat("chat-1").unwrap().unwrap().archived);
+
+    doc.set_chat_archived("chat-1", false).unwrap();
+    assert!(!doc.chat("chat-1").unwrap().unwrap().archived);
+}
+
+#[test]
+fn a_write_after_loading_an_unobserved_seed_still_wins() {
+    // Snapshots saved before `enqueue_ops` observed its ops.
+    let mut doc = RegistryDoc::new("b");
+    doc.upsert_chat(&chat("chat-1", "b")).unwrap();
+    doc.enqueue_ops(vec![RowOp {
+        kind: KIND_CHATS.into(),
+        id: "chat-1".into(),
+        op: OpKind::Update,
+        set: Some(fields([("archived", json!(true))])),
+        hlc: encode_hlc(Utc::now().timestamp_millis() + 300_000, 0, "a"),
+        clocks: None,
+    }]);
+    doc.clock = HlcClock::default();
+    let mut doc = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "b").unwrap();
+
+    doc.set_chat_archived("chat-1", false).unwrap();
+    assert!(!doc.chat("chat-1").unwrap().unwrap().archived);
+}
+
+#[test]
 fn delete_chat_tombstones_row_and_session() {
     let mut ws = RegistryDoc::new("dev-a");
     ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
