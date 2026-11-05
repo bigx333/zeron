@@ -393,12 +393,19 @@ pub struct ProviderSessionMark {
 /// A session doc handle: typed access over a LoroDoc with the schema above.
 pub struct SessionDoc {
     doc: LoroDoc,
+    /// Serializes queue edits that read rows and then write them (see
+    /// `queue.rs`). Loro applies each op as it is made, so without it a
+    /// drain on another thread can see, and take, a row still being written.
+    pub(crate) queue: std::sync::Mutex<()>,
 }
 
 impl SessionDoc {
     /// Wrap an existing doc (e.g. imported from a snapshot).
     pub fn from_doc(doc: LoroDoc) -> Self {
-        Self { doc }
+        Self {
+            doc,
+            queue: Default::default(),
+        }
     }
 
     /// Create + initialize a fresh doc for `chat_id` (host-only).
@@ -408,7 +415,7 @@ impl SessionDoc {
         meta.insert("chatId", chat_id)?;
         meta.insert("schemaVersion", SESSION_SCHEMA_VERSION as i64)?;
         doc.commit();
-        Ok(Self { doc })
+        Ok(Self::from_doc(doc))
     }
 
     pub fn doc(&self) -> &LoroDoc {
