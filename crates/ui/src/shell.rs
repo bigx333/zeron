@@ -10861,7 +10861,7 @@ impl Shell {
                 })
                 // macOS keeps "Check for Updates…" in the app menu under
                 // About; elsewhere there is no app menu, so it lives here.
-                .when(!cfg!(target_os = "macos"), |menu| {
+                .when(!cfg!(target_os = "macos") && zeron_update::UPSTREAM_RELEASES, |menu| {
                     menu.child(
                         popover::menu_row(theme, false, "user-menu-check-updates")
                             .id("user-menu-check-updates")
@@ -13159,10 +13159,7 @@ impl Shell {
                     .items_center()
                     .text_center()
                     .child(
-                        icon(icons::ZERON_LOGO)
-                            .w(px(31.4))
-                            .h(px(36.0))
-                            .text_color(theme.text),
+                        gpui::img(icons::NOVA_LOGO).size(px(64.0)).rounded(px(14.0)),
                     )
                     .child(
                         div()
@@ -13171,7 +13168,10 @@ impl Shell {
                             .line_height(px(28.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text)
-                            .child(SharedString::from("Log in to Zeron")),
+                            .child(SharedString::from(format!(
+                                "Log in to {}",
+                                crate::app_menus::APP_NAME
+                            ))),
                     )
                     .child(
                         div()

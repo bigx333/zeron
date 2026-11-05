@@ -742,12 +742,11 @@ impl SessionsEngine {
         // Project-less chats store a home-relative cwd (the creating device
         // can't know the host's home); expand it here, on the host, where the
         // run spawns, creating a new chat's scratch folder.
-        let scratch_root = self
-            .inner
-            .scratch_root
-            .get()
-            .cloned()
-            .unwrap_or_else(|| crate::repos::home_dir().join(".zeron").join("scratch"));
+        let scratch_root = self.inner.scratch_root.get().cloned().unwrap_or_else(|| {
+            crate::repos::home_dir()
+                .join(zeron_nova::DATA_DIR)
+                .join("scratch")
+        });
         request.cwd = crate::repos::resolve_chat_cwd(&request.cwd, &scratch_root)
             .map_err(EngineError::Other)?;
         // Native-only catalog entries have no portable file fallback. Reject

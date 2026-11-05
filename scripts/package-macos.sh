@@ -17,7 +17,10 @@ command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 ARCH="$(uname -m)" # arm64 on Apple silicon runners
 OUT_DIR="$ROOT/target/package"
-APP="$OUT_DIR/Zeron.app"
+INFO_PLIST="$ROOT/dist/macos/Info.plist"
+APP_NAME="$(plutil -extract CFBundleName raw "$INFO_PLIST")"
+BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw "$INFO_PLIST")"
+APP="$OUT_DIR/$APP_NAME.app"
 DMG="$OUT_DIR/zeron-$VERSION-macos-$ARCH.dmg"
 APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
 
@@ -55,7 +58,7 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.
   # (No --deep: Apple deprecated it. Nested code is signed first, inside out:
   # the engine, then the bundle that seals it.)
-  codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
+  codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier "$BUNDLE_ID.engine" "$APP/Contents/MacOS/Zeron Engine"
   codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
 else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still
@@ -86,7 +89,8 @@ if $NOTARIZE; then
 fi
 
 # The auto-updater artifact.
-tar -czf "$APP_TARBALL" -C "$OUT_DIR" Zeron.app
+# The updater (stage_mac_app) unpacks Zeron.app, whatever the bundle is named.
+tar -czf "$APP_TARBALL" -s "/^$APP_NAME\.app/Zeron.app/" -C "$OUT_DIR" "$APP_NAME.app"
 echo "packaged: $APP_TARBALL"
 
 # The dmg presents the classic drag-into-Applications layout over the
@@ -103,14 +107,14 @@ BG_TIFF="$OUT_DIR/dmg-background.tiff"
 tiffutil -cathidpicheck "$ROOT/dist/macos/dmg-background.png" \
   "$ROOT/dist/macos/dmg-background@2x.png" -out "$BG_TIFF" >/dev/null 2>&1
 
-APP="$APP" DMG="$DMG" BG_TIFF="$BG_TIFF" python3 - <<'PY'
+APP="$APP" APP_NAME="$APP_NAME" DMG="$DMG" BG_TIFF="$BG_TIFF" python3 - <<'PY'
 import os
 import dmgbuild
 
 app = os.environ["APP"]
 dmgbuild.build_dmg(
     filename=os.environ["DMG"],
-    volume_name="Zeron",
+    volume_name=os.environ["APP_NAME"],
     settings={
         "format": "UDZO",
         "files": [app],
@@ -127,7 +131,7 @@ dmgbuild.build_dmg(
         "window_rect": ((200, 120), (660, 400)),
         "icon_size": 104,
         "text_size": 12,
-        "icon_locations": {"Zeron.app": (165, 195), "Applications": (495, 195)},
+        "icon_locations": {os.path.basename(app): (165, 195), "Applications": (495, 195)},
     },
 )
 PY

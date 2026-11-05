@@ -48,6 +48,7 @@ use zeron_theme::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AccentColor {
+    Nova,
     /// The exact upstream Zeron indigo.
     #[default]
     #[serde(alias = "violet", alias = "indigo", alias = "red", alias = "purple")]
@@ -62,7 +63,8 @@ pub enum AccentColor {
 }
 
 impl AccentColor {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
+        Self::Nova,
         Self::Zeron,
         Self::Orange,
         Self::Amber,
@@ -74,6 +76,7 @@ impl AccentColor {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Nova => "Nova",
             Self::Zeron => "Zeron",
             Self::Orange => "Orange",
             Self::Amber => "Amber",
@@ -89,6 +92,8 @@ impl AccentColor {
         // used to gamut-clip OKLCH into sRGB and then mutate HSL lightness,
         // producing different chroma and apparent hues across light/dark.
         let (primary, strong) = match (self, appearance) {
+            (Self::Nova, Appearance::Dark) => (oklch(0.72, 0.145, 252.0), oklch(0.56, 0.19, 258.0)),
+            (Self::Nova, Appearance::Light) => (oklch(0.52, 0.20, 260.0), oklch(0.52, 0.20, 260.0)),
             (Self::Zeron, Appearance::Dark) => {
                 (oklch(0.673, 0.182, 276.935), oklch(0.585, 0.233, 277.117))
             }
@@ -133,6 +138,7 @@ impl AccentColor {
 impl From<AccentColor> for AccentPreset {
     fn from(value: AccentColor) -> Self {
         match value {
+            AccentColor::Nova => Self::Nova,
             AccentColor::Zeron => Self::Zeron,
             AccentColor::Orange => Self::Orange,
             AccentColor::Amber => Self::Amber,
@@ -147,6 +153,7 @@ impl From<AccentColor> for AccentPreset {
 impl From<AccentPreset> for AccentColor {
     fn from(value: AccentPreset) -> Self {
         match value {
+            AccentPreset::Nova => Self::Nova,
             AccentPreset::Zeron => Self::Zeron,
             AccentPreset::Orange => Self::Orange,
             AccentPreset::Amber => Self::Amber,
@@ -1412,7 +1419,7 @@ impl Theme {
     ) -> Self {
         let appearance = model_appearance(variant.appearance);
         let accent_color = match accent_selection {
-            AccentSelection::ThemeDefault => AccentColor::Zeron,
+            AccentSelection::ThemeDefault => AccentColor::Nova,
             AccentSelection::Preset(preset) => preset.into(),
         };
         let mut theme = Self::for_preferences(appearance, accent_color);

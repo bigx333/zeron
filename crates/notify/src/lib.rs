@@ -38,10 +38,10 @@ const DISABLE_ENV: &str = "ZERON_DISABLE_NOTIFICATIONS";
 pub const AGENT_UPDATES_TARGET: &str = "__zeron_agent_updates__";
 
 /// The app-side link a clicked banner opens when the engine posted it from
-/// its own process: `zeron://notification/<target>`.
-pub const LINK_PREFIX: &str = "zeron://notification/";
+/// its own process: `zeron-nova://notification/<target>`.
+pub const LINK_PREFIX: &str = concat!(zeron_nova::url_scheme!(), "://notification/");
 
-/// `zeron://notification/<target>` for a banner's target.
+/// `zeron-nova://notification/<target>` for a banner's target.
 pub fn link(target: &str) -> String {
     format!("{LINK_PREFIX}{target}")
 }
@@ -201,7 +201,7 @@ mod macos {
     }
 
     /// The production app's id: the default identity to adopt.
-    const DEFAULT_BUNDLE_ID: &str = "sh.zeron.app";
+    const DEFAULT_BUNDLE_ID: &str = zeron_nova::BUNDLE_ID;
 
     pub(super) static APP_BUNDLE_ID: OnceLock<String> = OnceLock::new();
 
@@ -444,7 +444,8 @@ fn post_impl(title: &str, body: &str, _target: Option<&str>) {
         // `--` ends option parsing: session titles are model-generated, so a
         // `-`-leading one must land as the summary, not as a flag.
         let result = std::process::Command::new("notify-send")
-            .args(["--app-name=Zeron", "--", &title, &body])
+            .arg(format!("--app-name={}", zeron_nova::APP_NAME))
+            .args(["--", &title, &body])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
@@ -476,10 +477,11 @@ mod tests {
 
     #[test]
     fn links_round_trip_their_target() {
-        assert_eq!(link("chat-1"), "zeron://notification/chat-1");
+        assert_eq!(link("chat-1"), "zeron-nova://notification/chat-1");
         assert_eq!(link_target(&link("chat-1")), Some("chat-1"));
         assert_eq!(link_target(LINK_PREFIX), None);
-        assert_eq!(link_target("zeron://chat/x"), None);
+        assert_eq!(link_target("zeron-nova://chat/x"), None);
+        assert_eq!(link_target("zeron://notification/chat-1"), None);
     }
 
     #[test]

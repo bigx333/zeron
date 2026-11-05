@@ -341,6 +341,12 @@ async fn local_runtime_checks_public_releases_without_starting_edge_links() {
         .expect("local runtime starts the public release checker");
     assert_eq!(requests.load(Ordering::SeqCst), 0);
 
+    if !zeron_update::UPSTREAM_RELEASES {
+        assert!(updater.check().await.is_err());
+        runtime.shutdown().await;
+        edge_task.abort();
+        return;
+    }
     updater.check_now();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while requests.load(Ordering::SeqCst) < 2 {

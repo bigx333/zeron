@@ -222,8 +222,10 @@ pub fn run_app(config: UiConfig) {
         appshots::set_enabled(ui_settings.appshots_enabled);
         terminal::panel::init(cx);
         app_menus::init(cx);
-        app_update::AppUpdate::init(config.boot().edge_url, data_dir.clone(), cx);
-        cx.register_url_scheme("zeron").detach();
+        if zeron_update::UPSTREAM_RELEASES {
+            app_update::AppUpdate::init(config.boot().edge_url, data_dir.clone(), cx);
+        }
+        cx.register_url_scheme(zeron_nova::URL_SCHEME).detach();
 
         let state = cx.new(|cx| {
             let mut state = state::AppState::new();
@@ -234,7 +236,7 @@ pub fn run_app(config: UiConfig) {
         cx.spawn(async move |cx| {
             while let Some(url) = url_rx.next().await {
                 // A banner the background engine posted, clicked: the engine
-                // opens the app on `zeron://notification/<target>`.
+                // opens the app on `zeron-nova://notification/<target>`.
                 if let Some(target) = notify::link_target(&url) {
                     let target = target.to_owned();
                     let _ = cx.update(|cx| open_notification_target(target, &url_state, cx));
@@ -454,7 +456,7 @@ fn open_main_window(
                 // Linux/Windows `appears_transparent` hides the system titlebar
                 // for our custom-drawn chrome; harmless where unsupported.
                 titlebar: Some(TitlebarOptions {
-                    title: cfg!(target_os = "windows").then(|| "Zeron".into()),
+                    title: cfg!(target_os = "windows").then(|| app_menus::APP_NAME.into()),
                     appears_transparent: true,
                     // Native lights are 14px tall: top 14 → center 21, matching
                     // the 38px titlebar row with 4px top-only content padding.
@@ -484,7 +486,7 @@ fn open_main_window(
                 // — if these two ever disagree, vibrancy dies on the first theme
                 // change and never comes back.
                 window_background: theme::Theme::of(cx).window_background_appearance(),
-                app_id: Some("zeron".into()),
+                app_id: Some(zeron_nova::LINUX_APP_ID.into()),
                 ..Default::default()
             },
             move |window, cx| {

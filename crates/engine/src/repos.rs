@@ -190,7 +190,7 @@ impl Repos {
         Self::with_worktree_preferences(
             data_dir,
             device_id,
-            home_dir().join(".zeron").join("worktrees"),
+            home_dir().join(zeron_nova::DATA_DIR).join("worktrees"),
             std::env::var_os("ZERON_WORKTREES_DIR")
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),

@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+zeron-nova.workspace = true
 zeron-proto.workspace = true
 zeron-doc.workspace = true
 zeron-rpc.workspace = true

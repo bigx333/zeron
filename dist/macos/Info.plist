@@ -7,17 +7,17 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Zeron</string>
+    <string>Zeron Nova</string>
     <key>CFBundleExecutable</key>
     <string>zeron</string>
     <key>CFBundleIconFile</key>
     <string>zeron.icns</string>
     <key>CFBundleIdentifier</key>
-    <string>sh.zeron.app</string>
+    <string>sh.zeron.app.nova</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Zeron</string>
+    <string>Zeron Nova</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -28,10 +28,10 @@
     <array>
         <dict>
             <key>CFBundleURLName</key>
-            <string>sh.zeron.app.conversation</string>
+            <string>sh.zeron.app.nova.conversation</string>
             <key>CFBundleURLSchemes</key>
             <array>
-                <string>zeron</string>
+                <string>zeron-nova</string>
             </array>
         </dict>
     </array>

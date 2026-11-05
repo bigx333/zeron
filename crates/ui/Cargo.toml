@@ -109,6 +109,7 @@ name = "settings-search-fixture"
 required-features = ["appshots-fixture"]
 
 [dependencies]
+zeron-nova.workspace = true
 zeron-voice-media.workspace = true
 zeron-voice-session.workspace = true
 zeron-orb.workspace = true

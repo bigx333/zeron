@@ -84,7 +84,7 @@ pub fn engine_config_from_env() -> zeron_engine::EngineConfig {
         ipc_port: std::env::var("ZERON_IPC_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
-            .unwrap_or(27654),
+            .unwrap_or(zeron_nova::IPC_PORT),
         default_harness: harness_from_env(),
         // WorkOS mode: the signed-in session's org wins; ZERON_ORG_ID (dev
         // default "dev-org") scopes the workspace room otherwise.
