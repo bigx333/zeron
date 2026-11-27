@@ -1015,6 +1015,7 @@ mod tests {
             background_tasks: Vec::new(),
             waiting,
             blocked_on_wait: false,
+            live: Default::default(),
         };
         let device = |id: &str, name: &str| -> zeron_proto::Device {
             serde_json::from_value(serde_json::json!({ "id": id, "name": name, "platform": "macos" })).unwrap()

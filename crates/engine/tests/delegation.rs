@@ -303,6 +303,7 @@ impl Rig {
             .queue_command(
                 chat,
                 SessionCommandPayload::Run {
+                    injected: None,
                     request: run_request(harness, prompt),
                     message_id: message_id.clone(),
                 },
@@ -333,6 +334,7 @@ impl Rig {
             .queue_command(
                 child,
                 SessionCommandPayload::Run {
+                    injected: None,
                     request: run_request(harness, prompt),
                     message_id,
                 },
@@ -627,6 +629,7 @@ fn remote_row(chat: &str, completed: Option<&str>, status: SessionStatus) -> Ses
         background_tasks: Vec::new(),
         waiting: None,
         blocked_on_wait: false,
+        live: Default::default(),
     }
 }
 

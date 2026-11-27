@@ -37,6 +37,8 @@ pub(crate) fn account(id: &str, active: bool, used: f32) -> AgentAccount {
         switchable: true,
         saved_at: None,
         provider: None,
+        invalid: false,
+        invalid_reason: None,
     }
 }
 
@@ -84,6 +86,7 @@ pub(crate) fn session(chat: &str, status: SessionStatus, outcome: Option<DoneSta
         background_tasks: Vec::new(),
         waiting: None,
         blocked_on_wait: false,
+        live: Default::default(),
     }
 }
 
