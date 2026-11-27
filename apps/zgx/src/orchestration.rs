@@ -919,11 +919,29 @@ impl RowValues {
     }
 }
 
+/// Written over the built-in, as `effective_*_prompt` reads it: anything
+/// but whitespace. (A blank row is the reset, never kept, but a stale or
+/// hand-written row could hold one.)
+fn custom(prompt: Option<&str>) -> bool {
+    prompt.is_some_and(|p| !p.trim().is_empty())
+}
+
 fn settings_value(s: &OrchestrationState) -> Value {
-    // The profile's settings: `{ crew_auto_archive, crew_idle_hours }`.
+    // The profile's settings: `{ crew_auto_archive, crew_idle_hours, the
+    // role prompts (as they read: the person's own or the built-in) }`.
+    use zeron_proto::orchestration::role_prompts;
     Value::record([
         ("crew_auto_archive", Value::Bool(s.settings.crew_auto_archive)),
         ("crew_idle_hours", Value::from(f64::from(s.settings.crew_idle_hours))),
+        ("orchestrator_prompt", Value::from(s.settings.effective_orchestrator_prompt())),
+        ("crew_prompt", Value::from(s.settings.effective_crew_prompt())),
+        ("brain_dump_prompt", Value::from(s.settings.effective_brain_dump_prompt())),
+        ("orchestrator_prompt_custom", Value::Bool(custom(s.settings.orchestrator_prompt.as_deref()))),
+        ("crew_prompt_custom", Value::Bool(custom(s.settings.crew_prompt.as_deref()))),
+        ("brain_dump_prompt_custom", Value::Bool(custom(s.settings.brain_dump_prompt.as_deref()))),
+        ("orchestrator_prompt_default", Value::from(role_prompts::ORCHESTRATOR_DEFAULT)),
+        ("crew_prompt_default", Value::from(role_prompts::CREW_DEFAULT)),
+        ("brain_dump_prompt_default", Value::from(role_prompts::BRAIN_DUMP)),
     ])
 }
 
@@ -1728,6 +1746,29 @@ mod tests {
         assert!(preview::refuse("orchestration.loads_wanted").is_err());
         preview::set(None);
         assert!(preview::refuse("orchestration.op").is_ok());
+    }
+
+    #[test]
+    fn settings_carry_the_role_prompts_as_they_read() {
+        use zeron_proto::orchestration::role_prompts;
+        // Defaults: the built-in prompt, not custom, its default named.
+        let s = OrchestrationState::default();
+        let v = settings_value(&s);
+        assert_eq!(text(v.field("orchestrator_prompt")).as_deref(), Some(role_prompts::ORCHESTRATOR_DEFAULT));
+        assert_eq!(text(v.field("crew_prompt")).as_deref(), Some(role_prompts::CREW_DEFAULT));
+        assert_eq!(text(v.field("brain_dump_prompt")).as_deref(), Some(role_prompts::BRAIN_DUMP));
+        assert_eq!(v.field("orchestrator_prompt_custom"), Some(&Value::Bool(false)));
+        assert_eq!(text(v.field("orchestrator_prompt_default")).as_deref(), Some(role_prompts::ORCHESTRATOR_DEFAULT));
+        // The person's own: effective is theirs, custom true.
+        let mut custom = OrchestrationState::default();
+        custom.settings.orchestrator_prompt = Some("- mine".into());
+        custom.settings.brain_dump_prompt = Some("  ".into());
+        let v = settings_value(&custom);
+        assert_eq!(text(v.field("orchestrator_prompt")).as_deref(), Some("- mine"));
+        assert_eq!(v.field("orchestrator_prompt_custom"), Some(&Value::Bool(true)));
+        // Blank is no override.
+        assert_eq!(text(v.field("brain_dump_prompt")).as_deref(), Some(role_prompts::BRAIN_DUMP));
+        assert_eq!(v.field("brain_dump_prompt_custom"), Some(&Value::Bool(false)), "whitespace is no override");
     }
 
     const NOW: i64 = 1_794_470_400;

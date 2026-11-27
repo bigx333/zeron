@@ -91,7 +91,19 @@ end
 -- The profile's settings (src/orchestration.rs `settings`). What was just
 -- asked for shows at once, until the engine's state says it (or the ask
 -- fails).
-local DEFAULT_SETTINGS = { crew_auto_archive = true, crew_idle_hours = 4 }
+local DEFAULT_SETTINGS = {
+	crew_auto_archive = true,
+	crew_idle_hours = 4,
+	orchestrator_prompt = "",
+	crew_prompt = "",
+	brain_dump_prompt = "",
+	orchestrator_prompt_custom = false,
+	crew_prompt_custom = false,
+	brain_dump_prompt_custom = false,
+	orchestrator_prompt_default = "",
+	crew_prompt_default = "",
+	brain_dump_prompt_default = "",
+}
 local asked = ui.state("orchestration_settings_asked", {} :: { [string]: any })
 M.settings = ui.computed(function(): { crew_auto_archive: boolean, crew_idle_hours: number }
 	local s = (M.now:get() or {}).settings or DEFAULT_SETTINGS
@@ -158,6 +170,18 @@ local function setting_state(key: string): any
 end
 M.auto_archive = setting_state("crew_auto_archive")
 M.idle_hours = setting_state("crew_idle_hours")
+
+-- A role prompt (`orchestrator_prompt`, `crew_prompt`, `brain_dump_prompt`)
+-- written through `updateSettings` (`""` resets it to the built-in, as the
+-- engine reads it). None of these go through `asked`: a prompt screen
+-- keeps its own draft, and the engine's row is what it saved.
+function M.set_prompt(key: string, text: string): any
+	return M.op({ op = "updateSettings", [M.camel(key)] = text })
+end
+
+function M.reset_prompt(key: string): any
+	return M.set_prompt(key, "")
+end
 
 -- Wanting loads, counted by the host (several screens may show them).
 function M.loads_wanted(on: boolean)

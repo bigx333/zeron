@@ -736,7 +736,13 @@ impl ClaudeHarness {
                 appended.push(WAIT_ON_BACKGROUND_NOTE);
             }
             if router {
-                appended.push(zeron_proto::orchestration::role_prompts::BRAIN_DUMP);
+                appended.push(
+                    request
+                        .mcp
+                        .as_ref()
+                        .and_then(McpServer::router_prompt)
+                        .unwrap_or(zeron_proto::orchestration::role_prompts::BRAIN_DUMP),
+                );
             }
             if !appended.is_empty() {
                 cmd.args(["--append-system-prompt", &appended.join("\n\n")]);
@@ -2873,6 +2879,15 @@ mod tests {
         let both = appended(Some(server(&[(McpServer::CHAT_ID_ENV, "c1"), router, waits]))).unwrap();
         assert!(both.contains(WAIT_ON_BACKGROUND_NOTE));
         assert!(both.contains(zeron_proto::orchestration::role_prompts::BRAIN_DUMP));
+        // The person's own routing rules (Settings → Orchestration) replace
+        // the built-in ones; absent, the built-in.
+        let own = (McpServer::ROUTER_PROMPT_ENV, "- my routing rules");
+        let custom = appended(Some(server(&[(McpServer::CHAT_ID_ENV, "c1"), router, own]))).unwrap();
+        assert!(custom.contains("- my routing rules"), "{custom}");
+        assert!(!custom.contains(zeron_proto::orchestration::role_prompts::BRAIN_DUMP), "{custom}");
+        let blank = (McpServer::ROUTER_PROMPT_ENV, "   ");
+        let defaulted = appended(Some(server(&[(McpServer::CHAT_ID_ENV, "c1"), router, blank]))).unwrap();
+        assert!(defaulted.contains(zeron_proto::orchestration::role_prompts::BRAIN_DUMP));
     }
 }
 

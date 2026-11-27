@@ -305,7 +305,7 @@ mod tests {
             orchestrators: vec![orchestrator("orc", "standard"), orchestrator("brain", "brainDump")],
             crew,
             // (A 12-hour window the person chose: what these tests time.)
-            settings: OrchestrationSettings { crew_auto_archive: true, crew_idle_hours: 12, crew_idle_hours_set: true },
+            settings: OrchestrationSettings { crew_auto_archive: true, crew_idle_hours: 12, crew_idle_hours_set: true, ..OrchestrationSettings::default() },
             cards: Vec::new(),
             ..Default::default()
         }
@@ -429,9 +429,9 @@ mod tests {
     fn the_setting_off_archives_nothing_and_its_window_is_followed() {
         let chats = [chat("c", Some("crew"), false)];
         let mut st = state(vec![member("c")]);
-        st.settings = OrchestrationSettings { crew_auto_archive: false, crew_idle_hours: 12, crew_idle_hours_set: true };
+        st.settings = OrchestrationSettings { crew_auto_archive: false, crew_idle_hours: 12, crew_idle_hours_set: true, ..OrchestrationSettings::default() };
         assert!(plan(hours(1000), HERE, &chats, &st, none).is_empty());
-        st.settings = OrchestrationSettings { crew_auto_archive: true, crew_idle_hours: 1, crew_idle_hours_set: true };
+        st.settings = OrchestrationSettings { crew_auto_archive: true, crew_idle_hours: 1, crew_idle_hours_set: true, ..OrchestrationSettings::default() };
         assert_eq!(archived_ids(&plan(hours(1), HERE, &chats, &st, none)), ["c"]);
         st.settings.crew_idle_hours = 72;
         assert!(plan(hours(71), HERE, &chats, &st, none).is_empty());

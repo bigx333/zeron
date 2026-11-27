@@ -17,8 +17,34 @@ route.launched:set(true)
 local Sidebar = require("@app/screens/shell/sidebar")
 local page = require("@app/screens/settings/orchestration")
 
--- The engine's row, as the next launch finds it.
-local engine = ui.persist("fake_engine_orch_settings", { crew_auto_archive = true, crew_idle_hours = 4 })
+-- The engine's row, as the next launch finds it. A prompt key holding the
+-- person's own text; absent, the built-in ("" is never kept: it IS a reset).
+local engine = ui.persist(
+	"fake_engine_orch_settings",
+	{ crew_auto_archive = true, crew_idle_hours = 4, orchestrator_prompt = "", crew_prompt = "", brain_dump_prompt = "" }
+)
+
+-- The built-ins, as the bridge sends them (here short: what matters is
+-- that they're apart from anything the person writes).
+local DEFAULTS = {
+	orchestrator_prompt = "- the orchestrator's built-in rules",
+	crew_prompt = "- the crew's built-in rules",
+	brain_dump_prompt = "- the brain dump's built-in rules",
+}
+
+-- `settings` as the bridge publishes them: the effective prompt (the
+-- person's own, else the built-in), whether it's custom, and the built-in.
+local function settings_out(): { [string]: any }
+	local e = engine:peek()
+	local out: { [string]: any } = { crew_auto_archive = e.crew_auto_archive, crew_idle_hours = e.crew_idle_hours }
+	for _, key in { "orchestrator_prompt", "crew_prompt", "brain_dump_prompt" } do
+		local own = e[key]
+		out[key] = if own ~= nil and own ~= "" then own else DEFAULTS[key]
+		out[`{key}_custom`] = own ~= nil and own ~= ""
+		out[`{key}_default`] = DEFAULTS[key]
+	end
+	return out
+end
 
 sessions.now:set({
 	state = "ready",
@@ -42,7 +68,7 @@ local function publish()
 		items = {},
 		asks = {},
 		dumps = {},
-		settings = table.clone(engine:peek()),
+		settings = settings_out(),
 	} :: any)
 end
 publish()
@@ -76,6 +102,19 @@ end
 		end
 		if op.crewIdleHours ~= nil then
 			s.crew_idle_hours = op.crewIdleHours
+		end
+		-- As the engine's normalize_prompt: trimmed, and a blank or the
+		-- built-in itself is the reset ("" is never kept).
+		for camel, key in pairs({
+			orchestratorPrompt = "orchestrator_prompt",
+			crewPrompt = "crew_prompt",
+			brainDumpPrompt = "brain_dump_prompt",
+		}) do
+			local raw = op[camel]
+			if raw ~= nil then
+				local trimmed = string.match(raw, "^%s*(.-)%s*$") or ""
+				s[key] = if trimmed == "" or trimmed == DEFAULTS[key] then "" else trimmed
+			end
 		end
 		engine:set(s)
 		publish()

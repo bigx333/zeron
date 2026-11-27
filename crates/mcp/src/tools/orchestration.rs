@@ -26,6 +26,7 @@ pub(super) const ITEM_CLOSE: &str = "item_close";
 pub(super) const CREW_ADD: &str = "crew_add";
 pub(super) const CREW_RELEASE: &str = "crew_release";
 pub(super) const NOTES_SET: &str = "notes_set";
+pub(super) const RULES_SET: &str = "rules_set";
 pub(super) const WORLD: &str = "world";
 pub(super) const ROUTE: &str = "route";
 pub(super) const DUMP_DONE: &str = "dump_done";
@@ -36,7 +37,7 @@ pub(super) const SCRATCHPAD_READ: &str = "scratchpad_read";
 pub(super) const SCRATCHPAD_WRITE: &str = "scratchpad_write";
 pub(super) const SCRATCHPAD_APPEND: &str = "scratchpad_append";
 
-pub(super) const NAMES: [&str; 17] = [
+pub(super) const NAMES: [&str; 18] = [
     REPORT,
     ASK,
     BOARD,
@@ -45,6 +46,7 @@ pub(super) const NAMES: [&str; 17] = [
     CREW_ADD,
     CREW_RELEASE,
     NOTES_SET,
+    RULES_SET,
     WORLD,
     ROUTE,
     DUMP_DONE,
@@ -97,7 +99,7 @@ impl Role {
             ASK | PROGRESS => true,
             REPORT => matches!(self, Role::Crew { .. }),
             BOARD | ITEM_UPSERT | ITEM_CLOSE => matches!(self, Role::Orchestrator { .. } | Role::BrainDump { .. }),
-            CREW_ADD | CREW_RELEASE | NOTES_SET | ANSWER_ASK => matches!(self, Role::Orchestrator { .. }),
+            CREW_ADD | CREW_RELEASE | NOTES_SET | RULES_SET | ANSWER_ASK => matches!(self, Role::Orchestrator { .. }),
             WORLD | ROUTE | DUMP_DONE | ORCHESTRATOR_CREATE => matches!(self, Role::BrainDump { .. }),
             // The person's Scratchpad: the Brain dump keeps it, an
             // orchestrator and its crew read it.
@@ -315,6 +317,14 @@ pub(super) fn catalog() -> Vec<ToolDef> {
             name: NOTES_SET,
             description: "Replace your notes: your plan and working notes, kept across turns and shown to the person.",
             input_schema: json!({ "type": "object", "properties": { "text": s("Markdown.") }, "required": ["text"] }),
+        },
+        ToolDef {
+            name: RULES_SET,
+            description: "Update your standing rules (`rules`) or your crew's standing rules (`crew_rules`) when the person gives a lasting rule. Pass whichever field changed (replaces that field; omit a field to leave it unchanged). Crew rules are automatically delivered to crew threads on their next message.",
+            input_schema: json!({ "type": "object", "properties": {
+                "rules": s("Your own standing rules, whole (replaces them)."),
+                "crew_rules": s("Your crew's standing rules, whole (replaces them).")
+            } }),
         },
         ToolDef {
             name: WORLD,
@@ -540,6 +550,12 @@ struct AnswerArgs {
 #[derive(Deserialize)]
 struct NotesArgs {
     text: String,
+}
+
+#[derive(Deserialize)]
+struct RulesArgs {
+    rules: Option<String>,
+    crew_rules: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -819,6 +835,21 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
             let id = own(role).ok_or("only an orchestrator keeps notes")?;
             Ok(json!({ "op": "updateOrchestrator", "id": id, "notes": a.text }))
         }
+        RULES_SET => {
+            let a: RulesArgs = parse(args)?;
+            let id = own(role).ok_or("only an orchestrator keeps rules")?;
+            if a.rules.is_none() && a.crew_rules.is_none() {
+                return Err("pass rules or crew_rules (whichever changed)".into());
+            }
+            let mut op = json!({ "op": "updateOrchestrator", "id": id });
+            if let Some(rules) = a.rules {
+                op["rules"] = json!(rules);
+            }
+            if let Some(crew_rules) = a.crew_rules {
+                op["crewRules"] = json!(crew_rules);
+            }
+            Ok(op)
+        }
         ROUTE => {
             let a: RouteArgs = parse(args)?;
             let intent: RouteIntent = parse_enum("intent", &a.intent)?;
@@ -896,9 +927,9 @@ pub fn role_prompt(role: &Role, chat: Option<&str>, state: &OrchestrationState) 
         Role::Plain => None,
         Role::Orchestrator { id } => {
             let o = state.orchestrators.iter().find(|o| &o.id == id)?;
-            Some(role_prompts::orchestrator(&o.name, &o.goal, &o.rules))
+            Some(role_prompts::orchestrator_with(&o.name, &o.goal, &o.rules, state.settings.effective_orchestrator_prompt()))
         }
-        Role::BrainDump { .. } => Some(role_prompts::BRAIN_DUMP.to_owned()),
+        Role::BrainDump { .. } => Some(role_prompts::brain_dump_with(state.settings.effective_brain_dump_prompt())),
         Role::Crew { orchestrator_id } => {
             let o = state.orchestrators.iter().find(|o| &o.id == orchestrator_id)?;
             let item = state
@@ -908,7 +939,7 @@ pub fn role_prompt(role: &Role, chat: Option<&str>, state: &OrchestrationState) 
                 .and_then(|m| m.item_id.as_deref())
                 .and_then(|id| state.items.iter().find(|i| i.id == id))
                 .map(|i| i.title.as_str());
-            Some(role_prompts::crew(&o.name, item, &o.crew_rules))
+            Some(role_prompts::crew_with(&o.name, item, &o.crew_rules, state.settings.effective_crew_prompt()))
         }
     }
 }
@@ -1150,7 +1181,7 @@ impl Tools {
                 }
                 self.orchestrate(op).await
             }
-            REPORT | ASK | ITEM_UPSERT | ITEM_CLOSE | NOTES_SET | DUMP_DONE | ANSWER_ASK => {
+            REPORT | ASK | ITEM_UPSERT | ITEM_CLOSE | NOTES_SET | RULES_SET | DUMP_DONE | ANSWER_ASK => {
                 let op = op_for(tool, args, &role)?;
                 self.orchestrate(op).await
             }
@@ -1602,6 +1633,39 @@ mod tests {
     }
 
     #[test]
+    fn role_prompts_read_the_persons_own_from_the_settings() {
+        let mut o = orchestrator("o1", OrchestratorKind::Standard);
+        o.name = "Ops".into();
+        let mut m = member("c1", "o1", false);
+        m.item_id = None;
+        let state = OrchestrationState {
+            orchestrators: vec![o, orchestrator("b1", OrchestratorKind::BrainDump)],
+            crew: vec![m],
+            settings: zeron_proto::orchestration::OrchestrationSettings {
+                orchestrator_prompt: Some("- the person's orchestrator rules".into()),
+                crew_prompt: Some("- the person's crew rules".into()),
+                brain_dump_prompt: Some("- the person's routing rules".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let prompt = |chat: &str| role_prompt(&Role::of(Some(chat), &state), Some(chat), &state);
+        let orch = prompt("o1").unwrap();
+        assert!(orch.contains("- the person's orchestrator rules"), "{orch}");
+        assert!(!orch.contains("item_upsert"), "{orch}");
+        // The header is the engine's still: who the orchestrator is.
+        assert!(orch.starts_with("You are an orchestrator in Zeron: Ops."), "{orch}");
+        let crew = prompt("c1").unwrap();
+        assert!(crew.contains("- the person's crew rules"), "{crew}");
+        assert_eq!(prompt("b1").unwrap(), "- the person's routing rules");
+        // Blank is no override.
+        let mut blank = state.clone();
+        blank.settings.orchestrator_prompt = Some("   ".into());
+        let prompt = role_prompt(&Role::Orchestrator { id: "o1".into() }, Some("o1"), &blank).unwrap();
+        assert!(prompt.contains("item_upsert"), "{prompt}");
+    }
+
+    #[test]
     fn a_full_or_paused_crew_refuses_new_work_clearly() {
         let mut o = orchestrator("o1", OrchestratorKind::Standard);
         assert_eq!(crew_refusal(&o, 9, true), None, "no limit");
@@ -1699,7 +1763,7 @@ mod tests {
         assert_eq!(offered(&Role::Crew { orchestrator_id: "o".into() }), vec![REPORT, ASK, PROGRESS, SCRATCHPAD_READ]);
         assert_eq!(
             offered(&Role::Orchestrator { id: "o".into() }),
-            vec![ASK, BOARD, ITEM_UPSERT, ITEM_CLOSE, CREW_ADD, CREW_RELEASE, NOTES_SET, PROGRESS, ANSWER_ASK, SCRATCHPAD_READ]
+            vec![ASK, BOARD, ITEM_UPSERT, ITEM_CLOSE, CREW_ADD, CREW_RELEASE, NOTES_SET, RULES_SET, PROGRESS, ANSWER_ASK, SCRATCHPAD_READ]
         );
         assert_eq!(
             offered(&Role::BrainDump { id: "b".into() }),
@@ -1854,6 +1918,14 @@ mod tests {
 
         let notes = op_for(NOTES_SET, json!({ "text": "plan" }), &orch).unwrap();
         assert_eq!(notes, json!({ "op": "updateOrchestrator", "id": "o", "notes": "plan" }));
+
+        // rules_set: whichever field changed, in the caller's own row.
+        let both = op_for(RULES_SET, json!({ "rules": "always test", "crew_rules": "report early" }), &orch).unwrap();
+        assert_eq!(both, json!({ "op": "updateOrchestrator", "id": "o", "rules": "always test", "crewRules": "report early" }));
+        let one = op_for(RULES_SET, json!({ "crew_rules": "report early" }), &orch).unwrap();
+        assert_eq!(one, json!({ "op": "updateOrchestrator", "id": "o", "crewRules": "report early" }));
+        assert!(op_for(RULES_SET, json!({}), &orch).is_err(), "one of them");
+        assert!(op_for(RULES_SET, json!({ "rules": "x" }), &Role::Crew { orchestrator_id: "o".into() }).is_err(), "a crew thread keeps no rules");
 
         let brain = Role::BrainDump { id: "b".into() };
         let route = op_for(

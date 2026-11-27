@@ -2766,6 +2766,28 @@
         "terms": "idle inactivity window hours days",
         "hours": "{n, plural, one {# hour} other {# hours}}",
         "days": "{n, plural, one {# day} other {# days}}"
+      },
+      "prompts_section": "Role prompts",
+      "orchestrator_prompt": {
+        "label": "Orchestrator prompt",
+        "description": "The standing rules every orchestrator works by. Who it is (its name, goal and rules) is added around them.",
+        "terms": "orchestrator prompt instructions rules system"
+      },
+      "crew_prompt": {
+        "label": "Crew prompt",
+        "description": "The standing rules every crew thread works by. Whose crew it is, its item and the crew rules are added around them.",
+        "terms": "crew prompt instructions rules system"
+      },
+      "brain_dump_prompt": {
+        "label": "Brain dump prompt",
+        "description": "The routing rules the Brain dump works by.",
+        "terms": "brain dump prompt routing rules system"
+      },
+      "prompts": {
+        "custom": "Custom",
+        "default": "Default",
+        "reset": "Reset to default",
+        "save": "Save"
       }
     },
     "mcp": {

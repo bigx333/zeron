@@ -842,6 +842,20 @@ impl McpServer {
         self.env.get(Self::ROUTER_ONLY_ENV).is_some_and(|value| value == "1")
     }
 
+    /// Set on Zeron's own server for the Brain dump's runs when the person
+    /// wrote their own routing rules (Settings → Orchestration): the driver
+    /// appends them instead of the built-in ones.
+    pub const ROUTER_PROMPT_ENV: &'static str = "ZERON_ROUTER_PROMPT";
+
+    /// The person's own routing rules for the Brain dump, when they wrote
+    /// any.
+    pub fn router_prompt(&self) -> Option<&str> {
+        self.env
+            .get(Self::ROUTER_PROMPT_ENV)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+    }
+
     /// Set to `1` on Zeron's own server while Orchestrators is on where the
     /// run's engine is: its server then offers the orchestration tools (by
     /// the chat's role, and `ask`/`progress` to every chat) and the role's
@@ -1450,6 +1464,18 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn router_prompt_reads_the_persons_own_rules() {
+        let mut server = McpServer::default();
+        assert_eq!(server.router_prompt(), None);
+        server.env.insert(McpServer::ROUTER_PROMPT_ENV.into(), "  ".into());
+        assert_eq!(server.router_prompt(), None, "blank is no override");
+        server
+            .env
+            .insert(McpServer::ROUTER_PROMPT_ENV.into(), "  - my rules  ".into());
+        assert_eq!(server.router_prompt(), Some("- my rules"));
+    }
 
     #[test]
     fn auto_ranks_between_auto_accept_edits_and_full_access() {

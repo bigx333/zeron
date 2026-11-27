@@ -741,6 +741,9 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
             match method.as_str() {
                 "server/discover" => {
                     let tools = tools_for(&inner, &grant);
+                    // The role read afresh: prompts and rules edited since
+                    // this server started are in the instructions.
+                    tools.resolve_role().await;
                     json_response(
                         StatusCode::OK,
                         &json!({
@@ -751,11 +754,7 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
                                 "supportedVersions": MODERN_VERSIONS,
                                 "capabilities": { "tools": { "listChanged": true } },
                                 "_meta": { META_SERVER_INFO: server_info() },
-                                "instructions": crate::jsonrpc::instructions(
-                                    tools.waits_on_background(),
-                                    tools.side_chats_only(),
-                                    tools.delegation(),
-                                ),
+                                "instructions": crate::jsonrpc::instructions_for(&tools),
                                 "ttlMs": TOOLS_TTL_MS,
                                 "cacheScope": "private",
                             },

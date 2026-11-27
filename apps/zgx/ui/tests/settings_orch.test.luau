@@ -83,3 +83,43 @@ test("settings orch: what was set is there on the next launch", function()
 	expect(app:tree(PAGE)).to_contain("1 day")
 	expect(app:state("orch_ops")).to_be("")
 end)
+
+test("settings orch: the role prompts render, the built-ins by default", function()
+	local app = open()
+	local page = app:tree(PAGE) :: string
+	expect(page).to_contain("Role prompts")
+	expect(page).to_contain("Orchestrator prompt")
+	expect(page).to_contain("Crew prompt")
+	expect(page).to_contain("Brain dump prompt")
+	expect(page).to_contain("the orchestrator's built-in rules")
+	expect(page).to_contain("Default")
+	-- Nothing asked of the engine on open.
+	expect(app:state("orch_ops")).to_be("")
+end)
+
+test("settings orch: an edited prompt saves through updateSettings", function()
+	local app = open()
+	local row = "#orch-prompt-orchestrator_prompt"
+	local box = `{row} >> role:textbox "Orchestrator prompt"`
+	expect(app:has(box)).to_be(true)
+	app:fill(box, "- my own rules")
+	app:frames(20)
+	app:click(`{row} >> role:button "Save"`)
+	app:frames(20)
+	expect(app:state("orch_ops")).to_contain("updateSettings:orchestratorPrompt=- my own rules")
+	expect(app:tree(PAGE)).to_contain("Custom")
+end)
+
+test("settings orch: reset to default writes the empty prompt", function()
+	local app = open()
+	local row = "#orch-prompt-orchestrator_prompt"
+	local box = `{row} >> role:textbox "Orchestrator prompt"`
+	app:fill(box, "- my own rules")
+	app:frames(20)
+	app:click(`{row} >> role:button "Save"`)
+	app:frames(20)
+	app:click(`{row} >> role:button "Reset to default"`)
+	app:frames(20)
+	expect(app:state("orch_ops")).to_contain("updateSettings:orchestratorPrompt=")
+	expect(app:tree(PAGE)).to_contain("the orchestrator's built-in rules")
+end)

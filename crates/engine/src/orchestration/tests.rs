@@ -655,6 +655,16 @@ async fn crews_reports_and_the_board() {
     )
     .await
     .unwrap();
+    // Its standing rules too (rules_set): its own, both fields or either.
+    op(
+        &core,
+        agent(&auth),
+        json!({"op":"updateOrchestrator","id":auth,"rules":"always test","crewRules":"report early"}),
+    )
+    .await
+    .unwrap();
+    let row = core.orchestration.orchestrator(&auth).unwrap();
+    assert_eq!((row.rules.as_str(), row.crew_rules.as_str()), ("always test", "report early"));
     assert!(
         op(
             &core,
@@ -668,10 +678,72 @@ async fn crews_reports_and_the_board() {
         op(
             &core,
             agent(&auth),
+            json!({"op":"updateOrchestrator","id":auth,"goal":"other"})
+        )
+        .await
+        .is_err(),
+        "the goal is the person's"
+    );
+    assert!(
+        op(
+            &core,
+            agent(&auth),
             json!({"op":"updateOrchestrator","id":billing,"notes":"x"})
         )
         .await
         .is_err()
+    );
+    assert!(
+        op(
+            &core,
+            agent(&auth),
+            json!({"op":"updateOrchestrator","id":billing,"rules":"x"})
+        )
+        .await
+        .is_err(),
+        "never another orchestrator's"
+    );
+    // The Brain dump keeps only its notes: rules are the person's there
+    // too. (None is made without a dump: its row written, as a dump's first
+    // would.)
+    let now = chrono::Utc::now();
+    core.workspace.write_orchestration(|doc| {
+        doc.upsert_orchestrator(&Orchestrator {
+            id: "brain-test".into(),
+            kind: OrchestratorKind::BrainDump,
+            name: "Brain dump".into(),
+            goal: "g".into(),
+            rules: String::new(),
+            crew_rules: String::new(),
+            notes: String::new(),
+            hue: 1,
+            crew: CrewPolicy::default(),
+            wake: None,
+            paused: false,
+            archived: false,
+            created_at: now,
+            updated_at: now,
+            workflow: None,
+            flow_run: None,
+        })
+    });
+    let brain = "brain-test".to_string();
+    op(
+        &core,
+        agent(&brain),
+        json!({"op":"updateOrchestrator","id":brain,"notes":"routes"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        op(
+            &core,
+            agent(&brain),
+            json!({"op":"updateOrchestrator","id":brain,"rules":"x"})
+        )
+        .await
+        .is_err(),
+        "the Brain dump's rules are the person's"
     );
     op(
         &core,
@@ -1808,10 +1880,38 @@ async fn idle_crew_threads_are_archived_and_an_unarchive_starts_over() {
     assert_eq!((settings.crew_auto_archive, settings.crew_idle_hours), (true, 6));
     assert!(settings.crew_idle_hours_set, "the person's choice, marked");
 
+    // The role prompts: written, read back effective; "" (or the built-in)
+    // resets; past the size limit refused; an agent never sets them.
+    assert_eq!(settings.orchestrator_prompt, None);
+    assert_eq!(settings.effective_orchestrator_prompt(), zeron_proto::orchestration::role_prompts::ORCHESTRATOR_DEFAULT);
+    op(&core, Caller::Local, json!({"op":"updateSettings","orchestratorPrompt":"  - mine  ","crewPrompt":"- crew's","brainDumpPrompt":"- brain's"}))
+        .await
+        .unwrap();
+    let settings = core.workspace.orchestration_state().settings;
+    assert_eq!(settings.orchestrator_prompt.as_deref(), Some("- mine"), "trimmed as written");
+    assert_eq!(settings.effective_orchestrator_prompt(), "- mine");
+    assert_eq!(settings.effective_crew_prompt(), "- crew's");
+    assert_eq!(settings.effective_brain_dump_prompt(), "- brain's");
+    op(&core, Caller::Local, json!({"op":"updateSettings","orchestratorPrompt":""})).await.unwrap();
+    let settings = core.workspace.orchestration_state().settings;
+    assert_eq!(settings.orchestrator_prompt, None, "blank resets to the built-in");
+    assert_eq!(settings.crew_prompt.as_deref(), Some("- crew's"), "the rest untouched");
+    // The built-in itself written back is the reset too.
+    let default = zeron_proto::orchestration::role_prompts::CREW_DEFAULT;
+    op(&core, Caller::Local, json!({"op":"updateSettings","crewPrompt":default})).await.unwrap();
+    assert_eq!(core.workspace.orchestration_state().settings.crew_prompt, None);
+    // Null clears as well.
+    op(&core, Caller::Local, json!({"op":"updateSettings","brainDumpPrompt":null})).await.unwrap();
+    assert_eq!(core.workspace.orchestration_state().settings.brain_dump_prompt, None);
+    // Too big is refused.
+    let too_big = "x".repeat(zeron_proto::orchestration::MAX_PROMPT_BYTES + 1);
+    assert!(op(&core, Caller::Local, json!({"op":"updateSettings","orchestratorPrompt":too_big})).await.is_err());
+    assert!(op(&core, agent(&auth), json!({"op":"updateSettings","orchestratorPrompt":"- x"})).await.is_err(), "an agent never sets them");
+
     // An untouched row from before the 4-hour default (12, never chosen):
     // read as 4. One the person set to 12: kept.
     core.workspace.write_orchestration(|doc| {
-        doc.upsert_orchestration_settings(&OrchestrationSettings { crew_auto_archive: true, crew_idle_hours: 12, crew_idle_hours_set: false })
+        doc.upsert_orchestration_settings(&OrchestrationSettings { crew_auto_archive: true, crew_idle_hours: 12, crew_idle_hours_set: false, ..OrchestrationSettings::default() })
     });
     assert_eq!(core.workspace.orchestration_state().settings.crew_idle_hours, 4);
     op(&core, Caller::Local, json!({"op":"updateSettings","crewIdleHours":12})).await.unwrap();

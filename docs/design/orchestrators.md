@@ -241,6 +241,7 @@ Role is resolved at server start: orchestrator, Brain dump, crew or plain.
 | `item_upsert(…)` | orchestrators, Brain dump | upsertItem |
 | `crew_add(chat, role?, item?)`, `crew_release(chat)` | orchestrators | addToCrew / releaseFromCrew |
 | `notes_set(text)` | orchestrators | updateOrchestrator(notes) |
+| `rules_set(rules?, crew_rules?)` | orchestrators | updateOrchestrator(rules, crewRules) |
 | `world()` → orchestrators (goal, crew, items), recent top-level chats (title, status, project, device), devices | Brain dump | read |
 | `route(dump, excerpt, target, intent, message, candidates?, progress?)` | Brain dump | route |
 | `dump_done(dump, summary)` | Brain dump | dumpDone |
@@ -252,6 +253,13 @@ Role is resolved at server start: orchestrator, Brain dump, crew or plain.
 full), and default harness and model.
 
 ### Built-in prompts (appended to the harness's system prompt by role)
+
+Each role prompt is editable in Settings → Orchestration: the person's own text replaces the
+built-in bullets below (`orchestratorPrompt`, `crewPrompt`, `brainDumpPrompt` on the synced
+settings row, at most 12 KiB; empty or the built-in itself resets). The header around them — who
+the orchestrator is, whose crew, the crew rules — is still the engine's. MCP serves the edited
+prompts in `initialize`/`server/discover` instructions (read afresh each time), and the Claude
+driver appends the Brain dump's own in place of the built-in (`ZERON_ROUTER_PROMPT`).
 
 - **Orchestrator**: "You are an orchestrator in Zeron: <name>. Goal: <goal>. Your rules: <rules>.
   - Split work into board items (`item_upsert`) and run each through crew threads (`create_chat`,

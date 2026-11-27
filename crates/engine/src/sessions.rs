@@ -3780,6 +3780,15 @@ impl Inner {
         // never carry one).
         if zeron_proto::orchestration::is_brain_dump_chat(chat_id) {
             env.insert(zeron_proto::McpServer::ROUTER_ONLY_ENV.to_owned(), "1".to_owned());
+            // The person's own routing rules (Settings → Orchestration), so
+            // the driver appends them instead of the built-in ones.
+            if let Some(prompt) = self
+                .workspace()
+                .and_then(|w| w.orchestration_state().settings.brain_dump_prompt)
+                .filter(|p| !p.trim().is_empty())
+            {
+                env.insert(zeron_proto::McpServer::ROUTER_PROMPT_ENV.to_owned(), prompt);
+            }
         }
         // Orchestration's tools and role prompts only while it's on (the
         // engine refuses its RPCs while it's off all the same).

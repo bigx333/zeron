@@ -242,8 +242,14 @@ impl EngineRpc {
                 self.add_to_crew(&orchestrator_id, &chat_id, &role, item_id)?;
                 Ok(json!({ "id": chat_id }))
             }
-            OrchestrateOp::UpdateSettings { crew_auto_archive, crew_idle_hours } => {
-                use zeron_proto::orchestration::{CREW_IDLE_HOURS_MAX, CREW_IDLE_HOURS_MIN};
+            OrchestrateOp::UpdateSettings {
+                crew_auto_archive,
+                crew_idle_hours,
+                orchestrator_prompt,
+                crew_prompt,
+                brain_dump_prompt,
+            } => {
+                use zeron_proto::orchestration::{CREW_IDLE_HOURS_MAX, CREW_IDLE_HOURS_MIN, role_prompts};
                 if let Some(hours) = crew_idle_hours
                     && !(CREW_IDLE_HOURS_MIN..=CREW_IDLE_HOURS_MAX).contains(&hours)
                 {
@@ -251,6 +257,9 @@ impl EngineRpc {
                         "The idle window is {CREW_IDLE_HOURS_MIN} to {CREW_IDLE_HOURS_MAX} hours"
                     )));
                 }
+                let orchestrator_prompt = normalize_prompt(orchestrator_prompt.clone(), role_prompts::ORCHESTRATOR_DEFAULT)?;
+                let crew_prompt = normalize_prompt(crew_prompt.clone(), role_prompts::CREW_DEFAULT)?;
+                let brain_dump_prompt = normalize_prompt(brain_dump_prompt.clone(), role_prompts::BRAIN_DUMP)?;
                 let settings = orch.workspace().write_orchestration(|doc| {
                     let mut settings = doc.orchestration_settings();
                     if let Some(on) = crew_auto_archive {
@@ -259,6 +268,15 @@ impl EngineRpc {
                     if let Some(hours) = crew_idle_hours {
                         settings.crew_idle_hours = hours;
                         settings.crew_idle_hours_set = true;
+                    }
+                    if let Some(next) = orchestrator_prompt {
+                        settings.orchestrator_prompt = next;
+                    }
+                    if let Some(next) = crew_prompt {
+                        settings.crew_prompt = next;
+                    }
+                    if let Some(next) = brain_dump_prompt {
+                        settings.brain_dump_prompt = next;
                     }
                     doc.upsert_orchestration_settings(&settings);
                     settings
@@ -1010,6 +1028,27 @@ pub(crate) struct NewOrchestrator {
 }
 
 /// Whether `who` may do `op`. The person may do everything.
+/// A role prompt patch as it's written: absent leaves the row alone,
+/// `null` (or the default, or blank) clears it to the built-in, anything
+/// else is kept within the registry's text-field size.
+fn normalize_prompt(patch: Option<Option<String>>, default: &str) -> Result<Option<Option<String>>, RpcError> {
+    use zeron_proto::orchestration::MAX_PROMPT_BYTES;
+    match patch {
+        None => Ok(None),
+        Some(None) => Ok(Some(None)),
+        Some(Some(raw)) => {
+            let t = raw.trim();
+            if t.is_empty() || t == default {
+                Ok(Some(None))
+            } else if t.len() > MAX_PROMPT_BYTES {
+                Err(failed(format!("A role prompt is at most {MAX_PROMPT_BYTES} bytes")))
+            } else {
+                Ok(Some(Some(t.to_owned())))
+            }
+        }
+    }
+}
+
 pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Result<(), RpcError> {
     let Who::Agent { chat, role } = who else {
         return Ok(());
@@ -1050,20 +1089,21 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
             notes: _,
             workflow,
         } => {
-            let own = matches!(role, ChatRole::Orchestrator { id: mine } | ChatRole::BrainDump { id: mine } if mine == id);
-            let only_notes = name.is_none()
+            // A standard orchestrator keeps its own standing rules too
+            // (rules_set); the Brain dump only its notes.
+            let own = matches!(role, ChatRole::Orchestrator { id: mine } if mine == id);
+            let own_brain = matches!(role, ChatRole::BrainDump { id: mine } if mine == id);
+            let untouched_persons = name.is_none()
                 && goal.is_none()
-                && rules.is_none()
-                && crew_rules.is_none()
                 && crew.is_none()
                 && wake.is_none()
                 && paused.is_none()
                 && archived.is_none()
                 && workflow.is_none();
-            if own && only_notes {
+            if (own && untouched_persons) || (own_brain && untouched_persons && rules.is_none() && crew_rules.is_none()) {
                 Ok(())
             } else {
-                refuse("An orchestrator changes only its own notes: the person sets the rest")
+                refuse("An orchestrator changes only its own notes, rules and crew rules: the person sets the rest")
             }
         }
         OrchestrateOp::AddToCrew {

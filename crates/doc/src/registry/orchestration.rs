@@ -1094,6 +1094,37 @@ mod tests {
         assert_eq!(kept.len(), CLOSED_ASKS_IN_STATE_AT_LEAST);
         assert!(kept.iter().any(|a| a.id == "old29") && !kept.iter().any(|a| a.id == "old00"));
     }
+
+    #[test]
+    fn orchestration_settings_round_trip_the_role_prompts() {
+        let mut doc = RegistryDoc::new("dev-a");
+        // Unwritten: the defaults, no prompt.
+        assert_eq!(doc.orchestration_settings(), OrchestrationSettings::default());
+        // Custom prompts kept, and they sync.
+        let mut a = RegistryDoc::new("dev-a");
+        let mut b = RegistryDoc::new("dev-b");
+        let mut server = std::collections::HashMap::new();
+        let mut seq = 0u64;
+        a.upsert_orchestration_settings(&OrchestrationSettings {
+            orchestrator_prompt: Some("- orch".into()),
+            crew_prompt: Some("- crew".into()),
+            brain_dump_prompt: Some("- brain".into()),
+            ..OrchestrationSettings::default()
+        });
+        server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+        let read = b.orchestration_settings();
+        assert_eq!(read.orchestrator_prompt.as_deref(), Some("- orch"));
+        assert_eq!(read.crew_prompt.as_deref(), Some("- crew"));
+        assert_eq!(read.brain_dump_prompt.as_deref(), Some("- brain"));
+        // Reset to None (the built-in) survives the round trip too.
+        let mut cleared = read.clone();
+        cleared.orchestrator_prompt = None;
+        b.upsert_orchestration_settings(&cleared);
+        server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+        let read = a.orchestration_settings();
+        assert_eq!(read.orchestrator_prompt, None);
+        assert_eq!(read.effective_orchestrator_prompt(), role_prompts::ORCHESTRATOR_DEFAULT);
+    }
 }
 
 /// perf-audit: logs how long a read_orchestration took (dropped at its end).

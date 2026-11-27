@@ -194,7 +194,20 @@ pub struct OrchestrationSettings {
     /// default written along with another setting, and reads as today's.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub crew_idle_hours_set: bool,
+    /// The orchestrator role prompt the person wrote (Settings →
+    /// Orchestration); `None` is the built-in one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator_prompt: Option<String>,
+    /// The crew role prompt the person wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew_prompt: Option<String>,
+    /// The Brain dump role prompt the person wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brain_dump_prompt: Option<String>,
 }
+
+/// The most a role prompt holds, as the registry's text fields allow.
+pub const MAX_PROMPT_BYTES: usize = 12 * 1024;
 
 /// The default idle window before a crew thread is archived.
 pub const DEFAULT_CREW_IDLE_HOURS: u32 = 4;
@@ -215,7 +228,14 @@ fn default_crew_idle_hours() -> u32 {
 
 impl Default for OrchestrationSettings {
     fn default() -> Self {
-        Self { crew_auto_archive: true, crew_idle_hours: DEFAULT_CREW_IDLE_HOURS, crew_idle_hours_set: false }
+        Self {
+            crew_auto_archive: true,
+            crew_idle_hours: DEFAULT_CREW_IDLE_HOURS,
+            crew_idle_hours_set: false,
+            orchestrator_prompt: None,
+            crew_prompt: None,
+            brain_dump_prompt: None,
+        }
     }
 }
 
@@ -227,6 +247,34 @@ impl OrchestrationSettings {
             self.crew_idle_hours = DEFAULT_CREW_IDLE_HOURS;
         }
         self
+    }
+
+    /// The orchestrator role prompt as it's given out: the person's own
+    /// when they wrote one, else the built-in.
+    pub fn effective_orchestrator_prompt(&self) -> &str {
+        self.orchestrator_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(role_prompts::ORCHESTRATOR_DEFAULT)
+    }
+
+    /// The crew role prompt as it's given out.
+    pub fn effective_crew_prompt(&self) -> &str {
+        self.crew_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(role_prompts::CREW_DEFAULT)
+    }
+
+    /// The Brain dump role prompt as it's given out.
+    pub fn effective_brain_dump_prompt(&self) -> &str {
+        self.brain_dump_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(role_prompts::BRAIN_DUMP)
     }
 
     /// The idle window, kept inside its bounds.
@@ -1701,37 +1749,73 @@ pub mod role_prompts {
         if text.is_empty() { "none" } else { text }
     }
 
-    pub fn orchestrator(name: &str, goal: &str, rules: &str) -> String {
-        format!(
-            "You are an orchestrator in Zeron: {name}. Goal: {goal}. Your rules: {rules}.\n\
-- Split work into board items (`item_upsert`) and run each through crew threads (`create_chat`, kind crew, one item each; stack work that touches the same files).\n\
+    /// The orchestrator role prompt's standing rules, as the person reads
+    /// them in Settings → Orchestration (the header — who the orchestrator
+    /// is — is added around them).
+    pub const ORCHESTRATOR_DEFAULT: &str = "- Split work into board items (`item_upsert`) and run each through crew threads (`create_chat`, kind crew, one item each; stack work that touches the same files).\n\
+- Delegate implementation work to crew threads; answer planning, trade-offs and discussion yourself.\n\
+- Write self-contained briefs: state what \"done\" means, what is out of scope, and what the thread can rely on. Answer a crew thread's question with a decision, not status.\n\
 - Zeron works out where each card is on the board from what happens (its thread working, a report, an ask, its finish line): you never set a column. Give a new card its finish line (`finish`): `report` (its thread reports done; the default), `merged` (its branch lands on `into`), `pr` (its PR is merged or closed) or `accept` (the person says it looks good). Put results in `outcome`. A card for later that shouldn't start on its own: `later: true`.\n\
 - When a card needs the person, `ask` on it (`item_id`), or pass `ask` with `item_upsert`: the question is in Needs you and its answer comes back to you.\n\
+- Verify a crew thread's `done` claim against its PR, checks or branch before telling the person it is ready.\n\
 - A card is done when it crosses its finish line. Close one yourself (`item_close`, with the reason) only when the work turned out unnecessary or is finished in a way its line can't see; Zeron refuses while a thread works on it.\n\
 - A paused card is the person's decision: never message its thread; it waits until they resume it.\n\
 - A [Board] message lists cards of yours nothing is moving on: for each, send its thread on, ask the person, or close it with the reason.\n\
 - After starting or messaging crew, end your turn: don't wait on crew threads (`wait_for_turn`, `wait`). Their reports arrive together as 'Crew updates' and wake you; act on them, don't echo them.\n\
+- Stay silent on a wake that changes nothing for the person. Speak to the person only for a result, a ready PR, a decision or a changed blocker, and open with the verdict.\n\
 - Check how a crew thread is going with `progress`, never by messaging it: a message interrupts its work.\n\
 - Ask the person only via `ask`, only for real decisions.\n\
 - A [Crew ask] is a crew thread's question waiting on the person: answer it with `answer_ask` only when your goal, rules or the person's earlier decisions settle it; else leave it.\n\
 - When the person asks you something, answer in your reply, briefly, and record the answer as the item's outcome.\n\
-- Keep `notes` as your plan.",
+- When the person gives a standing rule (\"always…\", \"never…\", \"from now on…\"), save it with `rules_set` in your `rules` or `crew_rules`, and say which in one line.\n\
+- Keep `notes` as your plan.";
+
+    /// The crew role prompt's standing rules.
+    pub const CREW_DEFAULT: &str = "- Report with `report`: done, blocked or failed when it happens, progress at milestones. Never `send_message` your orchestrator.\n\
+- In a `done` report, state the outcome, the PR (or branch/links), what you verified, and anything still needed.\n\
+- Ask the person (`ask`) only when your orchestrator can't decide.";
+
+    /// `instructions` the person wrote, or the built-in when it's empty.
+    fn instructions_or<'a>(instructions: &'a str, default: &'a str) -> &'a str {
+        let trimmed = instructions.trim();
+        if trimmed.is_empty() { default } else { trimmed }
+    }
+
+    /// An orchestrator's prompt: its header (who it is), then `instructions`
+    /// (the built-in rules when empty — what Settings → Orchestration edits).
+    pub fn orchestrator_with(name: &str, goal: &str, rules: &str, instructions: &str) -> String {
+        format!(
+            "You are an orchestrator in Zeron: {name}. Goal: {goal}. Your rules: {rules}.\n{instructions}",
             name = one_line(name, LABEL_MAX),
             goal = or_none(goal),
             rules = or_none(rules),
+            instructions = instructions_or(instructions, ORCHESTRATOR_DEFAULT),
         )
     }
 
-    pub fn crew(orchestrator: &str, item: Option<&str>, crew_rules: &str) -> String {
+    /// A crew thread's prompt, likewise.
+    pub fn crew_with(orchestrator: &str, item: Option<&str>, crew_rules: &str, instructions: &str) -> String {
         format!(
             "You are on {orchestrator}'s crew, working on {item}.\n\
-- Crew rules: {rules}.\n\
-- Report with `report`: done, blocked or failed when it happens, progress at milestones. Never `send_message` your orchestrator.\n\
-- Ask the person (`ask`) only when your orchestrator can't decide.",
+- Crew rules: {rules}.\n{instructions}",
             orchestrator = one_line(orchestrator, LABEL_MAX),
             item = item.map(|i| one_line(i, LABEL_MAX)).filter(|i| !i.is_empty()).unwrap_or_else(|| "what it sends you".into()),
             rules = or_none(crew_rules),
+            instructions = instructions_or(instructions, CREW_DEFAULT),
         )
+    }
+
+    /// The Brain dump's prompt: the person's `instructions`, or the built-in.
+    pub fn brain_dump_with(instructions: &str) -> String {
+        instructions_or(instructions, BRAIN_DUMP).to_owned()
+    }
+
+    pub fn orchestrator(name: &str, goal: &str, rules: &str) -> String {
+        orchestrator_with(name, goal, rules, ORCHESTRATOR_DEFAULT)
+    }
+
+    pub fn crew(orchestrator: &str, item: Option<&str>, crew_rules: &str) -> String {
+        crew_with(orchestrator, item, crew_rules, CREW_DEFAULT)
     }
 
     pub const BRAIN_DUMP: &str = "You route the person's brain dumps.\n\
@@ -2321,6 +2405,12 @@ pub enum OrchestrateOp {
         crew_auto_archive: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         crew_idle_hours: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+        orchestrator_prompt: Option<Option<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+        crew_prompt: Option<Option<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+        brain_dump_prompt: Option<Option<String>>,
     },
     /// The person approves a card in Review: it is Done, its approval
     /// recorded (`approvedAt`). Replies `{ id }`.
@@ -2861,6 +2951,80 @@ mod tests {
         assert!(role_prompts::BRAIN_DUMP.contains("scratchpad_append"));
         assert!(!role_prompts::BRAIN_DUMP.contains("note to self"));
         assert_eq!(role_prompts::crew_rules_block("Ops", " be brief "), "[Crew rules from Ops]\nbe brief\n\n");
+    }
+
+    #[test]
+    fn default_prompts_carry_the_operational_points() {
+        // The orchestrator's five: delegate implementation, self-contained
+        // briefs, verify done claims, stay silent on a no-change wake, and
+        // standing rules through rules_set.
+        let d = role_prompts::ORCHESTRATOR_DEFAULT;
+        assert!(d.contains("Delegate implementation work to crew threads"), "{d}");
+        assert!(d.contains("Write self-contained briefs"), "{d}");
+        assert!(d.contains("Verify a crew thread's `done` claim"), "{d}");
+        assert!(d.contains("Stay silent on a wake that changes nothing"), "{d}");
+        assert!(d.contains("save it with `rules_set`"), "{d}");
+        // The crew's one: what a done report carries.
+        assert!(role_prompts::CREW_DEFAULT.contains("In a `done` report, state the outcome"));
+        // The defaults are what the unchanged builders hand out.
+        assert!(role_prompts::orchestrator("Ops", "g", "").contains(d));
+        assert!(role_prompts::crew("Ops", None, "").contains(role_prompts::CREW_DEFAULT));
+    }
+
+    #[test]
+    fn role_prompts_take_the_persons_own_or_fall_back() {
+        let custom = role_prompts::orchestrator_with("Ops", "g", "", "- my rules");
+        assert!(custom.contains("- my rules"), "{custom}");
+        assert!(!custom.contains("item_upsert"), "{custom}");
+        let empty = role_prompts::orchestrator_with("Ops", "g", "", "  ");
+        assert!(empty.contains("item_upsert"), "{empty}");
+        let crew = role_prompts::crew_with("Ops", None, "", "- crew rules of mine");
+        assert!(crew.contains("- crew rules of mine"), "{crew}");
+        assert!(role_prompts::crew_with("Ops", None, "", "").contains("In a `done` report"));
+        assert_eq!(role_prompts::brain_dump_with("- mine"), "- mine");
+        assert_eq!(role_prompts::brain_dump_with(" "), role_prompts::BRAIN_DUMP);
+    }
+
+    #[test]
+    fn settings_carry_the_prompts_or_fall_back() {
+        let settings = OrchestrationSettings::default();
+        assert_eq!(settings.effective_orchestrator_prompt(), role_prompts::ORCHESTRATOR_DEFAULT);
+        assert_eq!(settings.effective_crew_prompt(), role_prompts::CREW_DEFAULT);
+        assert_eq!(settings.effective_brain_dump_prompt(), role_prompts::BRAIN_DUMP);
+        let custom = OrchestrationSettings {
+            orchestrator_prompt: Some("- mine".into()),
+            crew_prompt: Some("   ".into()),
+            ..OrchestrationSettings::default()
+        };
+        assert_eq!(custom.effective_orchestrator_prompt(), "- mine");
+        // Blank is no override.
+        assert_eq!(custom.effective_crew_prompt(), role_prompts::CREW_DEFAULT);
+        // An old row (no prompt keys) deserializes with the defaults.
+        let old: OrchestrationSettings = serde_json::from_str(r#"{"crewAutoArchive":true,"crewIdleHours":6}"#).unwrap();
+        assert_eq!(old.orchestrator_prompt, None);
+        assert_eq!(old.effective_orchestrator_prompt(), role_prompts::ORCHESTRATOR_DEFAULT);
+        // Empty object too.
+        let empty: OrchestrationSettings = serde_json::from_str("{}").unwrap();
+        assert!(empty.crew_auto_archive);
+        // None is not written on the wire.
+        assert!(!serde_json::to_string(&settings).unwrap().contains("orchestratorPrompt"));
+        let written = serde_json::to_value(&custom).unwrap();
+        assert_eq!(written["orchestratorPrompt"], "- mine");
+    }
+
+    #[test]
+    fn update_settings_reads_absent_null_and_text_prompts_apart() {
+        // Absent: unchanged. Null: cleared. Text: written.
+        let absent: OrchestrateOp = serde_json::from_str(r#"{"op":"updateSettings","crewIdleHours":6}"#).unwrap();
+        let OrchestrateOp::UpdateSettings { orchestrator_prompt, crew_prompt, .. } = &absent else { panic!() };
+        assert_eq!(*orchestrator_prompt, None);
+        assert_eq!(*crew_prompt, None);
+        let cleared: OrchestrateOp = serde_json::from_str(r#"{"op":"updateSettings","orchestratorPrompt":null}"#).unwrap();
+        let OrchestrateOp::UpdateSettings { orchestrator_prompt, .. } = &cleared else { panic!() };
+        assert_eq!(*orchestrator_prompt, Some(None));
+        let written: OrchestrateOp = serde_json::from_str(r#"{"op":"updateSettings","orchestratorPrompt":"- mine"}"#).unwrap();
+        let OrchestrateOp::UpdateSettings { orchestrator_prompt, .. } = &written else { panic!() };
+        assert_eq!(*orchestrator_prompt, Some(Some("- mine".into())));
     }
 
     #[test]
