@@ -93,7 +93,9 @@ Orchestrators' chats work by their own means, so delegation leaves them alone: a
 dump are never in Parent or Child mode (their crew's reports and their own wake already cover what a wake
 would bring). A crew thread is a full thread: with the setting on it delegates to subagents of its own in the
 background, reads Waiting while they run, and is woken with their results. Its `send_message` to its own
-orchestrator needs no `peer: true`: the engine files it as a report.
+orchestrator needs no `peer: true`: the engine files it as a report. Neither does any chat's `send_message`
+to the Brain dump: the engine files it as the outcome of the route it sent, else an update for the person.
+Interrupting, answering for or archiving them still does: the engine files only messages.
 
 ## Reaching other chats
 

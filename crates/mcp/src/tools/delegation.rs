@@ -173,21 +173,6 @@ impl Tools {
         if chat.id == origin || chat.parent_chat_id.as_deref() == Some(origin) {
             return Ok(());
         }
-        // A crew thread's send to its orchestrator is its report: the
-        // engine files it as one (rpc/crew_messages.rs), so it's no peer act.
-        if self.delegation() == Delegation::Parent
-            && self
-                .zeron
-                .resolve_chat(origin)
-                .await
-                .ok()
-                .is_some_and(|own| {
-                    own.child_kind == Some(ChildKind::Crew)
-                        && own.parent_chat_id.as_deref() == Some(chat.id.as_str())
-                })
-        {
-            return Ok(());
-        }
         // What a child came to reaches its parent by itself; a message says
         // it again, in the middle of whatever the parent is doing.
         if self.delegation() == Delegation::Child
@@ -207,6 +192,35 @@ impl Tools {
             "{} isn't your child chat. Work with the chats you created (create_chat starts one). Set peer: true only if the person asked you to act on it, you're answering a message it sent you, or there is no other way.",
             chat.title.as_deref().map(str::trim).filter(|t| !t.is_empty()).unwrap_or(short(&chat.id)),
         )
+    }
+
+    /// Whether a `send_message` to `chat` is filed by the engine instead of
+    /// starting a turn there (rpc/crew_messages.rs), so it's no peer act: any
+    /// message to the Brain dump (the outcome of the route it sent, else an
+    /// update for the person), and a crew thread's to its own orchestrator (a
+    /// report).
+    pub(super) async fn send_is_filed(&self, chat: &Chat) -> bool {
+        if self.delegation() == Delegation::Off {
+            return false;
+        }
+        // A crew thread's to its own orchestrator is its report.
+        if self.delegation() == Delegation::Parent
+            && let Some(origin) = self.origin_chat()
+            && self
+                .zeron
+                .resolve_chat(origin)
+                .await
+                .ok()
+                .is_some_and(|own| {
+                    own.child_kind == Some(ChildKind::Crew)
+                        && own.parent_chat_id.as_deref() == Some(chat.id.as_str())
+                })
+        {
+            return true;
+        }
+        // Any chat's to the Brain dump: the outcome of the route it sent,
+        // else an update for the person.
+        self.orchestrator_kinds().await.get(&chat.id) == Some(&zeron_proto::orchestration::OrchestratorKind::BrainDump)
     }
 
     /// Record a message about to be sent to a child, so its turn's end comes

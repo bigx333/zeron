@@ -1862,7 +1862,11 @@ impl Tools {
             .as_deref()
             .and_then(|id| spaces.iter().find(|s| s.id == id));
         let baseline = session_for(&sessions, &chat);
-        self.ensure_within_reach(&chat, args.peer).await?;
+        if let Err(error) = self.ensure_within_reach(&chat, args.peer).await
+            && !self.send_is_filed(&chat).await
+        {
+            return Err(error);
+        }
         // (`async` and `wait` say how to wait, as create_chat's mode does.)
         let (mode, wait) = match args.mode.as_deref().unwrap_or("auto") {
             "async" => ("auto", false),
@@ -3346,6 +3350,58 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("its orchestrator, no peer flag: {e}"));
         let refused = crew.call("send_message", json!({ "chat": "Other", "text": "hi" })).await.unwrap_err();
+        assert!(refused.contains("isn't your child"), "{refused}");
+        // Only the send is filed: acting on its orchestrator is a peer act.
+        let refused = crew.call("interrupt_chat", json!({ "chat": "Alpha" })).await.unwrap_err();
+        assert!(refused.contains("isn't your child"), "{refused}");
+        crew.call("interrupt_chat", json!({ "chat": "Alpha", "peer": true }))
+            .await
+            .unwrap_or_else(|e| panic!("peer interrupt: {e}"));
+    }
+
+    /// Any chat's send to the Brain dump is filed (the route's outcome, or an
+    /// update for the person), so a delegating chat answers a route with no
+    /// peer flag. Acting on it, and sends to a standard orchestrator that
+    /// isn't its own, still need one.
+    #[tokio::test]
+    async fn a_delegating_chat_answers_the_brain_dump_without_peer() {
+        let orchestrator = |id: &str, kind: &str| {
+            json!({"id": id, "kind": kind, "name": "O", "hue": 1,
+                "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z"})
+        };
+        let world = Arc::new(World {
+            orchestrators: Some(json!([
+                orchestrator("chat-brain-8", "brainDump"),
+                orchestrator("chat-orch-8", "standard"),
+            ])),
+            extra_chats: vec![
+                json!({
+                    "id": "chat-brain-8", "deviceId": "dev-local", "title": "Brain dump",
+                    "archived": false, "spaceId": "space-1", "createdAt": "2026-09-01T00:00:00Z",
+                    "config": { "harness": "codex", "model": null, "reasoning": null, "sandbox": "workspace-write" },
+                }),
+                json!({
+                    "id": "chat-orch-8", "deviceId": "dev-local", "title": "Orch",
+                    "archived": false, "spaceId": "space-1", "createdAt": "2026-09-01T00:00:00Z",
+                    "config": { "harness": "codex", "model": null, "reasoning": null, "sandbox": "workspace-write" },
+                }),
+            ],
+            ..Default::default()
+        });
+        let parent = parent_tools(&world, "chat-alpha-1");
+        parent
+            .call("send_message", json!({ "chat": "chat-brain-8", "text": "done: 3" }))
+            .await
+            .unwrap_or_else(|e| panic!("the Brain dump, no peer flag: {e}"));
+        let refused = parent.call("interrupt_chat", json!({ "chat": "chat-brain-8" })).await.unwrap_err();
+        assert!(refused.contains("isn't your child"), "{refused}");
+        let refused = parent.call("archive_chat", json!({ "chat": "chat-brain-8" })).await.unwrap_err();
+        assert!(refused.contains("isn't your child"), "{refused}");
+        // A standard orchestrator that isn't the sender's own is a turn there.
+        let refused = parent
+            .call("send_message", json!({ "chat": "chat-orch-8", "text": "hi" }))
+            .await
+            .unwrap_err();
         assert!(refused.contains("isn't your child"), "{refused}");
     }
 

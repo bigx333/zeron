@@ -92,7 +92,8 @@ chats, coalesced ≤ 4/s).
   message as a "Crew updates" card and **never** as a user bubble.
 - A crew thread's `send_message` to its own orchestrator is converted to a `report` with state
   `message` (body = detail, first line = summary). This keeps older prompts and agents working, and
-  `ensure_within_reach` lets it through without `peer`: it is the crew's own report path, not a peer act.
+  the send skips `ensure_within_reach` without `peer`: it is the crew's own report path, not a peer act
+  (acting on the orchestrator — interrupting, answering for, archiving it — still needs `peer`).
 - Orchestrator → crew `send_message` is unchanged. Crew rules are prepended once per run as a
   `[Crew rules from <orchestrator>]` block, only when they changed since the last send.
 
