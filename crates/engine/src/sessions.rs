@@ -3671,9 +3671,23 @@ impl Inner {
         {
             return zeron_mcp::Delegation::Off;
         }
+        // An orchestrator or the Brain dump has its crew's reports and its
+        // own wake, not delegated tasks: as the voice orchestrator's, off.
+        if self.orchestration_on()
+            && self.workspace().is_some_and(|ws| {
+                ws.read_orchestration_with(|doc| doc.orchestrator(chat_id).is_some())
+            })
+        {
+            return zeron_mcp::Delegation::Off;
+        }
         match self.workspace().and_then(|ws| ws.chat(chat_id).ok().flatten()) {
             Some(chat) if chat.child_kind == Some(zeron_proto::ChildKind::Subagent) => {
                 zeron_mcp::Delegation::Child
+            }
+            // A crew thread is a full thread: it may delegate to its own
+            // subagents, and is woken with their results.
+            Some(chat) if chat.child_kind == Some(zeron_proto::ChildKind::Crew) => {
+                zeron_mcp::Delegation::Parent
             }
             // A side chat is the person's conversation, and delegates to no one.
             Some(chat) if chat.parent_chat_id.is_some() => zeron_mcp::Delegation::Off,
@@ -9144,5 +9158,73 @@ pub(crate) mod tests {
         assert_eq!(env(), None, "off again: gone from the next launch");
         tx.send(true).unwrap();
         assert_eq!(env().as_deref(), Some("1"), "on again: back");
+    }
+
+    /// The delegation each chat's run is told (`Inner::delegation`): an
+    /// orchestrator and the Brain dump work by crew reports and their own
+    /// wake, a crew thread delegates to subagents of its own.
+    #[tokio::test]
+    async fn delegation_follows_the_chats_orchestration_role() {
+        use zeron_rpc::{Caller, RpcReply, RpcService, methods, with_caller};
+
+        async fn call(core: &crate::EngineCore, method: &str, params: serde_json::Value) -> serde_json::Value {
+            match with_caller(Caller::Local, core.rpc_service().handle(method, params)).await {
+                Ok(RpcReply::Value(value)) => value,
+                Ok(RpcReply::Stream(_)) => serde_json::Value::Null,
+                Err(error) => panic!("{method}: {error}"),
+            }
+        }
+        async fn op(core: &crate::EngineCore, params: serde_json::Value) -> String {
+            call(core, methods::ORCHESTRATE, params).await["id"].as_str().unwrap_or_default().to_owned()
+        }
+        async fn chat(core: &crate::EngineCore, id: &str, parent: Option<(&str, &str)>) {
+            let mut params = serde_json::json!({"op":"createChat", "chatId":id, "deviceId":"dev-remote",
+                "config":{"harness":"codex","sandbox":"workspace-write"}});
+            if let Some((parent, kind)) = parent {
+                params["parentChatId"] = serde_json::json!(parent);
+                params["childKind"] = serde_json::json!(kind);
+            }
+            call(core, methods::MUTATE, params).await;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        core.set_orchestrators(true).await;
+        assert!(core.sessions.async_delegation().enabled(), "a fresh install has it on");
+
+        let orch = op(&core, serde_json::json!({"op":"createOrchestrator","name":"Auth","goal":"g","deviceId":"dev-remote"})).await;
+        op(&core, serde_json::json!({"op":"dump","text":"fix the login"})).await;
+        let brain = core
+            .orchestration
+            .state()
+            .orchestrators
+            .iter()
+            .find(|o| o.kind == zeron_proto::orchestration::OrchestratorKind::BrainDump)
+            .unwrap()
+            .id
+            .clone();
+        chat(&core, "plain", None).await;
+        chat(&core, "crew", Some((&orch, "crew"))).await;
+        chat(&core, "sub", Some(("plain", "subagent"))).await;
+        chat(&core, "side", Some(("plain", "side"))).await;
+
+        let delegation = |id: &str| core.sessions.inner.delegation(id);
+        assert_eq!(delegation(&orch), zeron_mcp::Delegation::Off, "an orchestrator has its crew's reports");
+        assert_eq!(delegation(&brain), zeron_mcp::Delegation::Off, "the Brain dump only routes");
+        assert_eq!(delegation("crew"), zeron_mcp::Delegation::Parent, "a crew thread delegates to its own");
+        assert_eq!(delegation("sub"), zeron_mcp::Delegation::Child);
+        assert_eq!(delegation("side"), zeron_mcp::Delegation::Off, "a side chat is the person's");
+        assert_eq!(delegation("plain"), zeron_mcp::Delegation::Parent);
+
+        // Orchestrators off, an orchestrator's chat is a plain top-level one.
+        core.set_orchestrators(false).await;
+        assert_eq!(delegation(&orch), zeron_mcp::Delegation::Parent, "off, a plain chat");
+        core.sessions.shutdown().await;
     }
 }

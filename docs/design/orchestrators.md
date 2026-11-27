@@ -68,7 +68,10 @@ chats, coalesced ≤ 4/s).
 ### Child kind and delegation depth
 
 - An orchestrator chat may create chats; children it creates default to `crew` (not `subagent`).
-- A **crew** thread may create subagents (one more level). Subagents still create nothing.
+- A **crew** thread may create subagents (one more level). Subagents still create nothing. With background
+  delegation on, a crew thread is a delegation parent: its subagents run in the background, it reads Waiting,
+  and it is woken with their results; orchestrators and the Brain dump stay out of delegation (`Off`) — crew
+  reports and their own wake are theirs.
 - The Brain dump may create orchestrators and standalone threads.
 - `agent_gate` ceilings follow the same rule as the voice orchestrator exemption that exists today.
 
@@ -88,7 +91,8 @@ chats, coalesced ≤ 4/s).
   and item ids. In the transcript, the wake is the `crewReports` message itself: clients render that
   message as a "Crew updates" card and **never** as a user bubble.
 - A crew thread's `send_message` to its own orchestrator is converted to a `report` with state
-  `message` (body = detail, first line = summary). This keeps older prompts and agents working.
+  `message` (body = detail, first line = summary). This keeps older prompts and agents working, and
+  `ensure_within_reach` lets it through without `peer`: it is the crew's own report path, not a peer act.
 - Orchestrator → crew `send_message` is unchanged. Crew rules are prepended once per run as a
   `[Crew rules from <orchestrator>]` block, only when they changed since the last send.
 

@@ -3320,6 +3320,35 @@ mod tests {
         child.call("send_message", json!({ "chat": "Other", "text": "hi" })).await.unwrap_err();
     }
 
+    /// A crew thread in Parent mode reports to its orchestrator with a send:
+    /// the engine files it as a report, so it's no peer act. Any other chat
+    /// is still somebody else's.
+    #[tokio::test]
+    async fn a_crew_threads_send_to_its_orchestrator_is_its_report_not_a_peer_act() {
+        let world = Arc::new(World {
+            extra_chats: vec![
+                json!({
+                    "id": "chat-crew-9", "deviceId": "dev-local", "title": "Crew",
+                    "parentChatId": "chat-alpha-1", "childKind": "crew", "archived": false,
+                    "spaceId": "space-1", "createdAt": "2026-09-03T00:00:00Z",
+                    "config": { "harness": "codex", "model": null, "reasoning": null, "sandbox": "workspace-write" },
+                }),
+                json!({
+                    "id": "chat-other-9", "deviceId": "dev-remote", "title": "Other", "archived": false,
+                    "spaceId": "space-remote", "createdAt": "2026-09-01T00:00:00Z",
+                    "config": { "harness": "codex", "model": null, "reasoning": null, "sandbox": "workspace-write" },
+                }),
+            ],
+            ..Default::default()
+        });
+        let crew = parent_tools(&world, "chat-crew-9");
+        crew.call("send_message", json!({ "chat": "Alpha", "text": "done: 3" }))
+            .await
+            .unwrap_or_else(|e| panic!("its orchestrator, no peer flag: {e}"));
+        let refused = crew.call("send_message", json!({ "chat": "Other", "text": "hi" })).await.unwrap_err();
+        assert!(refused.contains("isn't your child"), "{refused}");
+    }
+
     #[tokio::test]
     async fn a_wait_that_gives_up_goes_on_in_the_background() {
         let world = Arc::new(World::default());

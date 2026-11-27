@@ -201,6 +201,24 @@ fn a_thread_waiting_on_its_own_work_is_at_work() {
     assert!(Thread::of(Some(&c), Some(&waiting), None, true, mins(30)).live(), "its own wait");
 }
 
+#[test]
+fn a_thread_waiting_on_a_subagent_it_delegated_to_is_at_work() {
+    let c = chat("t1", "here");
+    // Its turn ended into a wait on a child chat it delegated to (Settings
+    // → General): as any wait it will be woken from, the thread is at work
+    // and the card stays Running with the wait's label.
+    let mut waiting = session("t1", SessionStatus::Idle);
+    waiting.waiting = Some(serde_json::from_value(serde_json::json!({
+        "since": mins(20),
+        "on": [{ "id": "child-1", "kind": "subagentChat", "label": "Fix the parser", "childChatId": "child-1" }],
+    }))
+    .unwrap());
+    waiting.updated_at = mins(20);
+    assert!(Thread::of(Some(&c), Some(&waiting), None, true, mins(30)).live(), "this engine's run");
+    waiting.updated_at = mins(30);
+    assert!(Thread::of(Some(&c), Some(&waiting), None, false, mins(30)).live(), "a fresh row of its host's");
+}
+
 // ── Stopped by its usage limit ──────────────────────────────────────────────
 
 fn limited(chat: &str, since: DateTime<Utc>) -> Session {

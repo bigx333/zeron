@@ -173,6 +173,21 @@ impl Tools {
         if chat.id == origin || chat.parent_chat_id.as_deref() == Some(origin) {
             return Ok(());
         }
+        // A crew thread's send to its orchestrator is its report: the
+        // engine files it as one (rpc/crew_messages.rs), so it's no peer act.
+        if self.delegation() == Delegation::Parent
+            && self
+                .zeron
+                .resolve_chat(origin)
+                .await
+                .ok()
+                .is_some_and(|own| {
+                    own.child_kind == Some(ChildKind::Crew)
+                        && own.parent_chat_id.as_deref() == Some(chat.id.as_str())
+                })
+        {
+            return Ok(());
+        }
         // What a child came to reaches its parent by itself; a message says
         // it again, in the middle of whatever the parent is doing.
         if self.delegation() == Delegation::Child
