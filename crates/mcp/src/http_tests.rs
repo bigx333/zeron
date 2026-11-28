@@ -2,6 +2,7 @@ use super::*;
 
 use crate::zeron::Zeron;
 use async_trait::async_trait;
+use futures::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zeron_rpc::{RpcError, RpcReply, RpcService, memory_client, methods};
 
@@ -11,6 +12,8 @@ use zeron_rpc::{RpcError, RpcReply, RpcService, memory_client, methods};
 struct Engine {
     awaited: Mutex<Vec<String>>,
     dropped: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// `WatchOrchestration`'s snapshot, when the test has one.
+    orchestration: Mutex<Option<Value>>,
 }
 
 struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
@@ -36,6 +39,14 @@ impl RpcService for Engine {
                 Ok(RpcReply::Value(json!({ "matched": params["taskIds"] })))
             }
             methods::LIST_PLUGIN_TOOLS => Ok(RpcReply::Value(json!({ "device": { "id": "d" }, "tools": [] }))),
+            methods::WATCH_ORCHESTRATION if lock(&self.orchestration).is_some() => {
+                let state = lock(&self.orchestration).clone().unwrap();
+                Ok(RpcReply::Stream(
+                    futures::stream::iter(vec![state])
+                        .chain(futures::stream::pending())
+                        .boxed(),
+                ))
+            }
             other => Err(RpcError::UnknownMethod(other.into())),
         }
     }
@@ -48,6 +59,7 @@ fn origin(chat: &str) -> Origin {
         side_chats_only: false,
         delegation: Default::default(),
         waits_on_background: true,
+        orchestration: false,
     }
 }
 
@@ -208,6 +220,40 @@ async fn one_run_s_token_acts_only_as_its_own_chat() {
     // Methods outside the agent scope stay shut, as on the agent IPC token.
     let refused = client.call(methods::STOP_ENGINE, json!({})).await.unwrap_err();
     assert!(refused.to_string().contains("isn't open to agents"), "{refused}");
+}
+
+#[tokio::test]
+async fn discover_reads_the_role_afresh_with_the_persons_prompt() {
+    let engine = Arc::new(Engine::default());
+    *lock(&engine.orchestration) = Some(json!({
+        "orchestrators": [{ "id": "chat-a", "kind": "standard", "name": "Ops", "goal": "g", "hue": 1,
+            "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z" }],
+        "crew": [], "items": [], "asks": [], "dumps": [],
+        "settings": { "crewAutoArchive": true, "crewIdleHours": 4, "orchestratorPrompt": "- the person's rules" },
+    }));
+    let server = server(engine.clone()).await;
+    let mut orch_origin = origin("chat-a");
+    orch_origin.orchestration = true;
+    let grant = server.grant(orch_origin).unwrap();
+    let mut headers = vec![accept(), bearer(grant.token())];
+    headers.extend(modern_headers("server/discover", None));
+    let (status, _, body) = exchange(server.port(), "POST", &headers, &modern(1, "server/discover", json!({}))).await;
+    assert_eq!(status, 200, "{body}");
+    let found: Value = serde_json::from_str(&body).unwrap();
+    let instructions = found["result"]["instructions"].as_str().unwrap();
+    assert!(instructions.contains("- the person's rules"), "{instructions}");
+    // Edited since: discovery reads it again.
+    *lock(&engine.orchestration) = Some(json!({
+        "orchestrators": [{ "id": "chat-a", "kind": "standard", "name": "Ops", "goal": "g", "hue": 1,
+            "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z" }],
+        "crew": [], "items": [], "asks": [], "dumps": [],
+        "settings": { "crewAutoArchive": true, "crewIdleHours": 4, "orchestratorPrompt": "- rewritten" },
+    }));
+    let mut headers = vec![accept(), bearer(grant.token())];
+    headers.extend(modern_headers("server/discover", None));
+    let (_, _, body) = exchange(server.port(), "POST", &headers, &modern(2, "server/discover", json!({}))).await;
+    let found: Value = serde_json::from_str(&body).unwrap();
+    assert!(found["result"]["instructions"].as_str().unwrap().contains("- rewritten"), "{body}");
 }
 
 #[tokio::test]

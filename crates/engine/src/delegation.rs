@@ -1107,6 +1107,7 @@ mod tests {
             background_tasks: Vec::new(),
             waiting: None,
             blocked_on_wait: false,
+            live: Default::default(),
         }
     }
 

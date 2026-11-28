@@ -95,6 +95,16 @@ pub(crate) fn instructions(
     format!("{base}{waits}{side_chats}").into()
 }
 
+/// What `initialize` and `server/discover` hand the agent: the server's
+/// instructions, with its role's own behind them when it has one.
+pub(crate) fn instructions_for(tools: &Tools) -> String {
+    let base = instructions(tools.waits_on_background(), tools.side_chats_only(), tools.delegation());
+    match tools.role_instructions() {
+        Some(role) => format!("{base}\n\n{role}"),
+        None => base.into_owned(),
+    }
+}
+
 /// How often a call still running reports progress. Clients abort a call
 /// that sends nothing for long enough (Claude Code: 30 minutes); a Zeron
 /// wait may run an hour.
@@ -276,6 +286,14 @@ fn route(
 /// Answer one request. Public for tests and for embedding the dispatcher
 /// behind another transport.
 pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Value) -> Value {
+    // What the chat is to orchestration picks its instructions and tools.
+    // `initialize` reads it again every time: a re-initialization picks up
+    // prompts and rules edited since this server started.
+    if method == "initialize" {
+        tools.resolve_role().await;
+    } else if matches!(method, "tools/list" | "tools/call") {
+        tools.ensure_role().await;
+    }
     match method {
         "initialize" => {
             let requested = params
@@ -296,7 +314,7 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                         "name": "zeron",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": instructions(tools.waits_on_background(), tools.side_chats_only(), tools.delegation()),
+                    "instructions": instructions_for(tools),
                 }),
             )
         }
@@ -499,6 +517,51 @@ mod tests {
         for tool in listed["result"]["tools"].as_array().unwrap() {
             assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
         }
+    }
+
+    /// An engine that answers `WatchOrchestration` with `state` (a mutex so
+    /// a test can edit the person's prompts mid-server).
+    struct Orchestrating(Mutex<Value>);
+
+    #[async_trait]
+    impl RpcService for Orchestrating {
+        async fn handle(&self, method: &str, _params: Value) -> Result<RpcReply, RpcError> {
+            match method {
+                methods::WATCH_ORCHESTRATION => Ok(RpcReply::Stream(
+                    futures::stream::iter(vec![self.0.lock().unwrap().clone()])
+                        .chain(futures::stream::pending())
+                        .boxed(),
+                )),
+                other => Err(RpcError::UnknownMethod(other.into())),
+            }
+        }
+    }
+
+    fn orch_state(prompt: &str) -> Value {
+        json!({
+            "orchestrators": [{ "id": "orch-1", "kind": "standard", "name": "Ops", "goal": "g", "hue": 1,
+                "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z" }],
+            "crew": [], "items": [], "asks": [], "dumps": [],
+            "settings": { "crewAutoArchive": true, "crewIdleHours": 4, "orchestratorPrompt": prompt },
+        })
+    }
+
+    #[tokio::test]
+    async fn initialize_reads_the_role_afresh_with_the_persons_prompt() {
+        let engine = Arc::new(Orchestrating(Mutex::new(orch_state("- the person's rules"))));
+        let tools = Arc::new(Tools::new(Arc::new(Zeron::with_client(
+            memory_client(engine.clone()),
+            Origin { chat_id: Some("orch-1".into()), orchestration: true, ..Default::default() },
+        ))));
+        let init = handle_request(&tools, json!(1), "initialize", json!({})).await;
+        let instructions = init["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.contains("- the person's rules"), "{instructions}");
+        // Edited since: a re-initialization picks it up.
+        *engine.0.lock().unwrap() = orch_state("- the person's rules, rewritten");
+        let init = handle_request(&tools, json!(2), "initialize", json!({})).await;
+        let instructions = init["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.contains("rewritten"), "{instructions}");
+        assert!(!instructions.contains("- the person's rules\n"), "the edit replaced it: {instructions}");
     }
 
     #[test]

@@ -87,6 +87,16 @@ Stop on a parent (working or waiting), or archiving it, interrupts its open chil
 results, and closes the cohort: anything that turn still tries to start is refused. A waiting parent stopped this way
 reads stopped, not finished. Each child also has its own Stop in the Subagents tray.
 
+## Orchestrators
+
+Orchestrators' chats work by their own means, so delegation leaves them alone: an orchestrator and the Brain
+dump are never in Parent or Child mode (their crew's reports and their own wake already cover what a wake
+would bring). A crew thread is a full thread: with the setting on it delegates to subagents of its own in the
+background, reads Waiting while they run, and is woken with their results. Its `send_message` to its own
+orchestrator needs no `peer: true`: the engine files it as a report. Neither does any chat's `send_message`
+to the Brain dump: the engine files it as the outcome of the route it sent, else an update for the person.
+Interrupting, answering for or archiving them still does: the engine files only messages.
+
 ## Reaching other chats
 
 With it on, an agent acts on its own children. `send_message`, `interrupt_chat`,

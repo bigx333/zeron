@@ -832,6 +832,35 @@ impl McpServer {
     /// report back by themselves (it works with them alone unless told
     /// otherwise), `child` for one of those children.
     pub const ASYNC_DELEGATION_ENV: &'static str = "ZERON_ASYNC_DELEGATION";
+    /// Set to `1` on Zeron's own server for the Brain dump's runs: it only
+    /// routes, so the driver launches it without tools that act (shell, file
+    /// edits, the web, its own subagents) and with its routing rules in the
+    /// system prompt, where they outweigh a dump that reads like a task.
+    pub const ROUTER_ONLY_ENV: &'static str = "ZERON_ROUTER_ONLY";
+
+    pub fn router_only(&self) -> bool {
+        self.env.get(Self::ROUTER_ONLY_ENV).is_some_and(|value| value == "1")
+    }
+
+    /// Set on Zeron's own server for the Brain dump's runs when the person
+    /// wrote their own routing rules (Settings → Orchestration): the driver
+    /// appends them instead of the built-in ones.
+    pub const ROUTER_PROMPT_ENV: &'static str = "ZERON_ROUTER_PROMPT";
+
+    /// The person's own routing rules for the Brain dump, when they wrote
+    /// any.
+    pub fn router_prompt(&self) -> Option<&str> {
+        self.env
+            .get(Self::ROUTER_PROMPT_ENV)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Set to `1` on Zeron's own server while Orchestrators is on where the
+    /// run's engine is: its server then offers the orchestration tools (by
+    /// the chat's role, and `ask`/`progress` to every chat) and the role's
+    /// instructions. Unset, the server is as it is without orchestration.
+    pub const ORCHESTRATION_ENV: &'static str = "ZERON_ORCHESTRATION";
 
     /// The chat Zeron's own server speaks for, set when the engine launched
     /// it for a chat's run (its in-chat tools are offered only then).
@@ -1332,6 +1361,18 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_label: Option<String>,
     },
+    /// The account's usage limit stopped this turn (a plan window, a quota:
+    /// one that resets by itself), with which window and when it resets if
+    /// the provider said. Beside the `Error`/`Done` text that tells the
+    /// person; the engine keeps it for the wait and the resume at the reset
+    /// ([`crate::usage_limit`]), never journals it or writes it to docs.
+    #[serde(rename_all = "camelCase")]
+    LimitReached {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
     Usage {
@@ -1423,6 +1464,18 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn router_prompt_reads_the_persons_own_rules() {
+        let mut server = McpServer::default();
+        assert_eq!(server.router_prompt(), None);
+        server.env.insert(McpServer::ROUTER_PROMPT_ENV.into(), "  ".into());
+        assert_eq!(server.router_prompt(), None, "blank is no override");
+        server
+            .env
+            .insert(McpServer::ROUTER_PROMPT_ENV.into(), "  - my rules  ".into());
+        assert_eq!(server.router_prompt(), Some("- my rules"));
+    }
 
     #[test]
     fn auto_ranks_between_auto_accept_edits_and_full_access() {

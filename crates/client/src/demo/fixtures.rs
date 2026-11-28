@@ -588,6 +588,7 @@ pub(crate) fn seed(
             parent_chat_id: demo.parent.map(str::to_owned),
             child_kind: demo.delegated.then_some(ChildKind::Subagent),
             sleep: None,
+            started_by: None,
         };
         doc.upsert_chat(&chat)?;
         if let Some(status) = demo.status {
@@ -610,6 +611,7 @@ pub(crate) fn seed(
                     })
                     .or_else(|| waiting_on_children(demo.id, &all, now)),
                 blocked_on_wait: false,
+                live: Default::default(),
             })?;
         }
         if let Some((until_in, slept_ago)) = demo.sleep {

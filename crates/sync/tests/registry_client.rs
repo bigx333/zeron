@@ -52,6 +52,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         last_seen_at: None,
         room_gen: None,
         sleep: None,
+        started_by: None,
     }
 }
 
@@ -131,6 +132,7 @@ async fn two_clients_converge_and_stream_live_updates() {
             updated_at: ts(3_500),
             waiting: None,
             blocked_on_wait: false,
+            live: Default::default(),
         })
         .unwrap();
     }
@@ -450,6 +452,7 @@ async fn churn_stays_bounded_no_history_growth() {
                 updated_at: ts(i + 1),
                 waiting: None,
                 blocked_on_wait: false,
+                live: Default::default(),
             })
             .unwrap();
         }
