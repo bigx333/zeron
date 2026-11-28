@@ -17,6 +17,7 @@ crates/engine/tests/cloud_killed_turn.rs  injected: None on SessionCommandPayloa
 crates/engine/tests/cloud_sleep_quiesce.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
 crates/engine/tests/cloud_wake_update.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
 crates/engine/tests/cursor_live.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
+crates/engine/tests/delegation.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field); live: Default::default() (usage limit)
 crates/engine/tests/e2e.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
 crates/engine/tests/message_queue.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
 crates/engine/tests/projectless.rs  injected: None on SessionCommandPayload Run/Steer (enum variant field)
